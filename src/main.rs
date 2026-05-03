@@ -1,82 +1,50 @@
-use std::{
-    path::Path,
-    sync::mpsc::{self, Sender},
-};
+use std::{path::Path, sync::mpsc};
 
 use anyhow::Context;
-use ffmpeg_next as ffmpeg;
+use wayland_client::Connection;
 
-#[derive(Debug)]
-struct Frame {
-    width: u32,
-    height: u32,
-}
+mod decoder;
+mod wayland;
 
 const WALLPAPER_PATH: &str = "/home/plo/dotfiles/wallpapers/animated/blue-porsche.mp4";
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    ffmpeg::init()?;
-    ffmpeg::log::set_level(ffmpeg::log::Level::Warning);
-
     let (tx, rx) = mpsc::channel();
 
     std::thread::Builder::new()
         .name("decoder".into())
         .spawn(move || {
-            if let Err(e) = run(Path::new(&WALLPAPER_PATH), tx) {
+            if let Err(e) = decoder::run(Path::new(&WALLPAPER_PATH), tx) {
                 log::error!("decoder error: {e:#}");
             }
         })?;
 
+    let conn = Connection::connect_to_env().context("connect to Wayland display")?;
+    let mut eq = conn.new_event_queue();
+    let qh = eq.handle();
+
+    let mut state = wayland::State::new(conn);
+    state.conn.display().get_registry(&qh, ());
+    eq.roundtrip(&mut state)
+        .context("initial Wayland roundtrip")?;
+
+    state.create_background_surface(&qh)?;
+    eq.roundtrip(&mut state).context("create layer surface")?;
+    state.wait_until_configured(&mut eq)?;
+
     loop {
+        state.wait_for_frame_callback(&mut eq)?;
+
         let frame = rx.recv().context("receive decoded frame")?;
         println!("{:?}", frame);
+
+        state.request_frame_callback(&qh);
+
+        eq.dispatch_pending(&mut state)
+            .context("dispatch pending Wayland events")?;
+
+        state.conn.flush().context("flush Wayland connection")?;
     }
-}
-
-fn run(path: &Path, tx: Sender<Frame>) -> anyhow::Result<()> {
-    loop {
-        match decode_file(path, &tx) {
-            Ok(()) => log::debug!("Video EOF — looping"),
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-fn decode_file(path: &Path, tx: &Sender<Frame>) -> anyhow::Result<()> {
-    let mut input =
-        ffmpeg::format::input(path).with_context(|| format!("Open {}", path.display()))?;
-
-    let stream = input
-        .streams()
-        .best(ffmpeg::media::Type::Video)
-        .context("No video stream in file")?;
-
-    let stream_idx = stream.index();
-
-    let context_decoder =
-        ffmpeg::codec::Context::from_parameters(stream.parameters()).context("Codec context")?;
-
-    let mut decoder = context_decoder.decoder().video().context("Open decoder")?;
-
-    let width = decoder.width();
-    let height = decoder.height();
-
-    for (stream, packet) in input.packets() {
-        if stream.index() != stream_idx {
-            continue;
-        }
-
-        decoder.send_packet(&packet).context("send_packet")?;
-        let mut decoded = ffmpeg::frame::Video::empty();
-
-        while decoder.receive_frame(&mut decoded).is_ok() {
-            tx.send(Frame { width, height })?;
-        }
-    }
-
-    decoder.send_eof()?;
-    Ok(())
 }
