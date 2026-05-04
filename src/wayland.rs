@@ -93,6 +93,14 @@ impl State {
             .frame(qh, ());
         self.frame_callback_pending = true;
     }
+
+    pub fn surface(&self) -> anyhow::Result<&wl_surface::WlSurface> {
+        self.surface.as_ref().context("wl_surface missing")
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.width.max(1), self.height.max(1))
+    }
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
