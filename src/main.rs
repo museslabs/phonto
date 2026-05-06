@@ -1,7 +1,6 @@
 use std::{path::Path, sync::mpsc};
 
 use anyhow::Context;
-use glow::HasContext;
 use wayland_client::{Connection, EventQueue, QueueHandle};
 
 mod decoder;
@@ -42,7 +41,7 @@ impl Phonto {
     }
 
     fn play(&mut self) -> anyhow::Result<()> {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(2);
         let (width, height) = self.state.size();
 
         std::thread::Builder::new()
@@ -55,18 +54,12 @@ impl Phonto {
 
         loop {
             self.state.wait_for_frame_callback(&mut self.eq)?;
-
-            let _frame = rx.recv().context("receive decoded frame")?;
-            // println!("{:?}", frame);
-
+            let frame = rx.recv().context("receive decoded frame")?;
             self.state.request_frame_callback(&self.qh);
-
-            self.renderer.render()?;
-
+            self.renderer.render(&frame)?;
             self.eq
                 .dispatch_pending(&mut self.state)
                 .context("dispatch pending Wayland events")?;
-
             self.state
                 .conn
                 .flush()
