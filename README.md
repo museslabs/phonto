@@ -1,6 +1,6 @@
 # Phonto
 
-Live wallpaper program for wayland compositors written in rust.
+GPU-accelerated video wallpaper program for wayland compositors written in rust
 
 Phonto plays videos as your desktop background with minimal overhead, decoding and rendering entirely on the GPU through gstreamer and EGL.
 
