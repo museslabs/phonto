@@ -17,3 +17,4 @@ gstreamer-app = "0.24"
 gstreamer-video = "0.24"
 gstreamer-gl = "0.24"
 gstreamer-gl-egl = "0.24"
+clap = { version = "4.6.1", features = ["derive"] }
