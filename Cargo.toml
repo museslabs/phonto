@@ -4,16 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-wayland-client = "0.31"
-wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols-wlr = { version = "0.2", features = ["client"] }
-ffmpeg-next = "8"
-ffmpeg-sys-next = "8"
 anyhow = "1.0.102"
-wayland-protocols = { version = "0.32.12", features = ["client"] }
 env_logger = "0.11.10"
 log = "0.4.29"
 glow = "0.17.0"
 glutin = "0.32.3"
 raw-window-handle = "0.6.2"
-wayland-egl = "0.32.11"
+gstreamer = "0.24"
+gstreamer-app = "0.24"
+gstreamer-video = "0.24"
+gstreamer-gl = "0.24"
+gstreamer-gl-egl = "0.24"

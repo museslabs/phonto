@@ -4,9 +4,11 @@ use anyhow::{Context, anyhow};
 use glow::HasContext;
 use glutin::{
     config::{Config, ConfigTemplateBuilder},
-    context::{ContextApi, ContextAttributesBuilder, PossiblyCurrentContext},
-    display::{Display, DisplayApiPreference},
-    prelude::{GlDisplay, NotCurrentGlContext},
+    context::{
+        AsRawContext, ContextApi, ContextAttributesBuilder, PossiblyCurrentContext, RawContext,
+    },
+    display::{AsRawDisplay, Display, DisplayApiPreference, RawDisplay as GlRawDisplay},
+    prelude::{GlDisplay, NotCurrentGlContext, PossiblyCurrentGlContext},
     surface::{GlSurface, Surface, SurfaceAttributesBuilder, SwapInterval, WindowSurface},
 };
 use raw_window_handle::{
@@ -18,12 +20,10 @@ use crate::decoder;
 
 pub struct GlRenderer {
     gl: glow::Context,
+    egl_display: usize,
+    egl_context: usize,
     surface: Surface<WindowSurface>,
     context: PossiblyCurrentContext,
-
-    program: glow::NativeProgram,
-    vbo: glow::NativeBuffer,
-    texture: glow::NativeTexture,
 }
 
 impl GlRenderer {
@@ -55,6 +55,16 @@ impl GlRenderer {
         let gl_surface = Self::create_surface(wl_surface, width, height, &gl_display, &gl_config)?;
         let gl_context = Self::create_context(&gl_display, &gl_config, &gl_surface)?;
 
+        let egl_display = match gl_display.raw_display() {
+            GlRawDisplay::Egl(display) => display as usize,
+            _ => return Err(anyhow!("expected EGL display")),
+        };
+
+        let egl_context = match gl_context.raw_context() {
+            RawContext::Egl(ctx) => ctx as usize,
+            _ => return Err(anyhow!("expected EGL context")),
+        };
+
         gl_surface.set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::MIN))?;
 
         let gl = unsafe {
@@ -68,77 +78,66 @@ impl GlRenderer {
             let fragment = Self::compile_shader(&gl, glow::FRAGMENT_SHADER, Self::FRAGMENT_SHADER)?;
             let program = Self::link_program(&gl, vertex, fragment)?;
 
-            let vbo = gl.create_buffer().map_err(|e| anyhow::anyhow!(e))?;
+            gl.use_program(Some(program));
+
+            let tex_loc = gl
+                .get_uniform_location(program, "u_tex")
+                .context("u_tex not found")?;
+
+            gl.uniform_1_i32(Some(&tex_loc), 0);
+
+            let vbo = gl.create_buffer().map_err(|e| anyhow!(e))?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
             // Fullscreen quad as triangle strip: BL, BR, TL, TR
             let verts: [f32; 8] = [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
             let bytes = std::slice::from_raw_parts(verts.as_ptr().cast::<u8>(), verts.len() * 4);
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
 
-            let texture = gl.create_texture().map_err(|e| anyhow::anyhow!(e))?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::LINEAR as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::LINEAR as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
+            let pos_loc = gl
+                .get_attrib_location(program, "a_pos")
+                .context("a_pos not found")?;
+
+            gl.enable_vertex_attrib_array(pos_loc);
+            gl.vertex_attrib_pointer_f32(pos_loc, 2, glow::FLOAT, false, 8, 0);
+            gl.active_texture(glow::TEXTURE0);
 
             Ok(Self {
                 gl,
+                egl_display,
+                egl_context,
                 surface: gl_surface,
                 context: gl_context,
-                program,
-                texture,
-                vbo,
             })
         }
     }
 
+    pub fn egl_display(&self) -> usize {
+        self.egl_display
+    }
+
+    pub fn egl_context(&self) -> usize {
+        self.egl_context
+    }
+
+    pub fn make_current(&self) -> anyhow::Result<()> {
+        self.context
+            .make_current(&self.surface)
+            .context("make-current glutin context")
+    }
+
     pub fn render(&self, frame: &decoder::Frame) -> anyhow::Result<()> {
+        let texture =
+            glow::NativeTexture(NonZeroU32::new(frame.texture_id).context("zero GL texture id")?);
+
         unsafe {
-            self.gl.use_program(Some(self.program));
-
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(self.texture));
-            self.gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA as i32,
-                frame.width as i32,
-                frame.height as i32,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(&frame.data)),
-            );
-
-            self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-            let loc = self
-                .gl
-                .get_attrib_location(self.program, "a_pos")
-                .context("a_pos not found")?;
-            self.gl.enable_vertex_attrib_array(loc);
-            self.gl
-                .vertex_attrib_pointer_f32(loc, 2, glow::FLOAT, false, 8, 0);
-
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
-            self.surface.swap_buffers(&self.context)?;
         }
+
+        self.surface
+            .swap_buffers(&self.context)
+            .context("swap_buffers")?;
+
         Ok(())
     }
 }
@@ -185,7 +184,7 @@ impl GlRenderer {
             NonZeroU32::new(height).context("zero height")?,
         );
 
-        unsafe { gl_display.create_window_surface(&gl_config, &gl_surface_attrs) }
+        unsafe { gl_display.create_window_surface(gl_config, &gl_surface_attrs) }
             .context("create_window_surface")
     }
 
@@ -198,9 +197,9 @@ impl GlRenderer {
             .with_context_api(ContextApi::Gles(None))
             .build(None);
 
-        unsafe { gl_display.create_context(&gl_config, &gl_context_attrs) }
+        unsafe { gl_display.create_context(gl_config, &gl_context_attrs) }
             .context("create_context")?
-            .make_current(&gl_surface)
+            .make_current(gl_surface)
             .context("eglMakeCurrent")
     }
 

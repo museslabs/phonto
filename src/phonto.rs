@@ -39,25 +39,40 @@ impl Phonto {
     }
 
     pub fn play(&mut self, wallpaper_path: String) -> anyhow::Result<()> {
-        let (tx, rx) = mpsc::sync_channel(2);
-        let (width, height) = self.state.size();
+        let (tx, rx) = mpsc::sync_channel(1);
 
+        let (gl_display, gl_context) =
+            decoder::wrap_gl(self.renderer.egl_display(), self.renderer.egl_context())?;
+
+        self.renderer.make_current()?;
+
+        let decoder_gl_context = gl_context.clone();
         std::thread::Builder::new()
             .name("decoder".into())
             .spawn(move || {
-                if let Err(e) = decoder::run(Path::new(&wallpaper_path), tx, width, height) {
+                if let Err(e) = decoder::run(
+                    Path::new(&wallpaper_path),
+                    gl_display,
+                    decoder_gl_context,
+                    tx,
+                ) {
                     log::error!("decoder error: {e:#}");
                 }
             })?;
 
         loop {
             self.state.wait_for_frame_callback(&mut self.eq)?;
-            let frame = rx.recv().context("receive decoded frame")?;
+
+            let sample = rx.recv().context("receive decoded sample")?;
+            let frame = decoder::sample_to_frame(sample, &gl_context)?;
+
             self.state.request_frame_callback(&self.qh);
             self.renderer.render(&frame)?;
+
             self.eq
                 .dispatch_pending(&mut self.state)
                 .context("dispatch pending Wayland events")?;
+
             self.state
                 .conn
                 .flush()
