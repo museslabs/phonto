@@ -1,6 +1,6 @@
 [package]
 name = "phonto"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "GPU-accelerated video wallpaper program for wayland compositors & MacOS"
