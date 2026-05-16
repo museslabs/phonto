@@ -1,6 +1,6 @@
 [package]
 name = "phonto"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "GPU-accelerated video wallpaper program for wayland compositors & MacOS"
@@ -16,6 +16,9 @@ anyhow = "1.0.102"
 env_logger = "0.11.10"
 log = "0.4.29"
 clap = { version = "4.6.1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+rand = "0.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 glow = "0.17.0"

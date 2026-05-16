@@ -58,6 +58,32 @@ No external dependencies. phonto links against system frameworks (`AVFoundation`
 
 ## Usage
 
+Play a specific video:
 ```bash
-phonto /path/to/video
+phonto /path/to/video.mp4
 ```
+
+Play a random wallpaper from your configured search paths:
+```bash
+phonto --rand
+```
+
+## Configuration
+
+Phonto reads its config from `$XDG_CONFIG_HOME/phonto/config.toml`, falling back to `~/.config/phonto/config.toml`.
+
+### `search_paths`
+
+A list of directories to scan when using `--rand`. Each entry has a `path` and a `depth` controlling how many levels deep to search.
+
+```toml
+[[search_paths]]
+path = "/home/user/wallpapers"
+depth = 1
+
+[[search_paths]]
+path = "/mnt/media/videos"
+depth = 2
+```
+
+`depth = 0` scans only the top-level directory. `depth = 1` includes one level of subdirectories, and so on.
