@@ -16,7 +16,7 @@ use raw_window_handle::{
 };
 use wayland_client::{Proxy, protocol::wl_surface::WlSurface};
 
-use crate::decoder;
+use super::decoder;
 
 pub struct GlRenderer {
     gl: glow::Context,
