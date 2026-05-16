@@ -4,8 +4,18 @@ pub trait Backend {
     fn run(self: Box<Self>, video_path: String) -> anyhow::Result<()>;
 }
 
+#[cfg(target_os = "linux")]
 mod wayland;
 
+#[cfg(target_os = "linux")]
 pub fn init() -> anyhow::Result<Box<dyn Backend>> {
     Ok(Box::new(wayland::WaylandBackend::new()?))
+}
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(target_os = "macos")]
+pub fn init() -> anyhow::Result<Box<dyn Backend>> {
+    Ok(Box::new(macos::MacosBackend::new()?))
 }
