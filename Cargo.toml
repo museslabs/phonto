@@ -12,17 +12,60 @@ categories = ["multimedia"]
 exclude = ["example.gif", "target/*", "nix/*", "flake.*", "shell.nix", "install.sh", "todo.md", "CLAUDE.md", ".github/*", ".claude/*"]
 
 [dependencies]
-wayland-client = { version = "0.31", features = ["system"] }
-wayland-protocols-wlr = { version = "0.2", features = ["client"] }
 anyhow = "1.0.102"
 env_logger = "0.11.10"
 log = "0.4.29"
+clap = { version = "4.6.1", features = ["derive"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 glow = "0.17.0"
-glutin = "0.32.3"
-raw-window-handle = "0.6.2"
 gstreamer = "0.24"
 gstreamer-app = "0.24"
 gstreamer-video = "0.24"
 gstreamer-gl = "0.24"
 gstreamer-gl-egl = "0.24"
-clap = { version = "4.6.1", features = ["derive"] }
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-protocols-wlr = { version = "0.2", features = ["client"] }
+glutin = "0.32.3"
+raw-window-handle = "0.6.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSDate",
+    "NSRunLoop",
+    "NSObjCRuntime",
+    "NSNotification",
+    "NSString",
+    "NSURL",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-quartz-core",
+    "objc2-core-foundation",
+    "NSApplication",
+    "NSRunningApplication",
+    "NSWindow",
+    "NSView",
+    "NSResponder",
+    "NSScreen",
+    "NSColor",
+    "NSGraphics",
+    "NSEvent",
+] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+objc2-core-foundation = "0.3"
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-media",
+    "objc2-quartz-core",
+    "AVPlayer",
+    "AVPlayerItem",
+    "AVPlayerLayer",
+    "AVAsset",
+    "AVAnimation",
+] }
+objc2-core-media = { version = "0.3", default-features = false, features = [
+    "std",
+    "CMTime",
+] }
