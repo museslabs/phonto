@@ -2,9 +2,9 @@
 
 > phonto (/'fon.to/) — from Greek φόντο: background
 
-GPU-accelerated video wallpaper program for wayland compositors written in rust
+GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust.
 
-Phonto plays videos as your desktop background with minimal overhead, decoding and rendering entirely on the GPU through gstreamer and EGL.
+On Linux, phonto plays videos as your desktop background with minimal overhead, decoding and rendering entirely on the GPU through GStreamer and EGL. On macOS it drives an `AVPlayerLayer` attached to a window sitting just below the system wallpaper level, so VideoToolbox handles decoding and CoreAnimation handles compositing.
 
 ## Installation
 
@@ -24,6 +24,8 @@ cargo build --release
 
 ## Dependencies
 
+### Linux (Wayland)
+
 Phonto requires GStreamer and a VA-API GStreamer plugin for GPU-accelerated decoding. Without the VA-API plugin, GStreamer falls back to software decoding and CPU usage will be significantly higher.
 
 **Arch Linux:**
@@ -40,6 +42,10 @@ sudo apt install gstreamer1.0-vaapi
 ```bash
 sudo dnf install gstreamer1-vaapi
 ```
+
+### macOS
+
+No external dependencies. phonto links against system frameworks (`AVFoundation`, `CoreMedia`, `AppKit`, `QuartzCore`). Decoding goes through VideoToolbox automatically for codecs the OS supports (H.264, HEVC, ProRes, etc.).
 
 ## Usage
 
