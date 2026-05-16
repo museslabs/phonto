@@ -19,6 +19,7 @@ use objc2_quartz_core::CAAutoresizingMask;
 use self::loop_observer::LoopObserver;
 use self::screen_observer::ScreenObserver;
 use super::Backend;
+use crate::scale::ScaleMode;
 
 // One below kCGDesktopWindowLevel so a static system wallpaper sits on top of us.
 const WALLPAPER_LEVEL: isize = -2_147_483_624;
@@ -28,7 +29,7 @@ pub struct MacosBackend {
 }
 
 impl MacosBackend {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(_scale: ScaleMode) -> anyhow::Result<Self> {
         let mtm = MainThreadMarker::new()
             .context("macOS backend must be constructed on the main thread")?;
         Ok(Self { mtm })
@@ -140,3 +141,5 @@ impl Backend for MacosBackend {
         Ok(())
     }
 }
+
+

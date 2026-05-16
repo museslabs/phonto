@@ -1,9 +1,12 @@
 mod backend;
 mod config;
+mod scale;
 mod wallpaper;
 
 use backend::Backend;
 use clap::Parser;
+
+use scale::ScaleMode;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -15,6 +18,10 @@ struct Args {
     /// Play a random wallpaper from your playlist
     #[arg(long, conflicts_with = "path")]
     rand: bool,
+
+    /// How to fit the video to the screen.
+    #[arg(long, value_enum, default_value_t = ScaleMode::Fill)]
+    scale: ScaleMode,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -35,8 +42,8 @@ fn main() -> anyhow::Result<()> {
     };
 
     #[cfg(target_os = "linux")]
-    return backend::wayland::WaylandBackend::new()?.run(path);
+    return backend::wayland::WaylandBackend::new(args.scale)?.run(path);
 
     #[cfg(target_os = "macos")]
-    return backend::macos::MacosBackend::new()?.run(path);
+    return backend::macos::MacosBackend::new(args.scale)?.run(path);
 }

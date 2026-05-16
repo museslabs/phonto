@@ -12,6 +12,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_l
 
 use self::gl_renderer::GlRenderer;
 use super::Backend;
+use crate::scale::ScaleMode;
 
 pub struct WaylandBackend {
     state: State,
@@ -21,7 +22,7 @@ pub struct WaylandBackend {
 }
 
 impl WaylandBackend {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(_scale: ScaleMode) -> anyhow::Result<Self> {
         let conn = Connection::connect_to_env().context("connect to Wayland display")?;
         let mut eq = conn.new_event_queue();
         let qh = eq.handle();
