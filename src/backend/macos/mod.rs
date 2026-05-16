@@ -1,12 +1,14 @@
 mod loop_observer;
+mod screen_observer;
 
 use std::path::Path;
 
 use anyhow::Context;
 use objc2::sel;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSScreen, NSView,
-    NSWindow, NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy,
+    NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSColor, NSScreen,
+    NSView, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
 };
 use objc2_av_foundation::{
     AVPlayer, AVPlayerItem, AVPlayerItemDidPlayToEndTimeNotification, AVPlayerLayer,
@@ -15,6 +17,7 @@ use objc2_foundation::{MainThreadMarker, NSNotificationCenter, NSString, NSURL};
 use objc2_quartz_core::CAAutoresizingMask;
 
 use self::loop_observer::LoopObserver;
+use self::screen_observer::ScreenObserver;
 use super::Backend;
 
 // One below kCGDesktopWindowLevel so a static system wallpaper sits on top of us.
@@ -109,6 +112,17 @@ impl Backend for MacosBackend {
             );
         }
 
+        // Re-apply geometry on display reconfiguration.
+        let screen_observer = ScreenObserver::new(window.clone(), player_layer.clone());
+        unsafe {
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                &screen_observer,
+                sel!(screensChanged:),
+                Some(NSApplicationDidChangeScreenParametersNotification),
+                None,
+            );
+        }
+
         window.makeKeyAndOrderFront(None);
         unsafe { player.play() };
 
@@ -121,6 +135,7 @@ impl Backend for MacosBackend {
 
         app.run();
         drop(loop_observer);
+        drop(screen_observer);
 
         Ok(())
     }
