@@ -11,7 +11,9 @@ use objc2_app_kit::{
     NSView, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
 };
 use objc2_av_foundation::{
-    AVPlayer, AVPlayerItem, AVPlayerItemDidPlayToEndTimeNotification, AVPlayerLayer,
+    AVLayerVideoGravity, AVLayerVideoGravityResize, AVLayerVideoGravityResizeAspect,
+    AVLayerVideoGravityResizeAspectFill, AVPlayer, AVPlayerItem,
+    AVPlayerItemDidPlayToEndTimeNotification, AVPlayerLayer,
 };
 use objc2_foundation::{MainThreadMarker, NSNotificationCenter, NSString, NSURL};
 use objc2_quartz_core::CAAutoresizingMask;
@@ -26,19 +28,21 @@ const WALLPAPER_LEVEL: isize = -2_147_483_624;
 
 pub struct MacosBackend {
     mtm: MainThreadMarker,
+    scale: ScaleMode,
 }
 
 impl MacosBackend {
-    pub fn new(_scale: ScaleMode) -> anyhow::Result<Self> {
+    pub fn new(scale: ScaleMode) -> anyhow::Result<Self> {
         let mtm = MainThreadMarker::new()
             .context("macOS backend must be constructed on the main thread")?;
-        Ok(Self { mtm })
+        Ok(Self { mtm, scale })
     }
 }
 
 impl Backend for MacosBackend {
     fn run(self, video_path: String) -> anyhow::Result<()> {
         let mtm = self.mtm;
+        let scale = self.scale;
 
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -90,6 +94,9 @@ impl Backend for MacosBackend {
         }
 
         let player_layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(&player)) };
+        if let Some(gravity) = video_gravity_for(scale) {
+            unsafe { player_layer.setVideoGravity(gravity) };
+        }
         player_layer.setFrame(content_view.bounds());
         player_layer.setAutoresizingMask(
             CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
@@ -142,4 +149,14 @@ impl Backend for MacosBackend {
     }
 }
 
-
+fn video_gravity_for(scale: ScaleMode) -> Option<&'static AVLayerVideoGravity> {
+    unsafe {
+        match scale {
+            ScaleMode::Stretch => AVLayerVideoGravityResize,
+            ScaleMode::Fit => AVLayerVideoGravityResizeAspect,
+            // AVPlayerLayer has no native "center at native size" mode; fall
+            // back to aspect-fill for Center until that's wired up properly.
+            ScaleMode::Fill | ScaleMode::Center => AVLayerVideoGravityResizeAspectFill,
+        }
+    }
+}
