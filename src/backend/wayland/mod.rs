@@ -48,7 +48,7 @@ impl WaylandBackend {
 }
 
 impl Backend for WaylandBackend {
-    fn run(mut self: Box<Self>, video_path: String) -> anyhow::Result<()> {
+    fn run(mut self, video_path: String) -> anyhow::Result<()> {
         let (tx, rx) = mpsc::sync_channel(1);
 
         let (gl_display, gl_context) =

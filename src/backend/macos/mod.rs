@@ -36,7 +36,7 @@ impl MacosBackend {
 }
 
 impl Backend for MacosBackend {
-    fn run(self: Box<Self>, video_path: String) -> anyhow::Result<()> {
+    fn run(self, video_path: String) -> anyhow::Result<()> {
         let mtm = self.mtm;
 
         let app = NSApplication::sharedApplication(mtm);

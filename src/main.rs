@@ -1,6 +1,6 @@
 mod backend;
-mod phonto;
 
+use backend::Backend;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -13,5 +13,10 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = Args::parse();
-    phonto::run(args.path)
+
+    #[cfg(target_os = "linux")]
+    return backend::wayland::WaylandBackend::new()?.run(args.path);
+
+    #[cfg(target_os = "macos")]
+    return backend::macos::MacosBackend::new()?.run(args.path);
 }
