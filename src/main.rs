@@ -1,10 +1,7 @@
-mod decoder;
-mod gl_renderer;
-mod phonto;
-mod wayland;
+mod backend;
 
+use backend::Backend;
 use clap::Parser;
-use phonto::Phonto;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -16,6 +13,10 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args = Args::parse();
-    let mut phonto = Phonto::new()?;
-    phonto.play(String::from(args.path))
+
+    #[cfg(target_os = "linux")]
+    return backend::wayland::WaylandBackend::new()?.run(args.path);
+
+    #[cfg(target_os = "macos")]
+    return backend::macos::MacosBackend::new()?.run(args.path);
 }

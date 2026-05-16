@@ -1,3 +1,8 @@
+mod decoder;
+mod gl_renderer;
+
+use std::{path::Path, sync::mpsc};
+
 use anyhow::Context;
 use wayland_client::{
     Connection, Dispatch, EventQueue, QueueHandle, delegate_noop,
@@ -5,8 +10,89 @@ use wayland_client::{
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
-pub struct State {
-    pub conn: Connection,
+use self::gl_renderer::GlRenderer;
+use super::Backend;
+
+pub struct WaylandBackend {
+    state: State,
+    eq: EventQueue<State>,
+    qh: QueueHandle<State>,
+    renderer: GlRenderer,
+}
+
+impl WaylandBackend {
+    pub fn new() -> anyhow::Result<Self> {
+        let conn = Connection::connect_to_env().context("connect to Wayland display")?;
+        let mut eq = conn.new_event_queue();
+        let qh = eq.handle();
+
+        let mut state = State::new(conn);
+        state.conn.display().get_registry(&qh, ());
+        eq.roundtrip(&mut state)
+            .context("initial Wayland roundtrip")?;
+
+        state.create_background_surface(&qh)?;
+        eq.roundtrip(&mut state).context("create layer surface")?;
+        state.wait_until_configured(&mut eq)?;
+
+        let (width, height) = state.size();
+        let renderer = GlRenderer::new(&state.conn, state.surface()?, width, height)?;
+
+        Ok(Self {
+            state,
+            eq,
+            qh,
+            renderer,
+        })
+    }
+}
+
+impl Backend for WaylandBackend {
+    fn run(mut self, video_path: String) -> anyhow::Result<()> {
+        let (tx, rx) = mpsc::sync_channel(1);
+
+        let (gl_display, gl_context) =
+            decoder::wrap_gl(self.renderer.egl_display(), self.renderer.egl_context())?;
+
+        self.renderer.make_current()?;
+
+        let decoder_gl_context = gl_context.clone();
+        std::thread::Builder::new()
+            .name("decoder".into())
+            .spawn(move || {
+                if let Err(e) = decoder::run(
+                    Path::new(&video_path),
+                    gl_display,
+                    decoder_gl_context,
+                    tx,
+                ) {
+                    log::error!("decoder error: {e:#}");
+                }
+            })?;
+
+        loop {
+            self.state.wait_for_frame_callback(&mut self.eq)?;
+
+            let sample = rx.recv().context("receive decoded sample")?;
+            let frame = decoder::sample_to_frame(sample, &gl_context)?;
+
+            self.state.request_frame_callback(&self.qh);
+            self.renderer.render(&frame)?;
+
+            self.eq
+                .dispatch_pending(&mut self.state)
+                .context("dispatch pending Wayland events")?;
+
+            self.state
+                .conn
+                .flush()
+                .context("flush Wayland connection")?;
+        }
+    }
+}
+
+struct State {
+    conn: Connection,
     compositor: Option<wl_compositor::WlCompositor>,
     layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
     width: u32,
@@ -18,7 +104,7 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(conn: Connection) -> Self {
+    fn new(conn: Connection) -> Self {
         Self {
             conn,
             compositor: None,
@@ -32,7 +118,7 @@ impl State {
         }
     }
 
-    pub fn create_background_surface(&mut self, qh: &QueueHandle<Self>) -> anyhow::Result<()> {
+    fn create_background_surface(&mut self, qh: &QueueHandle<Self>) -> anyhow::Result<()> {
         let compositor = self.compositor.as_ref().context("wl_compositor missing")?;
         let layer_shell = self
             .layer_shell
@@ -62,10 +148,7 @@ impl State {
         Ok(())
     }
 
-    pub fn wait_until_configured(
-        &mut self,
-        event_queue: &mut EventQueue<Self>,
-    ) -> anyhow::Result<()> {
+    fn wait_until_configured(&mut self, event_queue: &mut EventQueue<Self>) -> anyhow::Result<()> {
         while !self.configured {
             event_queue
                 .blocking_dispatch(self)
@@ -74,7 +157,7 @@ impl State {
         Ok(())
     }
 
-    pub fn wait_for_frame_callback(
+    fn wait_for_frame_callback(
         &mut self,
         event_queue: &mut EventQueue<Self>,
     ) -> anyhow::Result<()> {
@@ -86,7 +169,7 @@ impl State {
         Ok(())
     }
 
-    pub fn request_frame_callback(&mut self, qh: &QueueHandle<Self>) {
+    fn request_frame_callback(&mut self, qh: &QueueHandle<Self>) {
         self.surface
             .as_ref()
             .expect("wl_surface missing")
@@ -94,11 +177,11 @@ impl State {
         self.frame_callback_pending = true;
     }
 
-    pub fn surface(&self) -> anyhow::Result<&wl_surface::WlSurface> {
+    fn surface(&self) -> anyhow::Result<&wl_surface::WlSurface> {
         self.surface.as_ref().context("wl_surface missing")
     }
 
-    pub fn size(&self) -> (u32, u32) {
+    fn size(&self) -> (u32, u32) {
         (self.width.max(1), self.height.max(1))
     }
 }
