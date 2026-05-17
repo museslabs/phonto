@@ -30,7 +30,18 @@ define_class!(
             is_preview: bool,
         ) -> Option<Retained<Self>> {
             let this = this.set_ivars(Ivars::default());
-            unsafe { msg_send![super(this), initWithFrame: frame, isPreview: is_preview] }
+            let this: Option<Retained<Self>> =
+                unsafe { msg_send![super(this), initWithFrame: frame, isPreview: is_preview] };
+            // When legacyScreenSaver hosts us as a wallpaper (via the
+            // com.apple.wallpaper.choice.screen-saver provider), it instantiates
+            // the view but never calls startAnimation — the view is treated as
+            // a static surface and you only see the first decoded frame. Kick
+            // playback off here so playback starts regardless of whether the
+            // host lifecycle is "screen saver" or "wallpaper".
+            if let Some(ref view) = this {
+                view.install_player();
+            }
+            this
         }
 
         #[unsafe(method(startAnimation))]
@@ -49,6 +60,12 @@ define_class!(
 
 impl PhontoScreenSaverView {
     fn install_player(&self) {
+        // We get called from both initWithFrame: (so wallpaper-hosting works)
+        // and startAnimation (so the actual screensaver path works). Bail if
+        // we've already set up — otherwise we'd leak a player + decoder.
+        if self.ivars().player.borrow().is_some() {
+            return;
+        }
         let Some(url) = wallpaper_url() else {
             return;
         };

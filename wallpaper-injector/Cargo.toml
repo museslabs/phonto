@@ -15,3 +15,18 @@ clap = { version = "4", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v5"] }
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSDictionary",
+    "NSError",
+    "NSObjCRuntime",
+    "NSString",
+    "NSURL",
+] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "AVAsset",
+    "AVAssetExportSession",
+    "AVMediaFormat",
+] }

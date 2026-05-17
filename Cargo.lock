@@ -1094,7 +1094,11 @@ name = "phonto-wallpaper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "block2",
  "clap",
+ "objc2",
+ "objc2-av-foundation",
+ "objc2-foundation",
  "serde_json",
  "tempfile",
  "uuid",
