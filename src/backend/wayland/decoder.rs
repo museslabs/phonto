@@ -13,6 +13,8 @@ use gstreamer_video as gst_video;
 
 pub struct Frame {
     pub texture_id: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 pub fn run(
@@ -117,7 +119,11 @@ pub fn sample_to_frame(
         .texture_id(0)
         .context("GLVideoFrame texture id missing")?;
 
-    Ok(Frame { texture_id })
+    Ok(Frame {
+        texture_id,
+        width: info.width(),
+        height: info.height(),
+    })
 }
 
 pub fn wrap_gl(

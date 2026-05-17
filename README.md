@@ -87,3 +87,17 @@ depth = 2
 ```
 
 `depth = 0` scans only the top-level directory. `depth = 1` includes one level of subdirectories, and so on.
+### Fit modes
+
+`--scale` controls how the video fits to the screen:
+
+- `stretch` — distort to fill, aspect not preserved.
+- `fit` — preserve aspect, letterbox to fit inside.
+- `fill` — preserve aspect, crop overflow to fill (default).
+- `center` — render at native pixel size, centered.
+
+```bash
+phonto /path/to/video --scale fit
+```
+
+On macOS, `center` currently falls back to `fill` (`AVPlayerLayer` has no native equivalent).
