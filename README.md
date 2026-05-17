@@ -101,3 +101,18 @@ phonto /path/to/video --scale fit
 ```
 
 On macOS, `center` currently falls back to `fill` (`AVPlayerLayer` has no native equivalent).
+
+### Battery pausing
+
+Stop playback when the laptop is unplugged or charge drops below a threshold. The two flags are mutually exclusive.
+
+- `--pause-on-battery` — pause whenever the system is on battery, resume on AC.
+- `--pause-below PERCENT` — pause when on battery *and* charge is below `PERCENT` (1–100). Always plays on AC.
+
+```bash
+phonto /path/to/video --pause-on-battery
+phonto /path/to/video --pause-below 30
+```
+
+> [!NOTE]
+> Pausing on battery is macOS-only. On Wayland, passing either flag exits with an error.
