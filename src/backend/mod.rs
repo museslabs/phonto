@@ -2,7 +2,15 @@ use crate::scale::ScaleMode;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RunOptions {
+    pub pause: PauseMode,
     pub scale: ScaleMode,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub enum PauseMode {
+    #[default]
+    Never,
+    OnBattery,
 }
 
 pub trait Backend {

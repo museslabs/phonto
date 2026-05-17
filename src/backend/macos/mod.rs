@@ -1,3 +1,4 @@
+mod battery_observer;
 mod loop_observer;
 mod screen_observer;
 
@@ -18,9 +19,10 @@ use objc2_av_foundation::{
 use objc2_foundation::{MainThreadMarker, NSNotificationCenter, NSString, NSURL};
 use objc2_quartz_core::CAAutoresizingMask;
 
+use self::battery_observer::BatteryObserver;
 use self::loop_observer::LoopObserver;
 use self::screen_observer::ScreenObserver;
-use super::{Backend, RunOptions};
+use super::{Backend, PauseMode, RunOptions};
 use crate::scale::ScaleMode;
 
 // One below kCGDesktopWindowLevel so a static system wallpaper sits on top of us.
@@ -131,7 +133,15 @@ impl Backend for MacosBackend {
         }
 
         window.makeKeyAndOrderFront(None);
-        unsafe { player.play() };
+
+        let battery_observer = if matches!(options.pause, PauseMode::Never) {
+            None
+        } else {
+            BatteryObserver::install(player.clone(), options.pause)
+        };
+        if battery_observer.is_none() {
+            unsafe { player.play() };
+        }
 
         log::info!(
             "macOS backend ready: {}x{} window at level {}",
@@ -143,6 +153,7 @@ impl Backend for MacosBackend {
         app.run();
         drop(loop_observer);
         drop(screen_observer);
+        drop(battery_observer);
 
         Ok(())
     }

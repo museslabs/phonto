@@ -11,7 +11,7 @@ use wayland_client::{
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 use self::gl_renderer::GlRenderer;
-use super::{Backend, RunOptions};
+use super::{Backend, PauseMode, RunOptions};
 
 pub struct WaylandBackend {
     state: State,
@@ -49,6 +49,9 @@ impl WaylandBackend {
 
 impl Backend for WaylandBackend {
     fn run(mut self, video_path: String, options: RunOptions) -> anyhow::Result<()> {
+        if !matches!(options.pause, PauseMode::Never) {
+            anyhow::bail!("battery-based pausing is not supported on Wayland yet");
+        }
         let (tx, rx) = mpsc::sync_channel(1);
 
         let (gl_display, gl_context) =

@@ -3,7 +3,7 @@ mod config;
 mod scale;
 mod wallpaper;
 
-use backend::{Backend, RunOptions};
+use backend::{Backend, PauseMode, RunOptions};
 use clap::Parser;
 
 use scale::ScaleMode;
@@ -22,6 +22,10 @@ struct Args {
     /// How to fit the video to the screen.
     #[arg(long, value_enum, default_value_t = ScaleMode::Fill)]
     scale: ScaleMode,
+
+    /// Pause playback while the system is on battery (macOS only)
+    #[arg(long)]
+    pause_on_battery: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -41,7 +45,14 @@ fn main() -> anyhow::Result<()> {
             .expect("clap ensures path is set when --rand is not used")
     };
 
-    let options = RunOptions { scale: args.scale };
+    let options = RunOptions {
+        pause: if args.pause_on_battery {
+            PauseMode::OnBattery
+        } else {
+            PauseMode::Never
+        },
+        scale: args.scale,
+    };
 
     #[cfg(target_os = "linux")]
     return backend::wayland::WaylandBackend::new()?.run(path, options);

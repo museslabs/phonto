@@ -72,3 +72,7 @@ objc2-core-media = { version = "0.3", default-features = false, features = [
     "std",
     "CMTime",
 ] }
+objc2-io-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "ps",
+] }
