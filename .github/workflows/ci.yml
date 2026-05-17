@@ -5,7 +5,11 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
@@ -15,6 +19,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install dev libraries
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
