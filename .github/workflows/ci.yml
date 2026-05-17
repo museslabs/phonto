@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install dev libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwayland-dev \
+            libglib2.0-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libegl1-mesa-dev
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy -- -D warnings

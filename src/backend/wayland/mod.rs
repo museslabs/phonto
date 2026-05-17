@@ -61,12 +61,9 @@ impl Backend for WaylandBackend {
         std::thread::Builder::new()
             .name("decoder".into())
             .spawn(move || {
-                if let Err(e) = decoder::run(
-                    Path::new(&video_path),
-                    gl_display,
-                    decoder_gl_context,
-                    tx,
-                ) {
+                if let Err(e) =
+                    decoder::run(Path::new(&video_path), gl_display, decoder_gl_context, tx)
+                {
                     log::error!("decoder error: {e:#}");
                 }
             })?;
