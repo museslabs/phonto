@@ -11,8 +11,7 @@ use wayland_client::{
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 use self::gl_renderer::GlRenderer;
-use super::Backend;
-use crate::scale::ScaleMode;
+use super::{Backend, RunOptions};
 
 pub struct WaylandBackend {
     state: State,
@@ -22,7 +21,7 @@ pub struct WaylandBackend {
 }
 
 impl WaylandBackend {
-    pub fn new(scale: ScaleMode) -> anyhow::Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         let conn = Connection::connect_to_env().context("connect to Wayland display")?;
         let mut eq = conn.new_event_queue();
         let qh = eq.handle();
@@ -37,7 +36,7 @@ impl WaylandBackend {
         state.wait_until_configured(&mut eq)?;
 
         let (width, height) = state.size();
-        let renderer = GlRenderer::new(&state.conn, state.surface()?, width, height, scale)?;
+        let renderer = GlRenderer::new(&state.conn, state.surface()?, width, height)?;
 
         Ok(Self {
             state,
@@ -49,7 +48,7 @@ impl WaylandBackend {
 }
 
 impl Backend for WaylandBackend {
-    fn run(mut self, video_path: String) -> anyhow::Result<()> {
+    fn run(mut self, video_path: String, options: RunOptions) -> anyhow::Result<()> {
         let (tx, rx) = mpsc::sync_channel(1);
 
         let (gl_display, gl_context) =
@@ -77,7 +76,7 @@ impl Backend for WaylandBackend {
 
             if applied_video_dims != Some((frame.width, frame.height)) {
                 self.renderer
-                    .set_video_dimensions(frame.width, frame.height);
+                    .set_video_dimensions(frame.width, frame.height, options.scale);
                 applied_video_dims = Some((frame.width, frame.height));
             }
 

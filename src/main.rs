@@ -3,7 +3,7 @@ mod config;
 mod scale;
 mod wallpaper;
 
-use backend::Backend;
+use backend::{Backend, RunOptions};
 use clap::Parser;
 
 use scale::ScaleMode;
@@ -41,9 +41,11 @@ fn main() -> anyhow::Result<()> {
             .expect("clap ensures path is set when --rand is not used")
     };
 
+    let options = RunOptions { scale: args.scale };
+
     #[cfg(target_os = "linux")]
-    return backend::wayland::WaylandBackend::new(args.scale)?.run(path);
+    return backend::wayland::WaylandBackend::new()?.run(path, options);
 
     #[cfg(target_os = "macos")]
-    return backend::macos::MacosBackend::new(args.scale)?.run(path);
+    return backend::macos::MacosBackend::new()?.run(path, options);
 }
