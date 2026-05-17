@@ -1,0 +1,45 @@
+[package]
+name = "phonto-screensaver"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "PhontoScreenSaver"
+crate-type = ["cdylib"]
+
+[dependencies]
+ctor = "0.2"
+log = "0.4"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSBundle",
+    "NSObjCRuntime",
+    "NSString",
+    "NSURL",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-quartz-core",
+    "NSView",
+    "NSColor",
+    "NSResponder",
+    "NSGraphics",
+] }
+objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+objc2-screen-saver = { version = "0.3", features = ["objc2-app-kit", "ScreenSaverView"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-core-media",
+    "objc2-quartz-core",
+    "AVPlayer",
+    "AVPlayerItem",
+    "AVPlayerLayer",
+    "AVAsset",
+    "AVAnimation",
+] }
+objc2-core-media = { version = "0.3", default-features = false, features = [
+    "std",
+    "CMTime",
+] }

@@ -72,3 +72,6 @@ objc2-core-media = { version = "0.3", default-features = false, features = [
     "std",
     "CMTime",
 ] }
+
+[workspace]
+members = ["screensaver"]

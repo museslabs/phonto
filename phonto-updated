@@ -1,0 +1,73 @@
+
+~/code/phonto  macos [?!+]                                                                                                     5s  14:31:12
+❯ sudo powermetrics --samplers gpu_power -i 1000 -n 5
+
+Machine model: Mac17,2
+OS version: 25C56
+Boot arguments:
+Boot time: Thu May 14 12:46:00 2026
+
+
+
+*** Sampled system activity (Sat May 16 14:31:14 2026 +0300) (1002.66ms elapsed) ***
+
+
+**** GPU usage ****
+
+GPU HW active frequency: 660 MHz
+GPU HW active residency:  35.03% (338 MHz: 6.9% 486 MHz: 6.3% 636 MHz: 6.8% 796 MHz: 5.7% 888 MHz: 4.2% 988 MHz: 5.2% 1084 MHz:   0% 1182 MHz:   0% 1278 MHz:   0% 1374 MHz:   0% 1470 MHz:   0% 1578 MHz:   0% 1620 MHz:   0%)
+GPU SW requested state: (P1 :  16% P2 :  18% P3 :  20% P4 :  17% P5 :  13% P6 :  16% P7 :   0% P8 :   0% P9 :   0% P10 :   0% P11 :   0% P12 :   0% P13 :   0%)
+GPU idle residency:  64.97%
+GPU Power: 884 mW
+
+
+
+*** Sampled system activity (Sat May 16 14:31:15 2026 +0300) (1006.18ms elapsed) ***
+
+
+**** GPU usage ****
+
+GPU HW active frequency: 643 MHz
+GPU HW active residency:  25.41% (338 MHz: 5.7% 486 MHz: 3.3% 636 MHz: 7.5% 796 MHz: 2.9% 888 MHz: 2.1% 988 MHz: 3.9% 1084 MHz:   0% 1182 MHz:   0% 1278 MHz:   0% 1374 MHz:   0% 1470 MHz:   0% 1578 MHz:   0% 1620 MHz:   0%)
+GPU SW requested state: (P1 :  18% P2 :  13% P3 :  31% P4 :  12% P5 : 8.7% P6 :  17% P7 :   0% P8 :   0% P9 :   0% P10 :   0% P11 :   0% P12 :   0% P13 :   0%)
+GPU idle residency:  74.59%
+GPU Power: 628 mW
+
+
+
+*** Sampled system activity (Sat May 16 14:31:16 2026 +0300) (1005.60ms elapsed) ***
+
+
+**** GPU usage ****
+
+GPU HW active frequency: 523 MHz
+GPU HW active residency:  25.30% (338 MHz: 5.4% 486 MHz: 8.2% 636 MHz:  12% 796 MHz:   0% 888 MHz:   0% 988 MHz:   0% 1084 MHz:   0% 1182 MHz:   0% 1278 MHz:   0% 1374 MHz:   0% 1470 MHz:   0% 1578 MHz:   0% 1620 MHz:   0%)
+GPU SW requested state: (P1 :  18% P2 :  33% P3 :  48% P4 :   0% P5 :   0% P6 :   0% P7 :   0% P8 :   0% P9 :   0% P10 :   0% P11 :   0% P12 :   0% P13 :   0%)
+GPU idle residency:  74.70%
+GPU Power: 462 mW
+
+
+
+*** Sampled system activity (Sat May 16 14:31:17 2026 +0300) (1004.82ms elapsed) ***
+
+
+**** GPU usage ****
+
+GPU HW active frequency: 493 MHz
+GPU HW active residency:  27.33% (338 MHz: 7.3% 486 MHz:  11% 636 MHz: 8.6% 796 MHz:   0% 888 MHz:   0% 988 MHz:   0% 1084 MHz:   0% 1182 MHz:   0% 1278 MHz:   0% 1374 MHz:   0% 1470 MHz:   0% 1578 MHz:   0% 1620 MHz:   0%)
+GPU SW requested state: (P1 :  24% P2 :  43% P3 :  33% P4 :   0% P5 :   0% P6 :   0% P7 :   0% P8 :   0% P9 :   0% P10 :   0% P11 :   0% P12 :   0% P13 :   0%)
+GPU idle residency:  72.67%
+GPU Power: 477 mW
+
+
+
+*** Sampled system activity (Sat May 16 14:31:18 2026 +0300) (1005.59ms elapsed) ***
+
+
+**** GPU usage ****
+
+GPU HW active frequency: 510 MHz
+GPU HW active residency:  26.01% (338 MHz: 6.6% 486 MHz: 8.7% 636 MHz:  11% 796 MHz:   0% 888 MHz:   0% 988 MHz:   0% 1084 MHz:   0% 1182 MHz:   0% 1278 MHz:   0% 1374 MHz:   0% 1470 MHz:   0% 1578 MHz:   0% 1620 MHz:   0%)
+GPU SW requested state: (P1 :  23% P2 :  34% P3 :  43% P4 :   0% P5 :   0% P6 :   0% P7 :   0% P8 :   0% P9 :   0% P10 :   0% P11 :   0% P12 :   0% P13 :   0%)
+GPU idle residency:  73.99%
+GPU Power: 461 mW

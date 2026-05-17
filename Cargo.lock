@@ -188,6 +188,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "ctor"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a2785755761f3ddc1492979ce1e48d2c00d09311c39e4466429188f3dd6501"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "dispatch2"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -985,6 +995,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-screen-saver"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99bd4e20d51e655ecad5d7965b3af205835ec83093d869b5b4f3e7131f10a862"
+dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1039,6 +1060,21 @@ dependencies = [
  "toml 0.8.23",
  "wayland-client",
  "wayland-protocols-wlr",
+]
+
+[[package]]
+name = "phonto-screensaver"
+version = "0.1.0"
+dependencies = [
+ "ctor",
+ "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-av-foundation",
+ "objc2-core-media",
+ "objc2-foundation",
+ "objc2-quartz-core",
+ "objc2-screen-saver",
 ]
 
 [[package]]

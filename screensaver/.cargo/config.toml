@@ -1,0 +1,8 @@
+# `cdylib` produces MH_DYLIB (rustc passes -dynamiclib). The .saver convention
+# is MH_BUNDLE, but legacyScreenSaver.appex `dlopen`s either Mach-O type — and
+# `-bundle` is mutually exclusive with `-dynamiclib`, so flipping the type
+# would mean dropping rustc's default. Not worth it for a working bundle.
+#
+# Kept as a placeholder for future macOS-specific link flags.
+[target.'cfg(target_os = "macos")']
+rustflags = []
