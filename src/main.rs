@@ -24,8 +24,12 @@ struct Args {
     scale: ScaleMode,
 
     /// Pause playback while the system is on battery (macOS only)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "pause_below")]
     pause_on_battery: bool,
+
+    /// Pause playback when on battery and charge drops below PERCENT (1-100, macOS only)
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(1..=100))]
+    pause_below: Option<u8>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -45,12 +49,13 @@ fn main() -> anyhow::Result<()> {
             .expect("clap ensures path is set when --rand is not used")
     };
 
+    let pause = match (args.pause_on_battery, args.pause_below) {
+        (true, _) => PauseMode::OnBattery,
+        (false, Some(pct)) => PauseMode::BelowPercent(pct),
+        (false, None) => PauseMode::Never,
+    };
     let options = RunOptions {
-        pause: if args.pause_on_battery {
-            PauseMode::OnBattery
-        } else {
-            PauseMode::Never
-        },
+        pause,
         scale: args.scale,
     };
 

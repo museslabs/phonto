@@ -2,9 +2,13 @@ use std::ffi::c_void;
 
 use objc2::rc::Retained;
 use objc2_av_foundation::AVPlayer;
-use objc2_core_foundation::{CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopDefaultMode};
+use objc2_core_foundation::{
+    CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopSource,
+    CFString, CFType, kCFRunLoopDefaultMode,
+};
 use objc2_io_kit::{
-    IOPSCopyPowerSourcesInfo, IOPSGetProvidingPowerSourceType, IOPSNotificationCreateRunLoopSource,
+    IOPSCopyPowerSourcesInfo, IOPSCopyPowerSourcesList, IOPSGetPowerSourceDescription,
+    IOPSGetProvidingPowerSourceType, IOPSNotificationCreateRunLoopSource,
 };
 
 use crate::backend::PauseMode;
@@ -12,6 +16,10 @@ use crate::backend::PauseMode;
 // CFSTR(kIOPMBatteryPowerKey). Compare against the literal so we don't have
 // to round-trip through CFString equality.
 const BATTERY_POWER: &str = "Battery Power";
+
+// IOPSGetPowerSourceDescription dict keys (see IOPSKeys.h).
+const CURRENT_CAPACITY: &str = "Current Capacity";
+const MAX_CAPACITY: &str = "Max Capacity";
 
 /// Pauses the player based on power source.
 ///
@@ -74,17 +82,19 @@ unsafe extern "C-unwind" fn power_changed(context: *mut c_void) {
 
 fn apply_state(player: &AVPlayer, mode: &PauseMode) {
     let on_batt = on_battery();
+    let pct = battery_percent();
 
     let should_pause = match mode {
         PauseMode::Never => false,
         PauseMode::OnBattery => on_batt,
+        PauseMode::BelowPercent(threshold) => on_batt && pct.is_some_and(|p| p < *threshold),
     };
 
     if should_pause {
-        log::info!("pausing wallpaper (on_battery={on_batt})");
+        log::info!("pausing wallpaper (on_battery={on_batt}, charge={pct:?}%)");
         unsafe { player.pause() };
     } else {
-        log::info!("playing wallpaper (on_battery={on_batt})");
+        log::info!("playing wallpaper (on_battery={on_batt}, charge={pct:?}%)");
         unsafe { player.play() };
     }
 }
@@ -97,4 +107,45 @@ fn on_battery() -> bool {
         return false;
     };
     kind.to_string() == BATTERY_POWER
+}
+
+fn battery_percent() -> Option<u8> {
+    let blob = IOPSCopyPowerSourcesInfo()?;
+    let list: CFRetained<CFArray> = unsafe { IOPSCopyPowerSourcesList(Some(&blob)) }?;
+    let count = list.count();
+    for i in 0..count {
+        let ps_ptr = unsafe { list.value_at_index(i) };
+        if ps_ptr.is_null() {
+            continue;
+        }
+        let ps: &CFType = unsafe { &*(ps_ptr.cast::<CFType>()) };
+        let Some(dict) = (unsafe { IOPSGetPowerSourceDescription(Some(&blob), Some(ps)) }) else {
+            continue;
+        };
+        let (Some(cur), Some(max)) = (
+            read_i32(&dict, CURRENT_CAPACITY),
+            read_i32(&dict, MAX_CAPACITY),
+        ) else {
+            continue;
+        };
+        if max <= 0 {
+            continue;
+        }
+        let pct = ((cur as i64 * 100) / max as i64).clamp(0, 100) as u8;
+        return Some(pct);
+    }
+    None
+}
+
+fn read_i32(dict: &CFDictionary, key: &'static str) -> Option<i32> {
+    let key = CFString::from_static_str(key);
+    let key_ptr: *const c_void = (&*key as *const CFString).cast();
+    let value_ptr = unsafe { dict.value(key_ptr) };
+    if value_ptr.is_null() {
+        return None;
+    }
+    let number: &CFNumber = unsafe { &*(value_ptr.cast::<CFNumber>()) };
+    let mut out: i32 = 0;
+    let ok = unsafe { number.value(CFNumberType::SInt32Type, (&raw mut out).cast::<c_void>()) };
+    ok.then_some(out)
 }
