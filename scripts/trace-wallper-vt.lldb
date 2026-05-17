@@ -1,0 +1,15 @@
+command script import /Users/fanis/code/phonto/scripts/vt_trace.py
+target create /tmp/Wallper.app/Contents/MacOS/Wallper
+
+breakpoint set --name VTCompressionSessionCreate
+breakpoint command add --script-type python --python-function vt_trace.vt_create 1
+
+breakpoint set --name VTSessionSetProperty
+breakpoint command add --script-type python --python-function vt_trace.vt_set_property 2
+breakpoint disable 2
+
+breakpoint set --name VTSessionSetProperties
+breakpoint command add --script-type python --python-function vt_trace.vt_set_properties 3
+breakpoint disable 3
+
+process launch

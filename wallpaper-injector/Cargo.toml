@@ -16,17 +16,23 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v5"] }
 block2 = "0.6"
-objc2 = "0.6"
+objc2 = { version = "0.6", features = ["exception"] }
 objc2-foundation = { version = "0.3", features = [
+    "NSArray",
     "NSDictionary",
     "NSError",
+    "NSGeometry",
     "NSObjCRuntime",
     "NSString",
     "NSURL",
+    "NSValue",
 ] }
-objc2-av-foundation = { version = "0.3", default-features = false, features = [
-    "std",
-    "AVAsset",
-    "AVAssetExportSession",
-    "AVMediaFormat",
-] }
+# We don't use any of objc2-av-foundation's typed wrappers — the AVAssetReader/
+# Writer pipeline goes through `class!()` + AnyObject + msg_send!. But we
+# DO need the crate so it pulls in
+# `#[link(name = "AVFoundation", kind = "framework")]`, which makes the
+# AVURLAsset/AVAssetReader/AVAssetWriter Objective-C classes resolvable at
+# runtime. Same for objc2-core-media (linking CoreMedia for CMTime). std
+# feature only — turns off the rest of the bindings.
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std"] }
