@@ -1,8 +1,4 @@
-use objc2::{
-    AnyThread, DefinedClass, define_class, msg_send,
-    rc::Retained,
-    runtime::NSObject,
-};
+use objc2::{AnyThread, DefinedClass, define_class, msg_send, rc::Retained, runtime::NSObject};
 use objc2_app_kit::{NSScreen, NSWindow};
 use objc2_av_foundation::AVPlayerLayer;
 use objc2_foundation::{MainThreadMarker, NSNotification};
