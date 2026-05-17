@@ -74,4 +74,4 @@ objc2-core-media = { version = "0.3", default-features = false, features = [
 ] }
 
 [workspace]
-members = ["screensaver"]
+members = ["screensaver", "wallpaper-injector"]

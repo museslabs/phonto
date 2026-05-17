@@ -1,0 +1,17 @@
+[package]
+name = "phonto-wallpaper"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "phonto-wallpaper"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tempfile = "3"
+uuid = { version = "1", features = ["v5"] }

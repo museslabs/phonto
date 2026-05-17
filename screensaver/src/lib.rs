@@ -81,11 +81,17 @@ impl PhontoScreenSaverView {
     }
 
     fn tear_down_player(&self) {
+        // legacyScreenSaver on macOS Sonoma+ keeps old view instances around
+        // (stopAnimation isn't called reliably and dealloc may never run).
+        // Just dropping the Retaineds isn't enough — the AVPlayerLayer still
+        // references the AVPlayer, which still holds the hardware decoder.
+        // Fully sever the chain so the next view instance can claim a decoder.
+        if let Some(layer) = self.ivars().layer.borrow_mut().take() {
+            unsafe { layer.setPlayer(None) };
+        }
         if let Some(player) = self.ivars().player.borrow_mut().take() {
             unsafe { player.pause() };
-        }
-        if let Some(layer) = self.ivars().layer.borrow_mut().take() {
-            layer.removeFromSuperlayer();
+            unsafe { player.replaceCurrentItemWithPlayerItem(None) };
         }
     }
 }
