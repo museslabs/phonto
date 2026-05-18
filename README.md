@@ -8,9 +8,7 @@
 GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust. Also supports live lockscreen wallpapers on macOS.
 
 
-
-
-https://github.com/user-attachments/assets/efba2097-1bb9-46f4-ae45-8f8f67916992
+![example](./mac-example.gif)
 
 
 On Linux, phonto plays videos as your desktop background with minimal overhead, decoding and rendering entirely on the GPU through GStreamer and EGL. On macOS it drives an `AVPlayerLayer` attached to a window sitting just below the system wallpaper level, so VideoToolbox handles decoding and CoreAnimation handles compositing.
