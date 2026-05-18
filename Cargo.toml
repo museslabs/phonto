@@ -9,7 +9,7 @@ homepage = "https://github.com/museslabs/phonto"
 readme = "README.md"
 keywords = ["wayland",  "macos", "wallpaper", "gpu"]
 categories = ["multimedia"]
-exclude = ["example.gif", "target/*", "nix/*", "flake.*", "shell.nix", "install.sh", "todo.md", "CLAUDE.md", ".github/*", ".claude/*"]
+exclude = ["mac-example.gif", "target/*", "nix/*", "flake.*", "shell.nix", "install.sh", "todo.md", "CLAUDE.md", ".github/*", ".claude/*"]
 
 [dependencies]
 anyhow = "1.0.102"
