@@ -129,14 +129,15 @@ pub fn run(video: PathBuf, name: Option<String>, remove: bool) -> Result<()> {
 
 fn extract_thumbnail(video: &Path, dest: &Path) -> Result<()> {
     let tmp_dir = tempfile::Builder::new().prefix("phonto-thumb").tempdir()?;
-    let status = Command::new("/usr/bin/qlmanage")
+    let output = Command::new("/usr/bin/qlmanage")
         .args(["-t", "-s", "640", "-o"])
         .arg(tmp_dir.path())
         .arg(video)
-        .status()
+        .output()
         .context("running qlmanage")?;
-    if !status.success() {
-        bail!("qlmanage exited with {status}");
+    log_subprocess_output("qlmanage", &output.stdout, &output.stderr);
+    if !output.status.success() {
+        bail!("qlmanage exited with {}", output.status);
     }
     let generated = tmp_dir.path().join(format!(
         "{}.png",
@@ -338,7 +339,19 @@ fn first_phonto_asset(data: &Value) -> Option<(String, String)> {
 // from the daemon's cached AVAsset. Killing WallpaperAgent works the same.
 // Either is sufficient.
 fn kick_aerials() {
-    let _ = Command::new("/usr/bin/killall")
+    if let Ok(output) = Command::new("/usr/bin/killall")
         .arg("WallpaperAerialsExtension")
-        .status();
+        .output()
+    {
+        log_subprocess_output("killall", &output.stdout, &output.stderr);
+    }
+}
+
+fn log_subprocess_output(tag: &str, stdout: &[u8], stderr: &[u8]) {
+    for line in String::from_utf8_lossy(stdout).lines() {
+        log::debug!("{tag}: {line}");
+    }
+    for line in String::from_utf8_lossy(stderr).lines() {
+        log::debug!("{tag}: {line}");
+    }
 }
