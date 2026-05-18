@@ -3,7 +3,7 @@ mod config;
 mod scale;
 mod wallpaper;
 
-use backend::Backend;
+use backend::{Backend, PauseMode, RunOptions};
 use clap::Parser;
 
 use scale::ScaleMode;
@@ -22,6 +22,14 @@ struct Args {
     /// How to fit the video to the screen.
     #[arg(long, value_enum, default_value_t = ScaleMode::Fill)]
     scale: ScaleMode,
+
+    /// Pause playback while the system is on battery (macOS only)
+    #[arg(long, conflicts_with = "pause_below")]
+    pause_on_battery: bool,
+
+    /// Pause playback when on battery and charge drops below PERCENT (1-100, macOS only)
+    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(1..=100))]
+    pause_below: Option<u8>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -41,9 +49,19 @@ fn main() -> anyhow::Result<()> {
             .expect("clap ensures path is set when --rand is not used")
     };
 
+    let pause = match (args.pause_on_battery, args.pause_below) {
+        (true, _) => PauseMode::OnBattery,
+        (false, Some(pct)) => PauseMode::BelowPercent(pct),
+        (false, None) => PauseMode::Never,
+    };
+    let options = RunOptions {
+        pause,
+        scale: args.scale,
+    };
+
     #[cfg(target_os = "linux")]
-    return backend::wayland::WaylandBackend::new(args.scale)?.run(path);
+    return backend::wayland::WaylandBackend::new()?.run(path, options);
 
     #[cfg(target_os = "macos")]
-    return backend::macos::MacosBackend::new(args.scale)?.run(path);
+    return backend::macos::MacosBackend::new()?.run(path, options);
 }

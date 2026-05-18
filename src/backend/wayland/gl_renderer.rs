@@ -27,7 +27,6 @@ pub struct GlRenderer {
     context: PossiblyCurrentContext,
     scale_loc: glow::UniformLocation,
     surface_dims: (u32, u32),
-    mode: ScaleMode,
 }
 
 impl GlRenderer {
@@ -54,7 +53,6 @@ impl GlRenderer {
         wl_surface: &WlSurface,
         width: u32,
         height: u32,
-        mode: ScaleMode,
     ) -> anyhow::Result<Self> {
         let gl_display = Self::create_display(conn)?;
         let gl_config = Self::create_config(&gl_display)?;
@@ -123,21 +121,20 @@ impl GlRenderer {
                 context: gl_context,
                 scale_loc,
                 surface_dims: (width, height),
-                mode,
             })
         }
     }
 
     /// Recompute the on-screen quad scale for the given video pixel dimensions.
     /// Call this when the source dimensions are first known (or change).
-    pub fn set_video_dimensions(&self, video_w: u32, video_h: u32) {
+    pub fn set_video_dimensions(&self, video_w: u32, video_h: u32, mode: ScaleMode) {
         let (screen_w, screen_h) = self.surface_dims;
         let scale = if screen_w == 0 || screen_h == 0 || video_w == 0 || video_h == 0 {
             (1.0, 1.0)
         } else {
             let screen_aspect = screen_w as f32 / screen_h as f32;
             let video_aspect = video_w as f32 / video_h as f32;
-            match self.mode {
+            match mode {
                 ScaleMode::Stretch => (1.0, 1.0),
                 ScaleMode::Fit => {
                     if video_aspect > screen_aspect {

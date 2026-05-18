@@ -1,3 +1,4 @@
+mod battery_observer;
 mod loop_observer;
 mod screen_observer;
 
@@ -18,9 +19,10 @@ use objc2_av_foundation::{
 use objc2_foundation::{MainThreadMarker, NSNotificationCenter, NSString, NSURL};
 use objc2_quartz_core::CAAutoresizingMask;
 
+use self::battery_observer::BatteryObserver;
 use self::loop_observer::LoopObserver;
 use self::screen_observer::ScreenObserver;
-use super::Backend;
+use super::{Backend, PauseMode, RunOptions};
 use crate::scale::ScaleMode;
 
 // One below kCGDesktopWindowLevel so a static system wallpaper sits on top of us.
@@ -28,21 +30,20 @@ const WALLPAPER_LEVEL: isize = -2_147_483_624;
 
 pub struct MacosBackend {
     mtm: MainThreadMarker,
-    scale: ScaleMode,
 }
 
 impl MacosBackend {
-    pub fn new(scale: ScaleMode) -> anyhow::Result<Self> {
+    pub fn new() -> anyhow::Result<Self> {
         let mtm = MainThreadMarker::new()
             .context("macOS backend must be constructed on the main thread")?;
-        Ok(Self { mtm, scale })
+        Ok(Self { mtm })
     }
 }
 
 impl Backend for MacosBackend {
-    fn run(self, video_path: String) -> anyhow::Result<()> {
+    fn run(self, video_path: String, options: RunOptions) -> anyhow::Result<()> {
         let mtm = self.mtm;
-        let scale = self.scale;
+        let scale = options.scale;
 
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -132,7 +133,15 @@ impl Backend for MacosBackend {
         }
 
         window.makeKeyAndOrderFront(None);
-        unsafe { player.play() };
+
+        let battery_observer = if matches!(options.pause, PauseMode::Never) {
+            None
+        } else {
+            BatteryObserver::install(player.clone(), options.pause)
+        };
+        if battery_observer.is_none() {
+            unsafe { player.play() };
+        }
 
         log::info!(
             "macOS backend ready: {}x{} window at level {}",
@@ -144,6 +153,7 @@ impl Backend for MacosBackend {
         app.run();
         drop(loop_observer);
         drop(screen_observer);
+        drop(battery_observer);
 
         Ok(())
     }
