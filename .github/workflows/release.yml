@@ -19,6 +19,9 @@ jobs:
           - os: macos-26
             target: aarch64-apple-darwin
             asset: phonto-darwin-aarch64.tar.gz
+          - os: macos-26
+            target: x86_64-apple-darwin
+            asset: phonto-darwin-x86_64.tar.gz
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -67,3 +70,4 @@ jobs:
           files: |
             phonto-linux-x86_64.tar.gz
             phonto-darwin-aarch64.tar.gz
+            phonto-darwin-x86_64.tar.gz
