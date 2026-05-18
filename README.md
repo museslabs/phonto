@@ -68,6 +68,38 @@ Play a random wallpaper from your configured search paths:
 phonto --rand
 ```
 
+On Linux/Wayland, choose the layer-shell layer to render on:
+```bash
+phonto /path/to/video.mp4 --layer background
+```
+
+Available layers are `background` (default), `bottom`, `top`, and `overlay`.
+
+Phonto also writes the currently selected video path to `~/.cache/phonto/current`.
+This is useful when `--rand` chooses a wallpaper and another tool needs to reuse
+the same video.
+
+## Lock screen backgrounds with hyprlock (Wayland)
+
+Hyprlock owns the lock-screen UI, but phonto can render the animated background
+on a higher layer while hyprlock is active. Start a second phonto process on the
+`overlay` layer before launching hyprlock:
+
+```bash
+phonto "$(cat "$HOME/.cache/phonto/current")" --layer overlay &
+phonto_lock_pid=$!
+
+hyprlock
+kill "$phonto_lock_pid"
+```
+
+This pairs well with a normal desktop phonto session running on the default
+`background` layer. If you use `phonto --rand`, the cache file lets the lock
+screen reuse the same randomly selected wallpaper.
+
+Hyprlock must leave its background transparent or partially transparent for the
+video to be visible behind its controls.
+
 ## Live lockscreen wallpapers (macOS)
 
 The lock screen is owned by `loginwindow`, which hides every non-Apple-signed window the moment the screen locks. Phonto sidesteps that by registering your video into Apple's aerial catalog, so Apple's own signed extension plays it on both the desktop and the lock screen.
