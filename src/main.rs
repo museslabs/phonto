@@ -37,6 +37,11 @@ struct Args {
     #[arg(long, value_enum, default_value_t = ScaleMode::Fill)]
     scale: ScaleMode,
 
+    /// Which layer shell layer to render on (Linux/Wayland only).
+    #[cfg(target_os = "linux")]
+    #[arg(long, value_enum, default_value_t = backend::wayland::LayerMode::Background)]
+    layer: backend::wayland::LayerMode,
+
     /// Pause playback while the system is on battery (macOS only)
     #[arg(long, conflicts_with = "pause_below")]
     pause_on_battery: bool,
@@ -94,6 +99,14 @@ fn main() -> anyhow::Result<()> {
             .expect("clap ensures path is set when --rand is not used")
     };
 
+    // Persist the resolved path so other tools (e.g. hyprlock) can read it.
+    if let Ok(home) = std::env::var("HOME") {
+        let cache_dir = std::path::Path::new(&home).join(".cache/phonto");
+        if std::fs::create_dir_all(&cache_dir).is_ok() {
+            let _ = std::fs::write(cache_dir.join("current"), &path);
+        }
+    }
+
     let pause = match (args.pause_on_battery, args.pause_below) {
         (true, _) => PauseMode::OnBattery,
         (false, Some(pct)) => PauseMode::BelowPercent(pct),
@@ -105,7 +118,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     #[cfg(target_os = "linux")]
-    return backend::wayland::WaylandBackend::new()?.run(path, options);
+    return backend::wayland::WaylandBackend::new(args.layer)?.run(path, options);
 
     #[cfg(target_os = "macos")]
     return backend::macos::MacosBackend::new()?.run(path, options);

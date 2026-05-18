@@ -12,6 +12,16 @@ use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_l
 
 use self::gl_renderer::GlRenderer;
 use super::{Backend, PauseMode, RunOptions};
+use clap::ValueEnum;
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum LayerMode {
+    #[default]
+    Background,
+    Bottom,
+    Top,
+    Overlay,
+}
 
 pub struct WaylandBackend {
     state: State,
@@ -21,7 +31,7 @@ pub struct WaylandBackend {
 }
 
 impl WaylandBackend {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(layer: LayerMode) -> anyhow::Result<Self> {
         let conn = Connection::connect_to_env().context("connect to Wayland display")?;
         let mut eq = conn.new_event_queue();
         let qh = eq.handle();
@@ -31,7 +41,7 @@ impl WaylandBackend {
         eq.roundtrip(&mut state)
             .context("initial Wayland roundtrip")?;
 
-        state.create_background_surface(&qh)?;
+        state.create_background_surface(&qh, layer)?;
         eq.roundtrip(&mut state).context("create layer surface")?;
         state.wait_until_configured(&mut eq)?;
 
@@ -125,22 +135,27 @@ impl State {
         }
     }
 
-    fn create_background_surface(&mut self, qh: &QueueHandle<Self>) -> anyhow::Result<()> {
+    fn create_background_surface(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        layer: LayerMode,
+    ) -> anyhow::Result<()> {
         let compositor = self.compositor.as_ref().context("wl_compositor missing")?;
         let layer_shell = self
             .layer_shell
             .as_ref()
             .context("zwlr_layer_shell_v1 missing")?;
 
+        let wlr_layer = match layer {
+            LayerMode::Background => zwlr_layer_shell_v1::Layer::Background,
+            LayerMode::Bottom => zwlr_layer_shell_v1::Layer::Bottom,
+            LayerMode::Top => zwlr_layer_shell_v1::Layer::Top,
+            LayerMode::Overlay => zwlr_layer_shell_v1::Layer::Overlay,
+        };
+
         let surface = compositor.create_surface(qh, ());
-        let layer_surface = layer_shell.get_layer_surface(
-            &surface,
-            None,
-            zwlr_layer_shell_v1::Layer::Background,
-            "phonto".to_string(),
-            qh,
-            (),
-        );
+        let layer_surface =
+            layer_shell.get_layer_surface(&surface, None, wlr_layer, "phonto".to_string(), qh, ());
 
         layer_surface.set_size(0, 0);
         layer_surface.set_anchor(zwlr_layer_surface_v1::Anchor::all());
