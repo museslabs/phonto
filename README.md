@@ -5,7 +5,7 @@
 
 > phonto (/'fon.to/) — from Greek φόντο: background
 
-GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust.
+GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust. Also supports live lockscreen wallpapers on macOS.
 
 
 
@@ -67,6 +67,28 @@ Play a random wallpaper from your configured search paths:
 ```bash
 phonto --rand
 ```
+
+## Live lockscreen wallpapers (macOS)
+
+The lock screen is owned by `loginwindow`, which hides every non-Apple-signed window the moment the screen locks. Phonto sidesteps that by registering your video into Apple's aerial catalog, so Apple's own signed extension plays it on both the desktop and the lock screen.
+
+```bash
+phonto install-live-lockscreen /path/to/video.mp4
+```
+
+This transcodes the video to HEVC Main10 with two temporal sub-layers (the exact bitstream shape the aerials extension requires for multi-cycle playback), generates a thumbnail, and registers the asset under a **Phonto** section in System Settings → Wallpaper.
+
+To activate, open **System Settings → Wallpaper**, pick the **Phonto** category, click your entry, then lock the screen (Apple menu → Lock Screen) to verify it plays across cycles.
+
+To remove a previously-installed entry:
+
+```bash
+phonto install-live-lockscreen /path/to/video.mp4 --remove
+```
+
+Optional flags:
+
+- `--name <STRING>` — display name shown in the picker (defaults to the file stem).
 
 ## Configuration
 
