@@ -172,6 +172,3 @@ Stop playback when the laptop is unplugged or charge drops below a threshold. Th
 phonto /path/to/video --pause-on-battery
 phonto /path/to/video --pause-below 30
 ```
-
-> [!NOTE]
-> Pausing on battery is macOS-only. On Wayland, passing either flag exits with an error.
