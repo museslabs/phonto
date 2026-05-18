@@ -8,7 +8,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-26]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-26
+            target: aarch64-apple-darwin
+          - os: macos-26
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -16,6 +22,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          targets: ${{ matrix.target }}
           components: rustfmt, clippy
 
       - name: Install dev libraries
@@ -33,4 +40,4 @@ jobs:
         run: cargo fmt --check
 
       - name: clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --target ${{ matrix.target }} -- -D warnings
