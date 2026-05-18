@@ -42,11 +42,11 @@ struct Args {
     #[arg(long, value_enum, default_value_t = backend::wayland::LayerMode::Background)]
     layer: backend::wayland::LayerMode,
 
-    /// Pause playback while the system is on battery (macOS only)
+    /// Pause playback while the system is on battery
     #[arg(long, conflicts_with = "pause_below")]
     pause_on_battery: bool,
 
-    /// Pause playback when on battery and charge drops below PERCENT (1-100, macOS only)
+    /// Pause playback when on battery and charge drops below PERCENT (1-100)
     #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(1..=100))]
     pause_below: Option<u8>,
 }

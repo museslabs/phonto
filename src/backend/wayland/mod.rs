@@ -1,7 +1,8 @@
+mod battery_observer;
 mod decoder;
 mod gl_renderer;
 
-use std::{path::Path, sync::mpsc};
+use std::{path::Path, sync::mpsc, time::Instant};
 
 use anyhow::Context;
 use wayland_client::{
@@ -57,11 +58,11 @@ impl WaylandBackend {
     }
 }
 
+// How often to re-read sysfs to update paused state.
+const BATTERY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
 impl Backend for WaylandBackend {
     fn run(mut self, video_path: String, options: RunOptions) -> anyhow::Result<()> {
-        if !matches!(options.pause, PauseMode::Never) {
-            anyhow::bail!("battery-based pausing is not supported on Wayland yet");
-        }
         let (tx, rx) = mpsc::sync_channel(1);
 
         let (gl_display, gl_context) =
@@ -80,31 +81,58 @@ impl Backend for WaylandBackend {
                 }
             })?;
 
+        let mut paused = battery_observer::should_pause(&options.pause);
+        let mut last_battery_check = Instant::now();
+        log_pause_state(paused, &options.pause);
+
         let mut applied_video_dims: Option<(u32, u32)> = None;
         loop {
-            self.state.wait_for_frame_callback(&mut self.eq)?;
-
-            let sample = rx.recv().context("receive decoded sample")?;
-            let frame = decoder::sample_to_frame(sample, &gl_context)?;
-
-            if applied_video_dims != Some((frame.width, frame.height)) {
-                self.renderer
-                    .set_video_dimensions(frame.width, frame.height, options.scale);
-                applied_video_dims = Some((frame.width, frame.height));
+            if last_battery_check.elapsed() >= BATTERY_POLL_INTERVAL {
+                let new_paused = battery_observer::should_pause(&options.pause);
+                if new_paused != paused {
+                    paused = new_paused;
+                    log_pause_state(paused, &options.pause);
+                }
+                last_battery_check = Instant::now();
             }
 
-            self.state.request_frame_callback(&self.qh);
-            self.renderer.render(&frame)?;
+            if !paused {
+                self.state.wait_for_frame_callback(&mut self.eq)?;
 
-            self.eq
-                .dispatch_pending(&mut self.state)
-                .context("dispatch pending Wayland events")?;
+                let sample = rx.recv().context("receive decoded sample")?;
+                let frame = decoder::sample_to_frame(sample, &gl_context)?;
 
-            self.state
-                .conn
-                .flush()
-                .context("flush Wayland connection")?;
+                if applied_video_dims != Some((frame.width, frame.height)) {
+                    self.renderer
+                        .set_video_dimensions(frame.width, frame.height, options.scale);
+                    applied_video_dims = Some((frame.width, frame.height));
+                }
+
+                self.state.request_frame_callback(&self.qh);
+                self.renderer.render(&frame)?;
+
+                self.eq
+                    .dispatch_pending(&mut self.state)
+                    .context("dispatch pending Wayland events")?;
+
+                self.state
+                    .conn
+                    .flush()
+                    .context("flush Wayland connection")?;
+            }
         }
+    }
+}
+
+fn log_pause_state(paused: bool, mode: &PauseMode) {
+    let on_batt = matches!(mode, PauseMode::Never).then_some(false);
+    if paused {
+        log::info!("pausing wallpaper (battery pause active)");
+    } else if !matches!(mode, PauseMode::Never) {
+        log::info!(
+            "playing wallpaper (battery pause inactive, on_battery={:?})",
+            on_batt
+        );
     }
 }
 

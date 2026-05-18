@@ -11,7 +11,7 @@ pub enum PauseMode {
     #[default]
     Never,
     OnBattery,
-    BelowPercent(#[cfg_attr(not(target_os = "macos"), allow(dead_code))] u8),
+    BelowPercent(u8),
 }
 
 pub trait Backend {
