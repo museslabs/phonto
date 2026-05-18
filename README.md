@@ -17,6 +17,13 @@ On Linux, phonto plays videos as your desktop background with minimal overhead, 
 
 ## Installation
 
+Using Homebrew (macOS and Linux x86_64):
+
+```bash
+brew tap museslabs/phonto
+brew install phonto
+```
+
 Using cargo:
 
 ```bash
