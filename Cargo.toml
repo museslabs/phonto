@@ -33,14 +33,22 @@ glutin = "0.32.3"
 raw-window-handle = "0.6.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+tempfile = "3"
+uuid = { version = "1", features = ["v5"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
+    "NSArray",
     "NSDate",
-    "NSRunLoop",
+    "NSDictionary",
+    "NSError",
+    "NSObject",
     "NSObjCRuntime",
     "NSNotification",
+    "NSRunLoop",
     "NSString",
     "NSURL",
+    "NSValue",
 ] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
@@ -60,17 +68,43 @@ objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
 objc2-core-foundation = { version = "0.3", features = ["CFNumber"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = [
     "std",
+    "objc2-core-foundation",
     "objc2-core-media",
     "objc2-quartz-core",
+    "AVAnimation",
+    "AVAsset",
+    "AVAssetReader",
+    "AVAssetReaderOutput",
+    "AVAssetTrack",
+    "AVAssetWriter",
+    "AVAssetWriterInput",
+    "AVMediaFormat",
     "AVPlayer",
     "AVPlayerItem",
     "AVPlayerLayer",
-    "AVAsset",
-    "AVAnimation",
 ] }
 objc2-core-media = { version = "0.3", default-features = false, features = [
     "std",
+    "CMFormatDescription",
+    "CMSampleBuffer",
     "CMTime",
+    "objc2-core-video",
+] }
+objc2-core-video = { version = "0.3", default-features = false, features = [
+    "std",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+] }
+objc2-video-toolbox = { version = "0.3", default-features = false, features = [
+    "std",
+    "VTBase",
+    "VTSession",
+    "VTCompressionSession",
+    "VTCompressionProperties",
+    "VTErrors",
+    "objc2-core-media",
+    "objc2-core-video",
 ] }
 objc2-io-kit = { version = "0.3", default-features = false, features = [
     "std",
