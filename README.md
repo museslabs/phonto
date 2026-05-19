@@ -28,6 +28,12 @@ brew tap museslabs/phonto
 brew install phonto
 ```
 
+Using AUR on Arch Linux:
+
+```bash
+yay -S phonto
+```
+
 Using cargo:
 
 ```bash
