@@ -32,7 +32,7 @@ pub struct WaylandBackend {
 }
 
 impl WaylandBackend {
-    pub fn new(layer: LayerMode) -> anyhow::Result<Self> {
+    pub fn new(layer: LayerMode, shader: Option<String>) -> anyhow::Result<Self> {
         let conn = Connection::connect_to_env().context("connect to Wayland display")?;
         let mut eq = conn.new_event_queue();
         let qh = eq.handle();
@@ -47,7 +47,13 @@ impl WaylandBackend {
         state.wait_until_configured(&mut eq)?;
 
         let (width, height) = state.size();
-        let renderer = GlRenderer::new(&state.conn, state.surface()?, width, height)?;
+        let renderer = GlRenderer::new(
+            &state.conn,
+            state.surface()?,
+            width,
+            height,
+            shader.as_deref(),
+        )?;
 
         Ok(Self {
             state,

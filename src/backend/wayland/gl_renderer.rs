@@ -53,6 +53,7 @@ impl GlRenderer {
         wl_surface: &WlSurface,
         width: u32,
         height: u32,
+        fragment_src: Option<&str>,
     ) -> anyhow::Result<Self> {
         let gl_display = Self::create_display(conn)?;
         let gl_config = Self::create_config(&gl_display)?;
@@ -77,9 +78,11 @@ impl GlRenderer {
             })
         };
 
+        let frag_src = fragment_src.unwrap_or(Self::FRAGMENT_SHADER);
+
         unsafe {
             let vertex = Self::compile_shader(&gl, glow::VERTEX_SHADER, Self::VERTEX_SHADER)?;
-            let fragment = Self::compile_shader(&gl, glow::FRAGMENT_SHADER, Self::FRAGMENT_SHADER)?;
+            let fragment = Self::compile_shader(&gl, glow::FRAGMENT_SHADER, frag_src)?;
             let program = Self::link_program(&gl, vertex, fragment)?;
 
             gl.use_program(Some(program));
@@ -94,6 +97,10 @@ impl GlRenderer {
                 .context("u_scale not found")?;
             // Identity until the first frame tells us the source aspect.
             gl.uniform_2_f32(Some(&scale_loc), 1.0, 1.0);
+
+            if let Some(loc) = gl.get_uniform_location(program, "u_resolution") {
+                gl.uniform_2_f32(Some(&loc), width as f32, height as f32);
+            }
 
             let vbo = gl.create_buffer().map_err(|e| anyhow!(e))?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
