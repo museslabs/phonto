@@ -137,11 +137,12 @@ fn build_pipeline(path: &Path) -> anyhow::Result<gst::Pipeline> {
     gst::Element::link_many([&glupload, &glcolorconvert, appsink.upcast_ref()])
         .context("link glupload → glcolorconvert → appsink")?;
 
-    // decodebin3 exposes source pads as streams are discovered. Link only video
-    // pads to glupload and ignore others (audio, subtitles).
+    // decodebin3 exposes source pads as streams are discovered. glupload's sink
+    // pad only accepts video caps, so non-video pads (audio, subtitles) fail to
+    // link and are silently ignored.
     let glupload_weak = glupload.downgrade();
     decodebin.connect_pad_added(move |_, src_pad| {
-         let Some(glupload) = glupload_weak.upgrade() else {
+        let Some(glupload) = glupload_weak.upgrade() else {
             return;
         };
         let Some(sink_pad) = glupload.static_pad("sink") else {
