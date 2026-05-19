@@ -1,5 +1,6 @@
 use gst::MessageView::*;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::mpsc::SyncSender;
 
 use anyhow::{Context, anyhow};
@@ -23,17 +24,7 @@ pub fn run(
     gl_context: gst_gl::GLContext,
     tx: SyncSender<gst::Sample>,
 ) -> anyhow::Result<()> {
-    let pipeline_desc = format!(
-        "filesrc location=\"{}\" ! decodebin3 ! glupload ! glcolorconvert ! \
-         appsink name=sink caps=video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D \
-         sync=true max-buffers=1",
-        path.display()
-    );
-
-    let pipeline = gst::parse::launch(&pipeline_desc)
-        .context("parse pipeline")?
-        .downcast::<gst::Pipeline>()
-        .map_err(|_| anyhow!("parsed element is not a Pipeline"))?;
+    let pipeline = build_pipeline(path).context("build decoder pipeline")?;
 
     let mut display_ctx = gst::Context::new("gst.gl.GLDisplay", true);
     display_ctx
@@ -98,6 +89,82 @@ pub fn run(
 
     pipeline.set_state(gst::State::Null).ok();
     Ok(())
+}
+
+// Build the GStreamer pipeline programmatically so the file path is set via the
+// `location` GObject property instead of being interpolated into a pipeline
+// description string. `gst::parse::launch` treats `"` as a string delimiter and
+// `!` as an element separator, so a filename containing those characters could
+// otherwise inject additional elements into the pipeline.
+fn build_pipeline(path: &Path) -> anyhow::Result<gst::Pipeline> {
+    let pipeline = gst::Pipeline::default();
+
+    let filesrc = gst::ElementFactory::make("filesrc")
+        .property("location", path)
+        .build()
+        .context("create filesrc")?;
+    let decodebin = gst::ElementFactory::make("decodebin3")
+        .build()
+        .context("create decodebin3")?;
+    let glupload = gst::ElementFactory::make("glupload")
+        .build()
+        .context("create glupload")?;
+    let glcolorconvert = gst::ElementFactory::make("glcolorconvert")
+        .build()
+        .context("create glcolorconvert")?;
+
+    let sink_caps =
+        gst::Caps::from_str("video/x-raw(memory:GLMemory),format=RGBA,texture-target=2D")
+            .context("parse appsink caps")?;
+    let appsink = gst_app::AppSink::builder()
+        .name("sink")
+        .caps(&sink_caps)
+        .sync(true)
+        .max_buffers(1)
+        .build();
+
+    pipeline
+        .add_many([
+            &filesrc,
+            &decodebin,
+            &glupload,
+            &glcolorconvert,
+            appsink.upcast_ref(),
+        ])
+        .context("add elements to pipeline")?;
+
+    gst::Element::link_many([&filesrc, &decodebin]).context("link filesrc → decodebin3")?;
+    gst::Element::link_many([&glupload, &glcolorconvert, appsink.upcast_ref()])
+        .context("link glupload → glcolorconvert → appsink")?;
+
+    // decodebin3 exposes source pads as streams are discovered. Link only video
+    // pads to glupload and ignore others (audio, subtitles).
+    let glupload_weak = glupload.downgrade();
+    decodebin.connect_pad_added(move |_, src_pad| {
+        let Some(glupload) = glupload_weak.upgrade() else {
+            return;
+        };
+        let Some(caps) = src_pad.current_caps() else {
+            return;
+        };
+        let Some(structure) = caps.structure(0) else {
+            return;
+        };
+        if !structure.name().starts_with("video/") {
+            return;
+        }
+        let Some(sink_pad) = glupload.static_pad("sink") else {
+            return;
+        };
+        if sink_pad.is_linked() {
+            return;
+        }
+        if let Err(err) = src_pad.link(&sink_pad) {
+            log::warn!("link decodebin3 video pad → glupload: {err:?}");
+        }
+    });
+
+    Ok(pipeline)
 }
 
 pub fn sample_to_frame(
