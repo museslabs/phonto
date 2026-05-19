@@ -1,10 +1,9 @@
-// HEVC Main10 transcoder with two temporal sub-layers in the VPS. The
-// aerials extension requires this exact bitstream shape for playback to work
-// on subsequent lock cycles. AVAssetWriter doesn't expose the temporal
-// sub-layer keys, so we drive VTCompressionSession directly and feed the
-// NAL units through an AVAssetWriter in pass-through mode.
-//
-// Property dict copied from Wallper.app via lldb.
+//! HEVC Main10 transcoder for live lock-screen video.
+//!
+//! Drives `VTCompressionSession` directly because `AVAssetWriter`'s
+//! `outputSettings` dictionary does not expose the temporal sub-layer
+//! property keys. The encoded `CMSampleBuffer`s are then appended to an
+//! `AVAssetWriter` configured for pass-through.
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -20,27 +19,29 @@ use objc2_av_foundation::{
     AVURLAsset,
 };
 use objc2_core_foundation::{
-    CFArray, CFArrayCallBacks, CFNumber, CFNumberType, CFRetained, CFString, CFType,
-    kCFBooleanFalse, kCFBooleanTrue, kCFTypeArrayCallBacks,
+    CFNumber, CFNumberType, CFRetained, CFString, CFType, kCFBooleanFalse,
 };
 use objc2_core_media::{CMSampleBuffer, kCMTimeInvalid, kCMVideoCodecType_HEVC};
 use objc2_core_video::{
-    CVImageBuffer, kCVImageBufferColorPrimariesKey, kCVImageBufferTransferFunctionKey,
-    kCVImageBufferYCbCrMatrixKey, kCVPixelBufferPixelFormatTypeKey,
-    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 };
 use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
-    kVTCompressionPropertyKey_BaseLayerFrameRate, kVTCompressionPropertyKey_DataRateLimits,
-    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_BaseLayerFrameRate, kVTCompressionPropertyKey_ExpectedFrameRate,
+    kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, kVTCompressionPropertyKey_ProfileLevel,
     kVTCompressionPropertyKey_RealTime, kVTProfileLevel_HEVC_Main10_AutoLevel,
 };
 
-// Encoded samples from the compressor. The VT callback runs on its own
-// thread. We drain after CompleteFrames returns.
+const AVERAGE_BITRATE_BPS: i32 = 15_000_000;
+const EXPECTED_FPS: i32 = 60;
+const MAX_KEYFRAME_INTERVAL: i32 = 120;
+const MAX_KEYFRAME_INTERVAL_SECS: f64 = 2.0;
+const TEMPORAL_LAYER_COUNT: i32 = 2;
+const BASE_LAYER_FPS: f64 = (EXPECTED_FPS as f64) / 2.0;
+
 struct SampleSink {
     samples: Mutex<Vec<CFRetained<CMSampleBuffer>>>,
     first_error: Mutex<i32>,
@@ -65,8 +66,7 @@ unsafe extern "C-unwind" fn output_callback(
         return;
     }
     if let Some(nn) = NonNull::new(sample) {
-        // VT releases its reference after the callback returns. Retain so
-        // the writer loop can append the sample later.
+        // VT drops its reference once we return; retain for the writer pass.
         let retained: CFRetained<CMSampleBuffer> = unsafe { CFRetained::retain(nn) };
         sink.samples.lock().unwrap().push(retained);
     }
@@ -102,20 +102,20 @@ fn vt_set(session: &CFType, key: &CFString, value: &CFType, name: &str) -> Resul
     Ok(())
 }
 
-pub fn transcode(input: &Path, output: &Path) -> Result<()> {
-    // AVAssetWriter refuses to overwrite an existing file.
-    let _ = std::fs::remove_file(output);
-    if let Some(parent) = output.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
+fn open_input(
+    input: &Path,
+) -> Result<(
+    Retained<AVAssetReader>,
+    Retained<AVAssetReaderTrackOutput>,
+    i32,
+    i32,
+)> {
     let input_ns = NSString::from_str(&input.to_string_lossy());
     let url_in = NSURL::fileURLWithPath(&input_ns);
     let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url_in, None) };
 
     let media_type =
         unsafe { AVMediaTypeVideo }.context("AVMediaTypeVideo constant unavailable")?;
-    // Sync API. Async variant needs `block2`.
     #[allow(deprecated)]
     let tracks = unsafe { asset.tracksWithMediaType(media_type) };
     let track = tracks.firstObject().context("no video track in input")?;
@@ -126,7 +126,6 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
 
     let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset) }
         .map_err(|e| anyhow!("AVAssetReader init failed: {e:?}"))?;
-
     let settings = pixel_format_settings();
     let reader_output = unsafe {
         AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
@@ -136,14 +135,16 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
     };
     unsafe { reader.addOutput(&reader_output) };
 
-    let sink: Box<SampleSink> = Box::new(SampleSink {
-        samples: Mutex::new(Vec::new()),
-        first_error: Mutex::new(0),
-    });
-    let sink_ptr = (&*sink as *const SampleSink) as *mut c_void;
+    Ok((reader, reader_output, width, height))
+}
 
-    let mut raw_session: *mut VTCompressionSession = ptr::null_mut();
-    let create_st = unsafe {
+fn create_session(
+    width: i32,
+    height: i32,
+    sink_ptr: *mut c_void,
+) -> Result<CFRetained<VTCompressionSession>> {
+    let mut raw: *mut VTCompressionSession = ptr::null_mut();
+    let st = unsafe {
         VTCompressionSession::create(
             None,
             width,
@@ -154,16 +155,19 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
             None,
             Some(output_callback),
             sink_ptr,
-            NonNull::new(&mut raw_session as *mut _).unwrap(),
+            NonNull::new(&mut raw as *mut _).unwrap(),
         )
     };
-    if create_st != 0 || raw_session.is_null() {
-        bail!("VTCompressionSessionCreate failed: OSStatus {create_st}");
+    if st != 0 || raw.is_null() {
+        bail!("VTCompressionSessionCreate failed: OSStatus {st}");
     }
-    let session: CFRetained<VTCompressionSession> =
-        unsafe { CFRetained::from_raw(NonNull::new(raw_session).unwrap()) };
-    let s: &CFType = &session;
+    let session = unsafe { CFRetained::from_raw(NonNull::new(raw).unwrap()) };
+    configure_session(&session)?;
+    Ok(session)
+}
 
+fn configure_session(session: &VTCompressionSession) -> Result<()> {
+    let s: &CFType = session;
     unsafe {
         let profile_level: &CFType = kVTProfileLevel_HEVC_Main10_AutoLevel;
         vt_set(
@@ -173,7 +177,7 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
             "ProfileLevel",
         )?;
 
-        let avg = cfnum_i32(9_500_000);
+        let avg = cfnum_i32(AVERAGE_BITRATE_BPS);
         vt_set(
             s,
             kVTCompressionPropertyKey_AverageBitRate,
@@ -181,29 +185,7 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
             "AverageBitRate",
         )?;
 
-        let limit_bytes = cfnum_i32(1_500_000);
-        let limit_secs = cfnum_i32(1);
-        let bytes_ref: &CFType = &limit_bytes;
-        let secs_ref: &CFType = &limit_secs;
-        let mut items: [*const c_void; 2] = [
-            bytes_ref as *const CFType as *const c_void,
-            secs_ref as *const CFType as *const c_void,
-        ];
-        let limits = CFArray::new(
-            None,
-            items.as_mut_ptr(),
-            2,
-            &kCFTypeArrayCallBacks as *const CFArrayCallBacks,
-        )
-        .context("CFArrayCreate(DataRateLimits)")?;
-        vt_set(
-            s,
-            kVTCompressionPropertyKey_DataRateLimits,
-            &limits,
-            "DataRateLimits",
-        )?;
-
-        let fps = cfnum_i32(60);
+        let fps = cfnum_i32(EXPECTED_FPS);
         vt_set(
             s,
             kVTCompressionPropertyKey_ExpectedFrameRate,
@@ -211,7 +193,7 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
             "ExpectedFrameRate",
         )?;
 
-        let kfi = cfnum_i32(60);
+        let kfi = cfnum_i32(MAX_KEYFRAME_INTERVAL);
         vt_set(
             s,
             kVTCompressionPropertyKey_MaxKeyFrameInterval,
@@ -219,7 +201,7 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
             "MaxKeyFrameInterval",
         )?;
 
-        let kfid = cfnum_f64(1.0);
+        let kfid = cfnum_f64(MAX_KEYFRAME_INTERVAL_SECS);
         vt_set(
             s,
             kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
@@ -227,52 +209,45 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
             "MaxKeyFrameIntervalDuration",
         )?;
 
-        let rt: &CFType = kCFBooleanFalse.context("kCFBooleanFalse")?;
-        vt_set(s, kVTCompressionPropertyKey_RealTime, rt, "RealTime")?;
-        let afr: &CFType = kCFBooleanFalse.context("kCFBooleanFalse")?;
+        let false_val: &CFType = kCFBooleanFalse.context("kCFBooleanFalse")?;
+        vt_set(s, kVTCompressionPropertyKey_RealTime, false_val, "RealTime")?;
         vt_set(
             s,
             kVTCompressionPropertyKey_AllowFrameReordering,
-            afr,
+            false_val,
             "AllowFrameReordering",
         )?;
 
-        // Probe the modern single-key form first. HEVCTemporalSubLayerAccess
-        // isn't in the public SDK headers and is rejected on most hardware,
-        // in which case fall back to the explicit NumberOfTemporalLayers and
-        // BaseLayerFrameRate pair. Both paths produce the same VPS.
-        let tsla_key = CFString::from_str("HEVCTemporalSubLayerAccess");
-        let tsla_val: &CFType = kCFBooleanTrue.context("kCFBooleanTrue")?;
-        let tsla_st = VTSessionSetProperty(s, &tsla_key, Some(tsla_val));
-        if tsla_st == 0 {
-            log::debug!("temporal sub-layers: HEVCTemporalSubLayerAccess");
-        } else {
-            log::debug!(
-                "temporal sub-layers: NumberOfTemporalLayers + BaseLayerFrameRate \
-                 (TSLA returned {tsla_st})"
-            );
-            let ntl_key = CFString::from_str("NumberOfTemporalLayers");
-            let ntl_val = cfnum_i32(2);
-            let ntl_st = VTSessionSetProperty(s, &ntl_key, Some(&ntl_val));
-            if ntl_st != 0 {
-                bail!("NumberOfTemporalLayers failed: OSStatus {ntl_st}");
-            }
-            let blfr = cfnum_f64(30.0);
-            vt_set(
-                s,
-                kVTCompressionPropertyKey_BaseLayerFrameRate,
-                &blfr,
-                "BaseLayerFrameRate",
-            )?;
+        // Two temporal sub-layers in the VPS (`vps_max_sub_layers_minus1 = 1`).
+        // The lock-screen player needs this shape to re-arm across lock cycles.
+        let ntl_key = CFString::from_str("NumberOfTemporalLayers");
+        let ntl_val = cfnum_i32(TEMPORAL_LAYER_COUNT);
+        let st = VTSessionSetProperty(s, &ntl_key, Some(&ntl_val));
+        if st != 0 {
+            bail!("NumberOfTemporalLayers failed: OSStatus {st}");
         }
+        let blfr = cfnum_f64(BASE_LAYER_FPS);
+        vt_set(
+            s,
+            kVTCompressionPropertyKey_BaseLayerFrameRate,
+            &blfr,
+            "BaseLayerFrameRate",
+        )?;
     }
+    Ok(())
+}
 
+fn encode_all(
+    reader: &AVAssetReader,
+    reader_output: &AVAssetReaderTrackOutput,
+    session: &VTCompressionSession,
+) -> Result<usize> {
     if !unsafe { reader.startReading() } {
         let err = unsafe { reader.error() };
         bail!("AVAssetReader startReading failed: {err:?}");
     }
 
-    let mut frames_in: usize = 0;
+    let mut count: usize = 0;
     while unsafe { reader.status() } == AVAssetReaderStatus::Reading {
         let Some(sample) = (unsafe { reader_output.copyNextSampleBuffer() }) else {
             break;
@@ -280,26 +255,16 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
         let Some(pb) = (unsafe { sample.image_buffer() }) else {
             continue;
         };
-        // Strip color attachments. The encoder skips the VUI color
-        // description when these are absent.
-        let cv: &CVImageBuffer = &pb;
-        unsafe {
-            cv.remove_attachment(kCVImageBufferColorPrimariesKey);
-            cv.remove_attachment(kCVImageBufferTransferFunctionKey);
-            cv.remove_attachment(kCVImageBufferYCbCrMatrixKey);
-        }
-
         let pts = unsafe { sample.presentation_time_stamp() };
         let dur = unsafe { sample.duration() };
-        let mut info_flags = VTEncodeInfoFlags::empty();
-        let enc_st =
-            unsafe { session.encode_frame(&pb, pts, dur, None, ptr::null_mut(), &mut info_flags) };
-        if enc_st != 0 {
-            bail!("VTCompressionSessionEncodeFrame failed at frame {frames_in}: OSStatus {enc_st}");
+        let mut flags = VTEncodeInfoFlags::empty();
+        let st = unsafe { session.encode_frame(&pb, pts, dur, None, ptr::null_mut(), &mut flags) };
+        if st != 0 {
+            bail!("VTCompressionSessionEncodeFrame failed at frame {count}: OSStatus {st}");
         }
-        frames_in += 1;
-        if frames_in.is_multiple_of(60) {
-            log::debug!("encoding... {frames_in} frames");
+        count += 1;
+        if count.is_multiple_of(60) {
+            log::debug!("encoding... {count} frames");
         }
     }
 
@@ -308,25 +273,16 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
         bail!("AVAssetReader failed: {err:?}");
     }
 
-    let complete_st = unsafe { session.complete_frames(kCMTimeInvalid) };
-    if complete_st != 0 {
-        bail!("VTCompressionSessionCompleteFrames failed: OSStatus {complete_st}");
+    let st = unsafe { session.complete_frames(kCMTimeInvalid) };
+    if st != 0 {
+        bail!("VTCompressionSessionCompleteFrames failed: OSStatus {st}");
     }
-    unsafe { session.invalidate() };
+    Ok(count)
+}
 
-    {
-        let fe = *sink.first_error.lock().unwrap();
-        if fe != 0 {
-            bail!("encoder produced OSStatus {fe}");
-        }
-    }
-    let samples: Vec<CFRetained<CMSampleBuffer>> =
-        std::mem::take(&mut *sink.samples.lock().unwrap());
-    if samples.is_empty() {
-        bail!("encoder produced no samples");
-    }
-    log::info!("encoded {frames_in} frames");
-
+fn write_samples(output: &Path, samples: &[CFRetained<CMSampleBuffer>]) -> Result<usize> {
+    let media_type =
+        unsafe { AVMediaTypeVideo }.context("AVMediaTypeVideo constant unavailable")?;
     let first_format_desc = unsafe { samples[0].format_description() }
         .context("first encoded sample has no format description")?;
 
@@ -368,15 +324,17 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
     }
     unsafe { writer_input.markAsFinished() };
 
-    // finishWriting blocks until the moov atom is flushed. On the main
-    // thread AVFoundation logs a warning. The async variant needs a block,
-    // which would pull in `block2`. Run sync on a worker.
-    //
-    // AVAssetWriter isn't declared Send by objc2-av-foundation. The newtype
-    // asserts Send for the move, and the consuming finish() method makes
-    // the closure capture the whole wrapper instead of the inner Retained.
+    finish_writing(writer)?;
+    Ok(idx)
+}
+
+// finishWriting blocks until the moov atom is flushed. On the main thread
+// AVFoundation logs a warning, and the async variant requires `block2`. Run
+// the sync call on a worker. AVAssetWriter is not declared `Send` by
+// objc2-av-foundation
+fn finish_writing(writer: Retained<AVAssetWriter>) -> Result<()> {
     struct SendWriter(Retained<AVAssetWriter>);
-    // SAFETY: ownership transfers to the worker. No concurrent access.
+    // SAFETY: ownership transfers to the worker; no concurrent access.
     unsafe impl Send for SendWriter {}
     impl SendWriter {
         fn finish(self) -> (bool, AVAssetWriterStatus, Option<String>) {
@@ -388,9 +346,10 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
         }
     }
 
+    // `sw.finish()` consumes the whole wrapper, so the closure captures
+    // `sw: SendWriter` (Send) rather than the inner `Retained` field (not Send).
     let sw = SendWriter(writer);
-    let join_handle = std::thread::spawn(move || sw.finish());
-    let (finished, status, err_str) = join_handle
+    let (finished, status, err_str) = std::thread::spawn(move || sw.finish())
         .join()
         .map_err(|e| anyhow!("finishWriting worker panicked: {e:?}"))?;
     if !finished {
@@ -399,14 +358,50 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
     if status == AVAssetWriterStatus::Failed {
         bail!("AVAssetWriter finished with Failed status: {err_str:?}");
     }
+    Ok(())
+}
 
-    log::info!("wrote {idx} samples → {}", output.display());
+pub fn transcode(input: &Path, output: &Path) -> Result<()> {
+    // AVAssetWriter refuses to overwrite an existing file.
+    let _ = std::fs::remove_file(output);
+    if let Some(parent) = output.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let (reader, reader_output, width, height) = open_input(input)?;
+
+    let sink: Box<SampleSink> = Box::new(SampleSink {
+        samples: Mutex::new(Vec::new()),
+        first_error: Mutex::new(0),
+    });
+    let sink_ptr = (&*sink as *const SampleSink) as *mut c_void;
+
+    let session = create_session(width, height, sink_ptr)?;
+    let frames_in = encode_all(&reader, &reader_output, &session)?;
+    unsafe { session.invalidate() };
+
+    {
+        let fe = *sink.first_error.lock().unwrap();
+        if fe != 0 {
+            bail!("encoder produced OSStatus {fe}");
+        }
+    }
+    let samples: Vec<CFRetained<CMSampleBuffer>> =
+        std::mem::take(&mut *sink.samples.lock().unwrap());
+    if samples.is_empty() {
+        bail!("encoder produced no samples");
+    }
+    log::info!("encoded {frames_in} frames");
+
+    let written = write_samples(output, &samples)?;
+    log::info!("wrote {written} samples → {}", output.display());
+
     drop(sink); // outlives all VT callbacks
     Ok(())
 }
 
-// Reader settings asking for 8-bit NV12. VT converts internally. Output
-// profile is set by ProfileLevel above, not by the input pixel format.
+// Asks the reader for 8-bit NV12 frames; VT converts internally. The output
+// profile is governed by `ProfileLevel`, not the input pixel format.
 fn pixel_format_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
     let key_cf: &'static CFString = unsafe { kCVPixelBufferPixelFormatTypeKey };
     let key_ns: &NSString = unsafe { &*(key_cf as *const CFString as *const NSString) };

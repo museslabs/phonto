@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use super::transcode;
@@ -43,6 +44,143 @@ const PHONTO_CATEGORY_ID: &str = "8C75F1C2-7E7E-4B5C-9C5C-50484F4E544F";
 // shows no Aerials section at all, not just no Phonto section.
 const PHONTO_SUBCATEGORY_ID: &str = "8C75F1C2-7E7E-4B5C-9C5C-535542434154";
 
+const PHONTO_LABEL: &str = "Phonto";
+
+// Typed view over entries.json. We model the fields we read or write; any
+// other field on a deserialized entry round-trips verbatim through `extra`
+// (preserved insertion order thanks to serde_json's `preserve_order`).
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Manifest {
+    #[serde(default)]
+    assets: Vec<Asset>,
+    #[serde(default)]
+    categories: Vec<Category>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Asset {
+    id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    categories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    subcategories: Vec<String>,
+    #[serde(
+        default,
+        rename = "previewImage",
+        skip_serializing_if = "String::is_empty"
+    )]
+    preview_image: String,
+    #[serde(
+        default,
+        rename = "accessibilityLabel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    accessibility_label: Option<String>,
+    #[serde(
+        default,
+        rename = "localizedNameKey",
+        skip_serializing_if = "Option::is_none"
+    )]
+    localized_name_key: Option<String>,
+    #[serde(
+        default,
+        rename = "includeInShuffle",
+        skip_serializing_if = "Option::is_none"
+    )]
+    include_in_shuffle: Option<bool>,
+    #[serde(
+        default,
+        rename = "pointsOfInterest",
+        skip_serializing_if = "Option::is_none"
+    )]
+    points_of_interest: Option<Map<String, Value>>,
+    #[serde(
+        default,
+        rename = "preferredOrder",
+        skip_serializing_if = "Option::is_none"
+    )]
+    preferred_order: Option<i64>,
+    #[serde(default, rename = "shotID", skip_serializing_if = "Option::is_none")]
+    shot_id: Option<String>,
+    #[serde(
+        default,
+        rename = "showInTopLevel",
+        skip_serializing_if = "Option::is_none"
+    )]
+    show_in_top_level: Option<bool>,
+    #[serde(
+        default,
+        rename = "url-4K-SDR-240FPS",
+        skip_serializing_if = "Option::is_none"
+    )]
+    url_4k_sdr_240fps: Option<String>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Category {
+    id: String,
+    #[serde(default, rename = "representativeAssetID")]
+    representative_asset_id: String,
+    #[serde(default, rename = "previewImage")]
+    preview_image: String,
+    #[serde(default)]
+    subcategories: Vec<Subcategory>,
+    #[serde(
+        default,
+        rename = "localizedDescriptionKey",
+        skip_serializing_if = "Option::is_none"
+    )]
+    localized_description_key: Option<String>,
+    #[serde(
+        default,
+        rename = "localizedNameKey",
+        skip_serializing_if = "Option::is_none"
+    )]
+    localized_name_key: Option<String>,
+    #[serde(
+        default,
+        rename = "preferredOrder",
+        skip_serializing_if = "Option::is_none"
+    )]
+    preferred_order: Option<i64>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Subcategory {
+    id: String,
+    #[serde(default, rename = "representativeAssetID")]
+    representative_asset_id: String,
+    #[serde(default, rename = "previewImage")]
+    preview_image: String,
+    #[serde(
+        default,
+        rename = "localizedDescriptionKey",
+        skip_serializing_if = "Option::is_none"
+    )]
+    localized_description_key: Option<String>,
+    #[serde(
+        default,
+        rename = "localizedNameKey",
+        skip_serializing_if = "Option::is_none"
+    )]
+    localized_name_key: Option<String>,
+    #[serde(
+        default,
+        rename = "preferredOrder",
+        skip_serializing_if = "Option::is_none"
+    )]
+    preferred_order: Option<i64>,
+    #[serde(flatten)]
+    extra: Map<String, Value>,
+}
+
 pub fn run(video: PathBuf, name: Option<String>, remove: bool) -> Result<()> {
     let video = if remove {
         // Removal only needs the path to derive the UUID. Fall back to a
@@ -63,11 +201,11 @@ pub fn run(video: PathBuf, name: Option<String>, remove: bool) -> Result<()> {
         PathBuf::from(&home).join("Library/Application Support/com.apple.wallpaper/aerials");
     let videos_dir = aerials.join("videos");
     let thumbnails_dir = aerials.join("thumbnails");
-    let manifest = aerials.join("manifest/entries.json");
-    if !manifest.exists() {
+    let manifest_path = aerials.join("manifest/entries.json");
+    if !manifest_path.exists() {
         bail!(
             "manifest not found at {} — WallpaperAgent has never initialised it on this Mac",
-            manifest.display()
+            manifest_path.display()
         );
     }
 
@@ -77,7 +215,7 @@ pub fn run(video: PathBuf, name: Option<String>, remove: bool) -> Result<()> {
         .to_uppercase();
 
     if remove {
-        remove_entry(&manifest, &asset_id)?;
+        remove_entry(&manifest_path, &asset_id)?;
         let _ = fs::remove_file(videos_dir.join(format!("{asset_id}.mov")));
         let _ = fs::remove_file(thumbnails_dir.join(format!("{asset_id}.png")));
         kick_aerials();
@@ -108,7 +246,7 @@ pub fn run(video: PathBuf, name: Option<String>, remove: bool) -> Result<()> {
     log::info!("thumbnail → {}", target_thumb.display());
 
     upsert_entry(
-        &manifest,
+        &manifest_path,
         &asset_id,
         &display_name,
         &target_video,
@@ -150,111 +288,159 @@ fn extract_thumbnail(video: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+fn load_manifest(path: &Path) -> Result<Manifest> {
+    let text = fs::read_to_string(path)?;
+    serde_json::from_str(&text).context("parsing entries.json")
+}
+
+fn save_manifest(path: &Path, manifest: &Manifest) -> Result<()> {
+    fs::write(path, serde_json::to_string_pretty(manifest)?)?;
+    Ok(())
+}
+
 fn upsert_entry(
-    manifest: &Path,
+    manifest_path: &Path,
     asset_id: &str,
     display_name: &str,
     video_path: &Path,
     thumb_path: &Path,
 ) -> Result<()> {
     // One-time backup so the user can always revert with a single `cp`.
-    let backup = manifest.with_extension("json.phonto-backup");
+    let backup = manifest_path.with_extension("json.phonto-backup");
     if !backup.exists() {
-        fs::copy(manifest, &backup)?;
+        fs::copy(manifest_path, &backup)?;
         log::info!("backed up original manifest → {}", backup.display());
     }
 
-    let text = fs::read_to_string(manifest)?;
-    let mut data: Value = serde_json::from_str(&text).context("parsing entries.json")?;
-
+    let mut manifest = load_manifest(manifest_path)?;
     let video_url = file_url(video_path);
     let preview_url = file_url(thumb_path);
 
-    upsert_phonto_category(&mut data, asset_id, &preview_url)?;
+    upsert_phonto_category(&mut manifest, asset_id, &preview_url);
 
-    let entry = json!({
-        "id": asset_id,
-        "accessibilityLabel": display_name,
-        "categories": [PHONTO_CATEGORY_ID],
-        "subcategories": [PHONTO_SUBCATEGORY_ID],
-        "includeInShuffle": false,
-        "localizedNameKey": display_name,
-        "pointsOfInterest": {},
-        "preferredOrder": 0,
-        "previewImage": preview_url,
-        "shotID": format!("PHONTO_{}", &asset_id[..8]),
-        "showInTopLevel": true,
-        "url-4K-SDR-240FPS": video_url,
-    });
-
-    let assets = data
-        .get_mut("assets")
-        .and_then(Value::as_array_mut)
-        .context("entries.json has no `assets` array")?;
-    if let Some(existing) = assets
-        .iter_mut()
-        .find(|a| a.get("id").and_then(Value::as_str) == Some(asset_id))
-    {
-        *existing = entry;
+    let new_asset = phonto_asset(asset_id, display_name, &video_url, &preview_url);
+    if let Some(existing) = manifest.assets.iter_mut().find(|a| a.id == asset_id) {
+        *existing = new_asset;
         log::debug!("updated existing entry in entries.json");
     } else {
-        assets.insert(0, entry);
+        manifest.assets.insert(0, new_asset);
         log::debug!("inserted new entry in entries.json");
     }
 
-    fs::write(manifest, serde_json::to_string_pretty(&data)?)?;
-    Ok(())
+    save_manifest(manifest_path, &manifest)
 }
 
-fn upsert_phonto_category(data: &mut Value, rep_asset_id: &str, preview_url: &str) -> Result<()> {
+fn upsert_phonto_category(manifest: &mut Manifest, rep_asset_id: &str, preview_url: &str) {
     // The picker validates the category. An empty representativeAssetID or
     // previewImage poisons the catalog load and the entire section list
     // (including Apple's Landscapes) silently disappears from System
     // Settings. Always populate these from the latest install.
-    let categories = data
-        .get_mut("categories")
-        .and_then(Value::as_array_mut)
-        .context("entries.json has no `categories` array")?;
-    if let Some(existing) = categories
+    if let Some(existing) = manifest
+        .categories
         .iter_mut()
-        .find(|c| c.get("id").and_then(Value::as_str) == Some(PHONTO_CATEGORY_ID))
+        .find(|c| c.id == PHONTO_CATEGORY_ID)
     {
-        existing["representativeAssetID"] = Value::String(rep_asset_id.into());
-        existing["previewImage"] = Value::String(preview_url.into());
+        existing.representative_asset_id = rep_asset_id.to_string();
+        existing.preview_image = preview_url.to_string();
         // Always overwrite subcategories. A stale empty array from older
         // builds poisons the catalog decode.
-        existing["subcategories"] = json!([{
-            "id": PHONTO_SUBCATEGORY_ID,
-            "localizedDescriptionKey": "Phonto",
-            "localizedNameKey": "Phonto",
-            "preferredOrder": 0,
-            "previewImage": preview_url,
-            "representativeAssetID": rep_asset_id,
-        }]);
+        existing.subcategories = vec![phonto_subcategory(rep_asset_id, preview_url)];
     } else {
-        categories.push(json!({
-            "id": PHONTO_CATEGORY_ID,
-            "localizedDescriptionKey": "Phonto",
-            "localizedNameKey": "Phonto",
-            // -1 sorts before Apple's Landscapes (which has 0).
-            "preferredOrder": -1,
-            "previewImage": preview_url,
-            "representativeAssetID": rep_asset_id,
-            // Apple's parser requires a non-empty subcategories array. One
-            // self-referential entry suffices, since assets reference this
-            // UUID directly.
-            "subcategories": [{
-                "id": PHONTO_SUBCATEGORY_ID,
-                "localizedDescriptionKey": "Phonto",
-                "localizedNameKey": "Phonto",
-                "preferredOrder": 0,
-                "previewImage": preview_url,
-                "representativeAssetID": rep_asset_id,
-            }],
-        }));
+        manifest
+            .categories
+            .push(phonto_category(rep_asset_id, preview_url));
         log::debug!("registered Phonto category in entries.json");
     }
-    Ok(())
+}
+
+fn remove_entry(manifest_path: &Path, asset_id: &str) -> Result<()> {
+    let mut manifest = load_manifest(manifest_path)?;
+    manifest.assets.retain(|a| a.id != asset_id);
+    repair_phonto_category(&mut manifest);
+    save_manifest(manifest_path, &manifest)
+}
+
+// Keep the Phonto category in sync with the surviving assets. The category's
+// representativeAssetID and previewImage are validated by the picker. If they
+// point at a UUID we just deleted, the entire Aerials section disappears from
+// System Settings. If no Phonto assets remain, drop the category entirely so
+// the manifest looks like a fresh-install Mac.
+fn repair_phonto_category(manifest: &mut Manifest) {
+    match first_phonto_asset(manifest) {
+        Some((rep_id, preview)) => {
+            if let Some(cat) = manifest
+                .categories
+                .iter_mut()
+                .find(|c| c.id == PHONTO_CATEGORY_ID)
+            {
+                cat.representative_asset_id = rep_id.clone();
+                cat.preview_image = preview.clone();
+                cat.subcategories = vec![phonto_subcategory(&rep_id, &preview)];
+            }
+        }
+        None => {
+            manifest.categories.retain(|c| c.id != PHONTO_CATEGORY_ID);
+        }
+    }
+}
+
+// Any remaining asset that references the Phonto category, returned as
+// (id, previewImage). Used to repair representativeAssetID/previewImage on
+// the category after a removal.
+fn first_phonto_asset(manifest: &Manifest) -> Option<(String, String)> {
+    manifest.assets.iter().find_map(|asset| {
+        if !asset.categories.iter().any(|c| c == PHONTO_CATEGORY_ID) {
+            return None;
+        }
+        Some((asset.id.clone(), asset.preview_image.clone()))
+    })
+}
+
+fn phonto_asset(asset_id: &str, display_name: &str, video_url: &str, preview_url: &str) -> Asset {
+    Asset {
+        id: asset_id.to_string(),
+        categories: vec![PHONTO_CATEGORY_ID.to_string()],
+        subcategories: vec![PHONTO_SUBCATEGORY_ID.to_string()],
+        preview_image: preview_url.to_string(),
+        accessibility_label: Some(display_name.to_string()),
+        localized_name_key: Some(display_name.to_string()),
+        include_in_shuffle: Some(false),
+        points_of_interest: Some(Map::new()),
+        preferred_order: Some(0),
+        shot_id: Some(format!("PHONTO_{}", &asset_id[..8])),
+        show_in_top_level: Some(true),
+        url_4k_sdr_240fps: Some(video_url.to_string()),
+        extra: Map::new(),
+    }
+}
+
+fn phonto_category(rep_asset_id: &str, preview_url: &str) -> Category {
+    Category {
+        id: PHONTO_CATEGORY_ID.to_string(),
+        representative_asset_id: rep_asset_id.to_string(),
+        preview_image: preview_url.to_string(),
+        // Apple's parser requires a non-empty subcategories array. One
+        // self-referential entry suffices, since assets reference this
+        // UUID directly.
+        subcategories: vec![phonto_subcategory(rep_asset_id, preview_url)],
+        localized_description_key: Some(PHONTO_LABEL.to_string()),
+        localized_name_key: Some(PHONTO_LABEL.to_string()),
+        // -1 sorts before Apple's Landscapes (which has 0).
+        preferred_order: Some(-1),
+        extra: Map::new(),
+    }
+}
+
+fn phonto_subcategory(rep_asset_id: &str, preview_url: &str) -> Subcategory {
+    Subcategory {
+        id: PHONTO_SUBCATEGORY_ID.to_string(),
+        representative_asset_id: rep_asset_id.to_string(),
+        preview_image: preview_url.to_string(),
+        localized_description_key: Some(PHONTO_LABEL.to_string()),
+        localized_name_key: Some(PHONTO_LABEL.to_string()),
+        preferred_order: Some(0),
+        extra: Map::new(),
+    }
 }
 
 // Build a file URL with spaces percent-encoded. The wallpaper system
@@ -270,68 +456,6 @@ fn file_url(path: &Path) -> String {
         }
     }
     out
-}
-
-fn remove_entry(manifest: &Path, asset_id: &str) -> Result<()> {
-    let text = fs::read_to_string(manifest)?;
-    let mut data: Value = serde_json::from_str(&text)?;
-    if let Some(assets) = data.get_mut("assets").and_then(Value::as_array_mut) {
-        assets.retain(|a| a.get("id").and_then(Value::as_str) != Some(asset_id));
-    }
-    repair_phonto_category(&mut data);
-    fs::write(manifest, serde_json::to_string_pretty(&data)?)?;
-    Ok(())
-}
-
-// Keep the Phonto category in sync with the surviving assets. The category's
-// representativeAssetID and previewImage are validated by the picker. If they
-// point at a UUID we just deleted, the entire Aerials section disappears from
-// System Settings. If no Phonto assets remain, drop the category entirely so
-// the manifest looks like a fresh-install Mac.
-fn repair_phonto_category(data: &mut Value) {
-    let surviving = first_phonto_asset(data);
-    let Some(categories) = data.get_mut("categories").and_then(Value::as_array_mut) else {
-        return;
-    };
-    match surviving {
-        Some((rep_id, preview)) => {
-            if let Some(cat) = categories
-                .iter_mut()
-                .find(|c| c.get("id").and_then(Value::as_str) == Some(PHONTO_CATEGORY_ID))
-            {
-                cat["representativeAssetID"] = Value::String(rep_id.clone());
-                cat["previewImage"] = Value::String(preview.clone());
-                cat["subcategories"] = json!([{
-                    "id": PHONTO_SUBCATEGORY_ID,
-                    "localizedDescriptionKey": "Phonto",
-                    "localizedNameKey": "Phonto",
-                    "preferredOrder": 0,
-                    "previewImage": preview,
-                    "representativeAssetID": rep_id,
-                }]);
-            }
-        }
-        None => {
-            categories.retain(|c| c.get("id").and_then(Value::as_str) != Some(PHONTO_CATEGORY_ID));
-        }
-    }
-}
-
-// Any remaining asset that references the Phonto category, returned as
-// (id, previewImage). Used to repair representativeAssetID/previewImage on
-// the category after a removal.
-fn first_phonto_asset(data: &Value) -> Option<(String, String)> {
-    let assets = data.get("assets")?.as_array()?;
-    assets.iter().find_map(|asset| {
-        let cats = asset.get("categories")?.as_array()?;
-        let references_phonto = cats.iter().any(|c| c.as_str() == Some(PHONTO_CATEGORY_ID));
-        if !references_phonto {
-            return None;
-        }
-        let id = asset.get("id")?.as_str()?.to_string();
-        let preview = asset.get("previewImage")?.as_str()?.to_string();
-        Some((id, preview))
-    })
 }
 
 // Force WallpaperAerialsExtension to re-read entries.json on its next
