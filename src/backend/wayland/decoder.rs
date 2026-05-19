@@ -141,18 +141,9 @@ fn build_pipeline(path: &Path) -> anyhow::Result<gst::Pipeline> {
     // pads to glupload and ignore others (audio, subtitles).
     let glupload_weak = glupload.downgrade();
     decodebin.connect_pad_added(move |_, src_pad| {
-        let Some(glupload) = glupload_weak.upgrade() else {
+         let Some(glupload) = glupload_weak.upgrade() else {
             return;
         };
-        let Some(caps) = src_pad.current_caps() else {
-            return;
-        };
-        let Some(structure) = caps.structure(0) else {
-            return;
-        };
-        if !structure.name().starts_with("video/") {
-            return;
-        }
         let Some(sink_pad) = glupload.static_pad("sink") else {
             return;
         };
