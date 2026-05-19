@@ -1,11 +1,11 @@
 use objc2::{AnyThread, DefinedClass, define_class, msg_send, rc::Retained, runtime::NSObject};
-use objc2_app_kit::{NSScreen, NSWindow};
+use objc2_app_kit::NSWindow;
 use objc2_av_foundation::AVPlayerLayer;
-use objc2_foundation::{MainThreadMarker, NSNotification};
+use objc2_foundation::NSNotification;
 
 pub struct ScreenObserverIvars {
-    window: Retained<NSWindow>,
-    layer: Retained<AVPlayerLayer>,
+    windows: Vec<Retained<NSWindow>>,
+    layers: Vec<Retained<AVPlayerLayer>>,
 }
 
 define_class!(
@@ -22,32 +22,31 @@ define_class!(
 );
 
 impl ScreenObserver {
-    pub fn new(window: Retained<NSWindow>, layer: Retained<AVPlayerLayer>) -> Retained<Self> {
-        let ivars = ScreenObserverIvars { window, layer };
+    pub fn new(
+        windows: Vec<Retained<NSWindow>>,
+        layers: Vec<Retained<AVPlayerLayer>>,
+    ) -> Retained<Self> {
+        let ivars = ScreenObserverIvars { windows, layers };
         let this = Self::alloc().set_ivars(ivars);
         unsafe { msg_send![super(this), init] }
     }
 
     fn apply_current_screen(&self) {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        let Some(screen) = NSScreen::mainScreen(mtm) else {
-            return;
-        };
-
-        let frame = screen.frame();
-        let backing_scale = screen.backingScaleFactor();
-
         let ivars = self.ivars();
-        ivars.window.setFrame_display(frame, false);
-        ivars.layer.setContentsScale(backing_scale);
-
-        log::info!(
-            "display reconfigured: {}x{} @ {}x backing",
-            frame.size.width as u32,
-            frame.size.height as u32,
-            backing_scale,
-        );
+        for (window, layer) in ivars.windows.iter().zip(ivars.layers.iter()) {
+            let Some(screen) = window.screen() else {
+                continue;
+            };
+            let frame = screen.frame();
+            let backing_scale = screen.backingScaleFactor();
+            window.setFrame_display(frame, false);
+            layer.setContentsScale(backing_scale);
+            log::info!(
+                "display reconfigured: {}x{} @ {}x backing",
+                frame.size.width as u32,
+                frame.size.height as u32,
+                backing_scale,
+            );
+        }
     }
 }

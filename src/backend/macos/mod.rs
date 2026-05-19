@@ -5,6 +5,7 @@ mod screen_observer;
 use std::path::Path;
 
 use anyhow::Context;
+use objc2::rc::Retained;
 use objc2::sel;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy,
@@ -49,39 +50,6 @@ impl Backend for MacosBackend {
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         app.finishLaunching();
 
-        let screen = NSScreen::mainScreen(mtm).context("no main screen")?;
-        let frame = screen.frame();
-        let backing_scale = screen.backingScaleFactor();
-
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                mtm.alloc::<NSWindow>(),
-                frame,
-                NSWindowStyleMask::Borderless,
-                NSBackingStoreType::Buffered,
-                false,
-            )
-        };
-        window.setLevel(WALLPAPER_LEVEL);
-        window.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::FullScreenAuxiliary
-                | NSWindowCollectionBehavior::Stationary
-                | NSWindowCollectionBehavior::IgnoresCycle,
-        );
-        window.setOpaque(false);
-        window.setBackgroundColor(Some(&NSColor::clearColor()));
-        window.setHasShadow(false);
-        // `ReadOnly` so screen-capture / screen-sharing can read us. `None` blocks them.
-        window.setSharingType(NSWindowSharingType::ReadOnly);
-        window.setIgnoresMouseEvents(true);
-
-        let content_view = NSView::initWithFrame(mtm.alloc::<NSView>(), frame);
-        content_view.setWantsLayer(true);
-        window.setContentView(Some(&content_view));
-
-        // AVAsset resolves relative paths against the process cwd, which isn't
-        // what users expect from `phonto ./video.mp4`.
         let abs = Path::new(&video_path)
             .canonicalize()
             .unwrap_or_else(|_| Path::new(&video_path).to_path_buf());
@@ -94,23 +62,22 @@ impl Backend for MacosBackend {
             player.setMuted(true);
         }
 
-        let player_layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(&player)) };
-        if let Some(gravity) = video_gravity_for(scale) {
-            unsafe { player_layer.setVideoGravity(gravity) };
+        let screens = NSScreen::screens(mtm);
+        let screen_count = screens.count();
+        if screen_count == 0 {
+            return Err(anyhow::anyhow!("no screens found"));
         }
-        player_layer.setFrame(content_view.bounds());
-        player_layer.setAutoresizingMask(
-            CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
-        );
-        player_layer.setContentsScale(backing_scale);
 
-        let root_layer = content_view
-            .layer()
-            .context("content view has no root layer")?;
-        root_layer.addSublayer(&player_layer);
+        let gravity = video_gravity_for(scale);
+        let mut windows = Vec::with_capacity(screen_count);
+        let mut player_layers = Vec::with_capacity(screen_count);
+        for i in 0..screen_count {
+            let screen = screens.objectAtIndex(i);
+            let (window, layer) = build_wallpaper_window(mtm, &screen, &player, gravity)?;
+            windows.push(window);
+            player_layers.push(layer);
+        }
 
-        // Loop: AVPlayer posts AVPlayerItemDidPlayToEndTimeNotification when the
-        // item reaches its end. The observer seeks back to zero and resumes.
         let loop_observer = LoopObserver::new(player.clone());
         unsafe {
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
@@ -121,8 +88,7 @@ impl Backend for MacosBackend {
             );
         }
 
-        // Re-apply geometry on display reconfiguration.
-        let screen_observer = ScreenObserver::new(window.clone(), player_layer.clone());
+        let screen_observer = ScreenObserver::new(windows, player_layers);
         unsafe {
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
                 &screen_observer,
@@ -131,8 +97,6 @@ impl Backend for MacosBackend {
                 None,
             );
         }
-
-        window.makeKeyAndOrderFront(None);
 
         let battery_observer = if matches!(options.pause, PauseMode::Never) {
             None
@@ -144,9 +108,8 @@ impl Backend for MacosBackend {
         }
 
         log::info!(
-            "macOS backend ready: {}x{} window at level {}",
-            frame.size.width as u32,
-            frame.size.height as u32,
+            "macOS backend ready: {} screen(s) at level {}",
+            screen_count,
             WALLPAPER_LEVEL,
         );
 
@@ -169,4 +132,58 @@ fn video_gravity_for(scale: ScaleMode) -> Option<&'static AVLayerVideoGravity> {
             ScaleMode::Fill | ScaleMode::Center => AVLayerVideoGravityResizeAspectFill,
         }
     }
+}
+
+fn build_wallpaper_window(
+    mtm: MainThreadMarker,
+    screen: &NSScreen,
+    player: &AVPlayer,
+    gravity: Option<&'static AVLayerVideoGravity>,
+) -> anyhow::Result<(Retained<NSWindow>, Retained<AVPlayerLayer>)> {
+    let frame = screen.frame();
+    let backing_scale = screen.backingScaleFactor();
+
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            mtm.alloc::<NSWindow>(),
+            frame,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    window.setLevel(WALLPAPER_LEVEL);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::Stationary
+            | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
+    window.setHasShadow(false);
+    window.setSharingType(NSWindowSharingType::ReadOnly);
+    window.setIgnoresMouseEvents(true);
+
+    let content_view = NSView::initWithFrame(mtm.alloc::<NSView>(), frame);
+    content_view.setWantsLayer(true);
+    window.setContentView(Some(&content_view));
+
+    let layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(player)) };
+    if let Some(gravity) = gravity {
+        unsafe { layer.setVideoGravity(gravity) };
+    }
+    layer.setFrame(content_view.bounds());
+    layer.setAutoresizingMask(
+        CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
+    );
+    layer.setContentsScale(backing_scale);
+
+    let root_layer = content_view
+        .layer()
+        .context("content view has no root layer")?;
+    root_layer.addSublayer(&layer);
+
+    window.makeKeyAndOrderFront(None);
+    Ok((window, layer))
 }
