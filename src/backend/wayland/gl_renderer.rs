@@ -6,6 +6,7 @@ use glutin::{
     config::{Config, ConfigTemplateBuilder},
     context::{
         AsRawContext, ContextApi, ContextAttributesBuilder, PossiblyCurrentContext, RawContext,
+        Version,
     },
     display::{AsRawDisplay, Display, DisplayApiPreference, RawDisplay as GlRawDisplay},
     prelude::{GlDisplay, NotCurrentGlContext, PossiblyCurrentGlContext},
@@ -30,21 +31,22 @@ pub struct GlRenderer {
 }
 
 impl GlRenderer {
-    const VERTEX_SHADER: &str = r#"
+    const VERTEX_SHADER: &str = r#"#version 300 es
         uniform vec2 u_scale;
-        attribute vec2 a_pos;
-        varying vec2 v_uv;
+        in vec2 a_pos;
+        out vec2 v_uv;
         void main() {
             v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);
             gl_Position = vec4(a_pos * u_scale, 0.0, 1.0);
         }
     "#;
-    const FRAGMENT_SHADER: &str = r#"
+    const FRAGMENT_SHADER: &str = r#"#version 300 es
         precision mediump float;
         uniform sampler2D u_tex;
-        varying vec2 v_uv;
+        in vec2 v_uv;
+        out vec4 frag_color;
         void main() {
-            gl_FragColor = texture2D(u_tex, v_uv);
+            frag_color = texture(u_tex, v_uv);
         }
     "#;
 
@@ -216,7 +218,7 @@ impl GlRenderer {
 
     fn create_config(gl_display: &Display) -> anyhow::Result<Config> {
         let template = ConfigTemplateBuilder::new()
-            .with_api(glutin::config::Api::GLES2)
+            .with_api(glutin::config::Api::GLES3)
             .with_alpha_size(8)
             .build();
 
@@ -253,7 +255,7 @@ impl GlRenderer {
         gl_surface: &Surface<WindowSurface>,
     ) -> anyhow::Result<PossiblyCurrentContext> {
         let gl_context_attrs = ContextAttributesBuilder::new()
-            .with_context_api(ContextApi::Gles(None))
+            .with_context_api(ContextApi::Gles(Some(Version::new(3, 0))))
             .build(None);
 
         unsafe { gl_display.create_context(gl_config, &gl_context_attrs) }
