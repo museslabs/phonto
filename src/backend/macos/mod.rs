@@ -107,6 +107,9 @@ impl Backend for MacosBackend {
         let player = unsafe { AVPlayer::playerWithPlayerItem(Some(&item), mtm) };
         unsafe {
             player.setMuted(true);
+            // Without this, AVPlayer can drop to WaitingToPlayAtSpecifiedRate when
+            // an overlapping window starves the display, and never recovers.
+            player.setAutomaticallyWaitsToMinimizeStalling(false);
         }
 
         let player_layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(&player)) };
