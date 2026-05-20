@@ -92,6 +92,7 @@ impl Backend for WaylandBackend {
         log_pause_state(paused, &options.pause);
 
         let mut applied_video_dims: Option<(u32, u32)> = None;
+        let mut last_surface_size = self.renderer.surface_dims();
         loop {
             if last_battery_check.elapsed() >= BATTERY_POLL_INTERVAL {
                 let new_paused = battery_observer::should_pause(&options.pause);
@@ -107,6 +108,14 @@ impl Backend for WaylandBackend {
 
                 let sample = rx.recv().context("receive decoded sample")?;
                 let frame = decoder::sample_to_frame(sample, &gl_context)?;
+
+                let current_size = self.state.size();
+                if current_size != last_surface_size {
+                    self.renderer
+                        .set_surface_size(current_size.0, current_size.1);
+                    last_surface_size = current_size;
+                    applied_video_dims = None;
+                }
 
                 if applied_video_dims != Some((frame.width, frame.height)) {
                     self.renderer

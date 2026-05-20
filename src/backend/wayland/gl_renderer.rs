@@ -27,6 +27,7 @@ pub struct GlRenderer {
     surface: Surface<WindowSurface>,
     context: PossiblyCurrentContext,
     scale_loc: glow::UniformLocation,
+    resolution_loc: Option<glow::UniformLocation>,
     surface_dims: (u32, u32),
 }
 
@@ -100,8 +101,9 @@ impl GlRenderer {
             // Identity until the first frame tells us the source aspect.
             gl.uniform_2_f32(Some(&scale_loc), 1.0, 1.0);
 
-            if let Some(loc) = gl.get_uniform_location(program, "u_resolution") {
-                gl.uniform_2_f32(Some(&loc), width as f32, height as f32);
+            let resolution_loc = gl.get_uniform_location(program, "u_resolution");
+            if let Some(ref loc) = resolution_loc {
+                gl.uniform_2_f32(Some(loc), width as f32, height as f32);
             }
 
             let vbo = gl.create_buffer().map_err(|e| anyhow!(e))?;
@@ -129,8 +131,27 @@ impl GlRenderer {
                 surface: gl_surface,
                 context: gl_context,
                 scale_loc,
+                resolution_loc,
                 surface_dims: (width, height),
             })
+        }
+    }
+
+    pub fn surface_dims(&self) -> (u32, u32) {
+        self.surface_dims
+    }
+
+    pub fn set_surface_size(&mut self, width: u32, height: u32) {
+        self.surface_dims = (width, height);
+        if let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
+            self.surface.resize(&self.context, w, h);
+        }
+        unsafe {
+            self.gl.viewport(0, 0, width as i32, height as i32);
+            if let Some(ref loc) = self.resolution_loc {
+                self.gl
+                    .uniform_2_f32(Some(loc), width as f32, height as f32);
+            }
         }
     }
 
