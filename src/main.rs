@@ -10,8 +10,7 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 use anyhow::Context;
-
-use backend::{Backend, PauseMode, RunOptions};
+use backend::{Backend, PauseMode, PlaybackSource, RunOptions};
 use clap::Parser;
 #[cfg(target_os = "macos")]
 use clap::Subcommand;
@@ -127,6 +126,8 @@ fn main() -> anyhow::Result<()> {
         scale: args.scale,
     };
 
+    let source = PlaybackSource::Single(std::path::PathBuf::from(path));
+
     #[cfg(target_os = "linux")]
     {
         let shader = args
@@ -137,9 +138,9 @@ fn main() -> anyhow::Result<()> {
                     .with_context(|| format!("failed to read shader file: {p}"))
             })
             .transpose()?;
-        backend::wayland::WaylandBackend::new(args.layer, shader)?.run(path, options)
+        backend::wayland::WaylandBackend::new(args.layer, shader)?.run(source, options)
     }
 
     #[cfg(target_os = "macos")]
-    return backend::macos::MacosBackend::new()?.run(path, options);
+    return backend::macos::MacosBackend::new()?.run(source, options);
 }

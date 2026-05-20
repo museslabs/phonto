@@ -12,7 +12,7 @@ use wayland_client::{
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 use self::gl_renderer::GlRenderer;
-use super::{Backend, PauseMode, RunOptions};
+use super::{Backend, PauseMode, PlaybackSource, RunOptions};
 use clap::ValueEnum;
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -68,7 +68,10 @@ impl WaylandBackend {
 const BATTERY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Backend for WaylandBackend {
-    fn run(mut self, video_path: String, options: RunOptions) -> anyhow::Result<()> {
+    fn run(mut self, source: PlaybackSource, options: RunOptions) -> anyhow::Result<()> {
+        let PlaybackSource::Single(video_path) = source;
+        let video_path = video_path.to_string_lossy().into_owned();
+
         let (tx, rx) = mpsc::sync_channel(1);
 
         let (gl_display, gl_context) =

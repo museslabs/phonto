@@ -24,7 +24,7 @@ use objc2_quartz_core::CAAutoresizingMask;
 use self::battery_observer::BatteryObserver;
 use self::loop_observer::LoopObserver;
 use self::screen_observer::ScreenObserver;
-use super::{Backend, PauseMode, RunOptions};
+use super::{Backend, PauseMode, PlaybackSource, RunOptions};
 use crate::scale::ScaleMode;
 
 // Between kCGDesktopWindowLevel (the system wallpaper layer) and
@@ -48,7 +48,10 @@ impl MacosBackend {
 }
 
 impl Backend for MacosBackend {
-    fn run(self, video_path: String, options: RunOptions) -> anyhow::Result<()> {
+    fn run(self, source: PlaybackSource, options: RunOptions) -> anyhow::Result<()> {
+        let PlaybackSource::Single(video_path) = source;
+        let video_path = video_path.to_string_lossy().into_owned();
+
         let mtm = self.mtm;
         let scale = options.scale;
 
