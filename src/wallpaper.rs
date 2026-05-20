@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rand::seq::IndexedRandom;
 
@@ -8,6 +9,7 @@ use crate::{
 };
 
 const WALLPAPER_EXTENSIONS: &[&str] = &["mp4", "mkv", "webm", "avi", "mov", "gif", "ogv"];
+const MIN_SHUFFLE_INTERVAL: Duration = Duration::from_secs(2);
 
 pub enum SourceSelection<'a> {
     Path(&'a str),
@@ -18,14 +20,18 @@ pub enum SourceSelection<'a> {
 pub fn resolve_source(
     config: &Config,
     selection: SourceSelection<'_>,
+    shuffle_every: Option<&str>,
 ) -> anyhow::Result<PlaybackSource> {
-    let pick = match selection {
-        SourceSelection::Path(path) => PathBuf::from(path),
+    match selection {
+        SourceSelection::Path(path) => {
+            if shuffle_every.is_some() {
+                anyhow::bail!("--shuffle-every requires --rand or --playlist");
+            }
+            Ok(PlaybackSource::Single(PathBuf::from(path)))
+        }
         SourceSelection::SearchPaths => {
             let pool = collect(&config.search_paths);
-            pick_random(&pool).ok_or_else(|| {
-                anyhow::anyhow!("no wallpapers found in configured search paths")
-            })?
+            source_from_pool(pool, shuffle_every)
         }
         SourceSelection::Playlist(name) => {
             let playlist = config
@@ -34,11 +40,22 @@ pub fn resolve_source(
                 .find(|p| p.name == name)
                 .ok_or_else(|| anyhow::anyhow!("no playlist named '{name}' in config"))?;
             let pool = collect_playlist(playlist);
-            pick_random(&pool)
-                .ok_or_else(|| anyhow::anyhow!("playlist '{name}' has no playable entries"))?
+            source_from_pool(pool, shuffle_every)
         }
+    }
+}
+
+pub fn write_current_if_single(source: &PlaybackSource) {
+    let PlaybackSource::Single(path) = source else {
+        return;
     };
-    Ok(PlaybackSource::Single(pick))
+
+    if let Ok(home) = std::env::var("HOME") {
+        let cache_dir = Path::new(&home).join(".cache/phonto");
+        if std::fs::create_dir_all(&cache_dir).is_ok() {
+            let _ = std::fs::write(cache_dir.join("current"), path.to_string_lossy().as_bytes());
+        }
+    }
 }
 
 pub fn collect(search_paths: &[SearchPath]) -> Vec<PathBuf> {
@@ -72,6 +89,54 @@ pub fn collect_playlist(playlist: &Playlist) -> Vec<PathBuf> {
 
 pub fn pick_random(pool: &[PathBuf]) -> Option<PathBuf> {
     pool.choose(&mut rand::rng()).cloned()
+}
+
+fn source_from_pool(
+    pool: Vec<PathBuf>,
+    shuffle_every: Option<&str>,
+) -> anyhow::Result<PlaybackSource> {
+    match shuffle_every {
+        Some(spec) => {
+            let interval = parse_duration(spec)?;
+            if pool.is_empty() {
+                anyhow::bail!("playback pool is empty");
+            }
+            if interval < MIN_SHUFFLE_INTERVAL {
+                anyhow::bail!(
+                    "--shuffle-every must be at least {}s to allow the next video to pre-roll",
+                    MIN_SHUFFLE_INTERVAL.as_secs()
+                );
+            }
+            Ok(PlaybackSource::Shuffle { pool, interval })
+        }
+        None => {
+            let pick =
+                pick_random(&pool).ok_or_else(|| anyhow::anyhow!("playback pool is empty"))?;
+            Ok(PlaybackSource::Single(pick))
+        }
+    }
+}
+
+fn parse_duration(s: &str) -> anyhow::Result<Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("empty duration");
+    }
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num_str, unit) = s.split_at(split);
+    let n: u64 = num_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid duration number in '{s}'"))?;
+    let secs = match unit.trim() {
+        "" | "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        other => anyhow::bail!("unknown duration unit '{other}' (use s, m, or h)"),
+    };
+    if secs == 0 {
+        anyhow::bail!("duration must be greater than zero");
+    }
+    Ok(Duration::from_secs(secs))
 }
 
 fn walk(dir: &Path, max_depth: u32, depth: u32, out: &mut Vec<PathBuf>) {

@@ -49,8 +49,12 @@ impl MacosBackend {
 
 impl Backend for MacosBackend {
     fn run(self, source: PlaybackSource, options: RunOptions) -> anyhow::Result<()> {
-        let PlaybackSource::Single(video_path) = source;
-        let video_path = video_path.to_string_lossy().into_owned();
+        let video_path = match source {
+            PlaybackSource::Single(p) => p.to_string_lossy().into_owned(),
+            PlaybackSource::Shuffle { .. } => {
+                anyhow::bail!("--shuffle-every is not yet implemented on macos")
+            }
+        };
 
         let mtm = self.mtm;
         let scale = options.scale;

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::scale::ScaleMode;
 
@@ -19,6 +20,10 @@ pub enum PauseMode {
 #[derive(Debug, Clone)]
 pub enum PlaybackSource {
     Single(PathBuf),
+    Shuffle {
+        pool: Vec<PathBuf>,
+        interval: Duration,
+    },
 }
 
 pub trait Backend {

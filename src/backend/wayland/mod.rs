@@ -69,8 +69,16 @@ const BATTERY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 
 impl Backend for WaylandBackend {
     fn run(mut self, source: PlaybackSource, options: RunOptions) -> anyhow::Result<()> {
-        let PlaybackSource::Single(video_path) = source;
-        let video_path = video_path.to_string_lossy().into_owned();
+        let video_path = match source {
+            PlaybackSource::Single(p) => p.to_string_lossy().into_owned(),
+            PlaybackSource::Shuffle { pool, interval } => {
+                anyhow::bail!(
+                    "--shuffle-every is not yet implemented on wayland (requested {} entries every {:?})",
+                    pool.len(),
+                    interval,
+                )
+            }
+        };
 
         let (tx, rx) = mpsc::sync_channel(1);
 

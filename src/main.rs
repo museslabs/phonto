@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 use anyhow::Context;
-use backend::{Backend, PauseMode, PlaybackSource, RunOptions};
+use backend::{Backend, PauseMode, RunOptions};
 use clap::Parser;
 #[cfg(target_os = "macos")]
 use clap::Subcommand;
@@ -41,6 +41,11 @@ struct Args {
     /// Play from a named playlist defined in config
     #[arg(long, value_name = "NAME")]
     playlist: Option<String>,
+
+    /// Swap wallpapers from the pool at this interval (e.g. "30s", "10m", "1h").
+    /// Requires --rand or --playlist.
+    #[arg(long, value_name = "DURATION")]
+    shuffle_every: Option<String>,
 
     /// How to fit the video to the screen.
     #[arg(long, value_enum, default_value_t = ScaleMode::Fill)]
@@ -117,16 +122,8 @@ fn main() -> anyhow::Result<()> {
         )
     };
 
-    let source = wallpaper::resolve_source(&config, selection)?;
-
-    // Persist the resolved path so other tools (e.g. hyprlock) can read it.
-    let PlaybackSource::Single(picked) = &source;
-    if let Ok(home) = std::env::var("HOME") {
-        let cache_dir = std::path::Path::new(&home).join(".cache/phonto");
-        if std::fs::create_dir_all(&cache_dir).is_ok() {
-            let _ = std::fs::write(cache_dir.join("current"), picked.to_string_lossy().as_bytes());
-        }
-    }
+    let source = wallpaper::resolve_source(&config, selection, args.shuffle_every.as_deref())?;
+    wallpaper::write_current_if_single(&source);
 
     let pause = match (args.pause_on_battery, args.pause_below) {
         (true, _) => PauseMode::OnBattery,
