@@ -6,6 +6,7 @@ use glutin::{
     config::{Config, ConfigTemplateBuilder},
     context::{
         AsRawContext, ContextApi, ContextAttributesBuilder, PossiblyCurrentContext, RawContext,
+        Version,
     },
     display::{AsRawDisplay, Display, DisplayApiPreference, RawDisplay as GlRawDisplay},
     prelude::{GlDisplay, NotCurrentGlContext, PossiblyCurrentGlContext},
@@ -26,25 +27,27 @@ pub struct GlRenderer {
     surface: Surface<WindowSurface>,
     context: PossiblyCurrentContext,
     scale_loc: glow::UniformLocation,
+    resolution_loc: Option<glow::UniformLocation>,
     surface_dims: (u32, u32),
 }
 
 impl GlRenderer {
-    const VERTEX_SHADER: &str = r#"
+    const VERTEX_SHADER: &str = r#"#version 300 es
         uniform vec2 u_scale;
-        attribute vec2 a_pos;
-        varying vec2 v_uv;
+        in vec2 a_pos;
+        out vec2 v_uv;
         void main() {
             v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);
             gl_Position = vec4(a_pos * u_scale, 0.0, 1.0);
         }
     "#;
-    const FRAGMENT_SHADER: &str = r#"
+    const FRAGMENT_SHADER: &str = r#"#version 300 es
         precision mediump float;
         uniform sampler2D u_tex;
-        varying vec2 v_uv;
+        in vec2 v_uv;
+        out vec4 frag_color;
         void main() {
-            gl_FragColor = texture2D(u_tex, v_uv);
+            frag_color = texture(u_tex, v_uv);
         }
     "#;
 
@@ -53,6 +56,7 @@ impl GlRenderer {
         wl_surface: &WlSurface,
         width: u32,
         height: u32,
+        fragment_src: Option<&str>,
     ) -> anyhow::Result<Self> {
         let gl_display = Self::create_display(conn)?;
         let gl_config = Self::create_config(&gl_display)?;
@@ -77,9 +81,11 @@ impl GlRenderer {
             })
         };
 
+        let frag_src = fragment_src.unwrap_or(Self::FRAGMENT_SHADER);
+
         unsafe {
             let vertex = Self::compile_shader(&gl, glow::VERTEX_SHADER, Self::VERTEX_SHADER)?;
-            let fragment = Self::compile_shader(&gl, glow::FRAGMENT_SHADER, Self::FRAGMENT_SHADER)?;
+            let fragment = Self::compile_shader(&gl, glow::FRAGMENT_SHADER, frag_src)?;
             let program = Self::link_program(&gl, vertex, fragment)?;
 
             gl.use_program(Some(program));
@@ -94,6 +100,11 @@ impl GlRenderer {
                 .context("u_scale not found")?;
             // Identity until the first frame tells us the source aspect.
             gl.uniform_2_f32(Some(&scale_loc), 1.0, 1.0);
+
+            let resolution_loc = gl.get_uniform_location(program, "u_resolution");
+            if let Some(ref loc) = resolution_loc {
+                gl.uniform_2_f32(Some(loc), width as f32, height as f32);
+            }
 
             let vbo = gl.create_buffer().map_err(|e| anyhow!(e))?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
@@ -120,8 +131,27 @@ impl GlRenderer {
                 surface: gl_surface,
                 context: gl_context,
                 scale_loc,
+                resolution_loc,
                 surface_dims: (width, height),
             })
+        }
+    }
+
+    pub fn surface_dims(&self) -> (u32, u32) {
+        self.surface_dims
+    }
+
+    pub fn set_surface_size(&mut self, width: u32, height: u32) {
+        self.surface_dims = (width, height);
+        if let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
+            self.surface.resize(&self.context, w, h);
+        }
+        unsafe {
+            self.gl.viewport(0, 0, width as i32, height as i32);
+            if let Some(ref loc) = self.resolution_loc {
+                self.gl
+                    .uniform_2_f32(Some(loc), width as f32, height as f32);
+            }
         }
     }
 
@@ -209,7 +239,7 @@ impl GlRenderer {
 
     fn create_config(gl_display: &Display) -> anyhow::Result<Config> {
         let template = ConfigTemplateBuilder::new()
-            .with_api(glutin::config::Api::GLES2)
+            .with_api(glutin::config::Api::GLES3)
             .with_alpha_size(8)
             .build();
 
@@ -246,7 +276,7 @@ impl GlRenderer {
         gl_surface: &Surface<WindowSurface>,
     ) -> anyhow::Result<PossiblyCurrentContext> {
         let gl_context_attrs = ContextAttributesBuilder::new()
-            .with_context_api(ContextApi::Gles(None))
+            .with_context_api(ContextApi::Gles(Some(Version::new(3, 0))))
             .build(None);
 
         unsafe { gl_display.create_context(gl_config, &gl_context_attrs) }

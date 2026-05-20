@@ -158,6 +158,50 @@ depth = 2
 ```
 
 `depth = 0` scans only the top-level directory. `depth = 1` includes one level of subdirectories, and so on.
+
+### GLSL shaders (Wayland only)
+
+`--shader PATH` applies a custom GLSL ES fragment shader to every frame. Pass the path to any `.glsl` file:
+
+```bash
+phonto /path/to/video.mp4 --shader ~/.config/phonto/edge-detect.glsl
+```
+
+Shaders must target **GLSL ES 3.00** — start every shader with `#version 300 es`. Use `in` for inputs, declare an `out vec4` for the output colour, and use `texture()` (not `texture2D()`).
+
+Your shader has access to:
+
+- `u_tex` (`sampler2D`) — the current video frame.
+- `v_uv` (`vec2`) — UV coordinates for the current fragment.
+- `u_resolution` (`vec2`, optional) — surface size in pixels, useful for computing per-texel offsets (`1.0 / u_resolution`).
+
+An example sobel edge detection shader:
+
+```glsl
+#version 300 es
+precision mediump float;
+uniform sampler2D u_tex;
+uniform vec2 u_resolution;
+in vec2 v_uv;
+out vec4 frag_color;
+void main() {
+    vec2 px = 1.0 / u_resolution;
+    float tl = dot(texture(u_tex, v_uv + vec2(-px.x,  px.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float tc = dot(texture(u_tex, v_uv + vec2(  0.0,  px.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float tr = dot(texture(u_tex, v_uv + vec2( px.x,  px.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float ml = dot(texture(u_tex, v_uv + vec2(-px.x,   0.0)).rgb, vec3(0.299, 0.587, 0.114));
+    float mr = dot(texture(u_tex, v_uv + vec2( px.x,   0.0)).rgb, vec3(0.299, 0.587, 0.114));
+    float bl = dot(texture(u_tex, v_uv + vec2(-px.x, -px.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float bc = dot(texture(u_tex, v_uv + vec2(  0.0, -px.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float br = dot(texture(u_tex, v_uv + vec2( px.x, -px.y)).rgb, vec3(0.299, 0.587, 0.114));
+    float gx = -tl - 2.0*ml - bl + tr + 2.0*mr + br;
+    float gy = -tl - 2.0*tc - tr + bl + 2.0*bc + br;
+    frag_color = vec4(vec3(sqrt(gx*gx + gy*gy)), 1.0);
+}
+```
+
+Note: multi-pass effects (separable blur, bloom) are not supported, the shader runs once per frame with no intermediate framebuffers.
+
 ### Fit modes
 
 `--scale` controls how the video fits to the screen:

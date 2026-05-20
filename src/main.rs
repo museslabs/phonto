@@ -8,6 +8,9 @@ mod wallpaper;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
+use anyhow::Context;
+
 use backend::{Backend, PauseMode, RunOptions};
 use clap::Parser;
 #[cfg(target_os = "macos")]
@@ -41,6 +44,13 @@ struct Args {
     #[cfg(target_os = "linux")]
     #[arg(long, value_enum, default_value_t = backend::wayland::LayerMode::Background)]
     layer: backend::wayland::LayerMode,
+
+    /// Path to a GLSL fragment shader file to apply. The shader receives
+    /// `u_tex` (sampler2D), `v_uv` (vec2), and optionally `u_resolution`
+    /// (vec2, surface size in pixels).
+    #[cfg(target_os = "linux")]
+    #[arg(long, value_name = "PATH")]
+    shader: Option<String>,
 
     /// Pause playback while the system is on battery
     #[arg(long, conflicts_with = "pause_below")]
@@ -118,7 +128,17 @@ fn main() -> anyhow::Result<()> {
     };
 
     #[cfg(target_os = "linux")]
-    return backend::wayland::WaylandBackend::new(args.layer)?.run(path, options);
+    {
+        let shader = args
+            .shader
+            .as_deref()
+            .map(|p| {
+                std::fs::read_to_string(p)
+                    .with_context(|| format!("failed to read shader file: {p}"))
+            })
+            .transpose()?;
+        backend::wayland::WaylandBackend::new(args.layer, shader)?.run(path, options)
+    }
 
     #[cfg(target_os = "macos")]
     return backend::macos::MacosBackend::new()?.run(path, options);

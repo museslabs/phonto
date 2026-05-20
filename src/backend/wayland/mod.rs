@@ -32,7 +32,7 @@ pub struct WaylandBackend {
 }
 
 impl WaylandBackend {
-    pub fn new(layer: LayerMode) -> anyhow::Result<Self> {
+    pub fn new(layer: LayerMode, shader: Option<String>) -> anyhow::Result<Self> {
         let conn = Connection::connect_to_env().context("connect to Wayland display")?;
         let mut eq = conn.new_event_queue();
         let qh = eq.handle();
@@ -47,7 +47,13 @@ impl WaylandBackend {
         state.wait_until_configured(&mut eq)?;
 
         let (width, height) = state.size();
-        let renderer = GlRenderer::new(&state.conn, state.surface()?, width, height)?;
+        let renderer = GlRenderer::new(
+            &state.conn,
+            state.surface()?,
+            width,
+            height,
+            shader.as_deref(),
+        )?;
 
         Ok(Self {
             state,
@@ -86,6 +92,7 @@ impl Backend for WaylandBackend {
         log_pause_state(paused, &options.pause);
 
         let mut applied_video_dims: Option<(u32, u32)> = None;
+        let mut last_surface_size = self.renderer.surface_dims();
         loop {
             if last_battery_check.elapsed() >= BATTERY_POLL_INTERVAL {
                 let new_paused = battery_observer::should_pause(&options.pause);
@@ -101,6 +108,14 @@ impl Backend for WaylandBackend {
 
                 let sample = rx.recv().context("receive decoded sample")?;
                 let frame = decoder::sample_to_frame(sample, &gl_context)?;
+
+                let current_size = self.state.size();
+                if current_size != last_surface_size {
+                    self.renderer
+                        .set_surface_size(current_size.0, current_size.1);
+                    last_surface_size = current_size;
+                    applied_video_dims = None;
+                }
 
                 if applied_video_dims != Some((frame.width, frame.height)) {
                     self.renderer
