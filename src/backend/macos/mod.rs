@@ -25,8 +25,13 @@ use self::screen_observer::ScreenObserver;
 use super::{Backend, PauseMode, RunOptions};
 use crate::scale::ScaleMode;
 
-// One below kCGDesktopWindowLevel so a static system wallpaper sits on top of us.
-const WALLPAPER_LEVEL: isize = -2_147_483_624;
+// Between kCGDesktopWindowLevel (the system wallpaper layer) and
+// kCGDesktopIconWindowLevel (the Finder icons). Sitting below the wallpaper
+// gets us geometrically occluded. AppKit marks us occlusionState=hidden and
+// CoreAnimation stops compositing our window, so subsequent swaps update the
+// model but never reach the screen. Above the wallpaper, occlusion stays
+// visible and the desktop icons keep drawing on top.
+const WALLPAPER_LEVEL: isize = -2_147_483_604;
 
 pub struct MacosBackend {
     mtm: MainThreadMarker,
