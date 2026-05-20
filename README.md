@@ -85,6 +85,19 @@ Play a random wallpaper from your configured search paths:
 phonto --rand
 ```
 
+Play a random wallpaper from a named playlist defined in your config:
+```bash
+phonto --playlist work
+```
+
+Rotate through the pool at a fixed interval, crossfading between videos (macOS only):
+```bash
+phonto --rand --shuffle-every 10m
+phonto --playlist work --shuffle-every 30s
+```
+
+`--shuffle-every` accepts `s` / `m` / `h` suffixes (e.g. `45s`, `10m`, `1h`), with a 2-second minimum so the next video has time to pre-roll.
+
 On Linux/Wayland, choose the layer-shell layer to render on:
 ```bash
 phonto /path/to/video.mp4 --layer background
@@ -158,6 +171,31 @@ depth = 2
 ```
 
 `depth = 0` scans only the top-level directory. `depth = 1` includes one level of subdirectories, and so on.
+
+### `playlists`
+
+Named pools you can select with `--playlist <name>`. Entries can mix directories (`path` + `depth`, same semantics as `search_paths`) and individual files (`file`):
+
+```toml
+[[playlists]]
+name = "work"
+entries = [
+  { path = "/home/user/wallpapers/work", depth = 1 },
+  { file = "/home/user/wallpapers/special.mp4" },
+]
+
+[[playlists]]
+name = "nature"
+entries = [
+  { path = "/home/user/wallpapers/nature", depth = 0 },
+]
+```
+
+Combine with `--shuffle-every` to rotate within the pool:
+
+```bash
+phonto --playlist work --shuffle-every 15m
+```
 
 ### GLSL shaders (Wayland only)
 
