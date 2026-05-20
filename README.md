@@ -52,21 +52,23 @@ cargo build --release
 
 ### Linux (Wayland)
 
-Phonto requires GStreamer and a VA-API GStreamer plugin for GPU-accelerated decoding. Without the VA-API plugin, GStreamer falls back to software decoding and CPU usage will be significantly higher.
+Phonto requires GStreamer runtime plugins in addition to the VA-API plugin used for GPU-accelerated decoding. On Linux, missing demuxer or codec plugins can cause startup failures  when opening MP4/H.264 files. Without the VA-API plugin, GStreamer falls back to software decoding and CPU usage will be significantly higher.
 
 **Arch Linux:**
 ```bash
-sudo pacman -S gst-plugin-va
+sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugin-va
 ```
+
+`gst-plugins-good` provides `qtdemux` for MP4 files, and `gst-plugins-bad` includes the H.264 parser used by many videos.
 
 **Ubuntu/Debian:**
 ```bash
-sudo apt install gstreamer1.0-vaapi
+sudo apt install gstreamer1.0-vaapi gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
 ```
 
 **Fedora:**
 ```bash
-sudo dnf install gstreamer1-vaapi
+sudo dnf install gstreamer1-vaapi gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free
 ```
 
 ### macOS
