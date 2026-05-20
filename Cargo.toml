@@ -42,14 +42,19 @@ objc2-foundation = { version = "0.3", features = [
     "NSDate",
     "NSDictionary",
     "NSError",
+    "NSKeyValueCoding",
     "NSObject",
     "NSObjCRuntime",
     "NSNotification",
     "NSProcessInfo",
     "NSRunLoop",
     "NSString",
+    "NSTimer",
     "NSURL",
     "NSValue",
+] }
+objc2-core-image = { version = "0.3", default-features = false, features = [
+    "CIFilter",
 ] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
@@ -65,10 +70,17 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSGraphics",
     "NSEvent",
 ] }
-objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
+objc2-quartz-core = { version = "0.3", features = [
+    "CAAnimation",
+    "CALayer",
+    "CAMediaTiming",
+    "CAMediaTimingFunction",
+    "CATransaction",
+] }
 objc2-core-foundation = { version = "0.3", features = ["CFNumber"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = [
     "std",
+    "block2",
     "objc2-core-foundation",
     "objc2-core-media",
     "objc2-quartz-core",
