@@ -16,7 +16,9 @@ use objc2_av_foundation::{
     AVLayerVideoGravityResizeAspectFill, AVPlayer, AVPlayerItem,
     AVPlayerItemDidPlayToEndTimeNotification, AVPlayerLayer,
 };
-use objc2_foundation::{MainThreadMarker, NSNotificationCenter, NSString, NSURL};
+use objc2_foundation::{
+    MainThreadMarker, NSActivityOptions, NSNotificationCenter, NSProcessInfo, NSString, NSURL,
+};
 use objc2_quartz_core::CAAutoresizingMask;
 
 use self::battery_observer::BatteryObserver;
@@ -53,6 +55,14 @@ impl Backend for MacosBackend {
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         app.finishLaunching();
+
+        // App Nap suspends the run loop (timers stop, AVPlayer stalls) as soon
+        // as a fullscreen window covers us. Holding a Background activity for
+        // the lifetime of the process keeps the wallpaper ticking when it's
+        // occluded. The returned token must outlive the app.run() call.
+        let activity_reason = NSString::from_str("phonto wallpaper playback");
+        let _activity = NSProcessInfo::processInfo()
+            .beginActivityWithOptions_reason(NSActivityOptions::Background, &activity_reason);
 
         let screen = NSScreen::mainScreen(mtm).context("no main screen")?;
         let frame = screen.frame();
