@@ -6,17 +6,33 @@ use serde::Deserialize;
 const DEFAULT_CONFIG: &str = "\
 # phonto configuration
 #
-# `search_paths` is a list of directories scanned when running `phonto --rand`.
-# Each entry has a `path` and a `depth` (0 = top-level only, 1 = one level of
-# subdirectories, and so on). Uncomment and edit the examples below.
+# search_paths: directories scanned by --rand and by per-display `random = true`.
+# Each entry has a path and a depth (0 = top-level only).
 #
 # [[search_paths]]
 # path = \"/home/user/wallpapers\"
 # depth = 1
 #
-# [[search_paths]]
-# path = \"/mnt/media/videos\"
-# depth = 2
+# alias: portable names for displays across operating systems. Use the alias
+# name in [[display]].id and `phonto displays` will tell you the per-OS strings
+# to put here.
+#
+# [[alias]]
+# name = \"main\"
+# wayland = \"DP-1\"
+# macos = \"DELL U2723QE\"
+#
+# display: pin a video (or a random pick) to a specific display. `id` matches
+# an [[alias]].name OR a raw native ID as shown by `phonto displays`. Exactly
+# one of `path` or `random = true` per entry.
+#
+# [[display]]
+# id = \"main\"
+# path = \"/path/to/wallpaper.mp4\"
+#
+# [[display]]
+# id = \"laptop\"
+# random = true
 ";
 
 #[derive(Debug, Deserialize)]
@@ -26,9 +42,31 @@ pub struct SearchPath {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct Alias {
+    pub name: String,
+    #[serde(default)]
+    pub wayland: Option<String>,
+    #[serde(default)]
+    pub macos: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Display {
+    pub id: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub random: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub search_paths: Vec<SearchPath>,
+    #[serde(default)]
+    pub alias: Vec<Alias>,
+    #[serde(default)]
+    pub display: Vec<Display>,
 }
 
 fn config_path() -> PathBuf {

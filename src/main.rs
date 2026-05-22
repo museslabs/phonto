@@ -3,6 +3,7 @@ mod config;
 mod displays;
 #[cfg(target_os = "macos")]
 mod macos_live_lockscreen;
+mod plan;
 mod scale;
 mod wallpaper;
 
@@ -28,12 +29,33 @@ struct Args {
     command: Option<Command>,
 
     /// Path to the video file
-    #[arg(required_unless_present = "rand", conflicts_with = "rand")]
+    #[arg(conflicts_with_all = ["rand", "display", "display_rand"])]
     path: Option<String>,
 
     /// Play a random wallpaper from your playlist
-    #[arg(long, conflicts_with = "path")]
+    #[arg(long, conflicts_with_all = ["path", "display", "display_rand"])]
     rand: bool,
+
+    /// Pin a video to a specific display. Repeatable.
+    /// Pass the display ID exactly as `phonto displays` prints it, or an
+    /// [[alias]].name from your config.
+    #[arg(
+        long,
+        value_names = ["ID", "PATH"],
+        num_args = 2,
+        action = clap::ArgAction::Append,
+        conflicts_with_all = ["path", "rand"],
+    )]
+    display: Vec<String>,
+
+    /// Pick a random video for a specific display. Repeatable.
+    #[arg(
+        long = "display-rand",
+        value_name = "ID",
+        action = clap::ArgAction::Append,
+        conflicts_with_all = ["path", "rand"],
+    )]
+    display_rand: Vec<String>,
 
     /// How to fit the video to the screen.
     #[arg(long, value_enum, default_value_t = ScaleMode::Fill)]
@@ -106,14 +128,30 @@ fn main() -> anyhow::Result<()> {
 
     let config = config::load()?;
 
-    let path = if args.rand {
-        wallpaper::pick_random(&config.search_paths)
-            .ok_or_else(|| anyhow::anyhow!("no wallpapers found in configured search paths"))?
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        args.path
-            .expect("clap ensures path is set when --rand is not used")
+    let cli_per_display = plan::CliPerDisplay {
+        pinned: args
+            .display
+            .chunks(2)
+            .map(|c| (c[0].clone(), c[1].clone()))
+            .collect(),
+        random: args.display_rand.clone(),
+    };
+
+    let plan = plan::build(args.path, args.rand, cli_per_display, &config)?;
+
+    let path = match plan {
+        plan::Plan::Mirror(plan::Source::Path(p)) => p,
+        plan::Plan::Mirror(plan::Source::Random) => {
+            wallpaper::pick_random(&config.search_paths)
+                .ok_or_else(|| anyhow::anyhow!("no wallpapers found in configured search paths"))?
+                .to_string_lossy()
+                .into_owned()
+        }
+        plan::Plan::PerDisplay(_) => {
+            anyhow::bail!(
+                "per-display playback is not yet implemented; only mirror mode is supported"
+            );
+        }
     };
 
     // Persist the resolved path so other tools (e.g. hyprlock) can read it.
