@@ -138,27 +138,16 @@ fn main() -> anyhow::Result<()> {
     };
 
     let plan = plan::build(args.path, args.rand, cli_per_display, &config)?;
-
-    let path = match plan {
-        plan::Plan::Mirror(plan::Source::Path(p)) => p,
-        plan::Plan::Mirror(plan::Source::Random) => {
-            wallpaper::pick_random(&config.search_paths)
-                .ok_or_else(|| anyhow::anyhow!("no wallpapers found in configured search paths"))?
-                .to_string_lossy()
-                .into_owned()
-        }
-        plan::Plan::PerDisplay(_) => {
-            anyhow::bail!(
-                "per-display playback is not yet implemented; only mirror mode is supported"
-            );
-        }
-    };
+    let playback = plan::resolve(plan, &config.search_paths)?;
 
     // Persist the resolved path so other tools (e.g. hyprlock) can read it.
-    if let Ok(home) = std::env::var("HOME") {
+    // For per-display playback there's no single "current" path; skip the cache.
+    if let plan::Playback::Mirror(ref path) = playback
+        && let Ok(home) = std::env::var("HOME")
+    {
         let cache_dir = std::path::Path::new(&home).join(".cache/phonto");
         if std::fs::create_dir_all(&cache_dir).is_ok() {
-            let _ = std::fs::write(cache_dir.join("current"), &path);
+            let _ = std::fs::write(cache_dir.join("current"), path);
         }
     }
 
@@ -182,9 +171,9 @@ fn main() -> anyhow::Result<()> {
                     .with_context(|| format!("failed to read shader file: {p}"))
             })
             .transpose()?;
-        backend::wayland::WaylandBackend::new(args.layer, shader)?.run(path, options)
+        backend::wayland::WaylandBackend::new(args.layer, shader)?.run(playback, options)
     }
 
     #[cfg(target_os = "macos")]
-    return backend::macos::MacosBackend::new()?.run(path, options);
+    return backend::macos::MacosBackend::new()?.run(playback, options);
 }

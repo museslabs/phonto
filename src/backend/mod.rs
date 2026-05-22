@@ -1,4 +1,5 @@
 use crate::displays::DisplayInfo;
+use crate::plan::Playback;
 use crate::scale::ScaleMode;
 
 #[derive(Debug, Clone, Copy)]
@@ -21,7 +22,7 @@ pub trait Backend {
 
     /// Take ownership of the runtime. Blocks for the lifetime of the wallpaper —
     /// returns only on error or graceful shutdown.
-    fn run(self, video_path: String, options: RunOptions) -> anyhow::Result<()>;
+    fn run(self, playback: Playback, options: RunOptions) -> anyhow::Result<()>;
 }
 
 #[cfg(target_os = "linux")]

@@ -14,9 +14,18 @@ pub struct MirrorSurface {
     pub layer: Retained<AVPlayerLayer>,
 }
 
+pub enum AttachPolicy {
+    /// Every screen, including ones that appear later, gets a surface sharing
+    /// this player.
+    Mirror(Retained<AVPlayer>),
+    /// Only screens whose localizedName matches a key in the map get a surface,
+    /// attached to that key's player. Unmatched screens are left alone.
+    PerDisplay(HashMap<String, Retained<AVPlayer>>),
+}
+
 pub struct ScreenObserverIvars {
     surfaces: RefCell<Vec<MirrorSurface>>,
-    player: Retained<AVPlayer>,
+    policy: AttachPolicy,
     scale: ScaleMode,
 }
 
@@ -36,12 +45,12 @@ define_class!(
 impl ScreenObserver {
     pub fn new(
         surfaces: Vec<MirrorSurface>,
-        player: Retained<AVPlayer>,
+        policy: AttachPolicy,
         scale: ScaleMode,
     ) -> Retained<Self> {
         let ivars = ScreenObserverIvars {
             surfaces: RefCell::new(surfaces),
-            player,
+            policy,
             scale,
         };
         let this = Self::alloc().set_ivars(ivars);
@@ -89,7 +98,7 @@ impl ScreenObserver {
             }
         });
 
-        // Attach surfaces for newly-connected screens.
+        // Attach surfaces for newly-connected screens (subject to attach policy).
         let known: HashSet<String> = self
             .ivars()
             .surfaces
@@ -102,12 +111,14 @@ impl ScreenObserver {
             if known.contains(&name) {
                 continue;
             }
-            match super::build_surface(
-                mtm,
-                &screen,
-                &self.ivars().player,
-                self.ivars().scale,
-            ) {
+            let player = match &self.ivars().policy {
+                AttachPolicy::Mirror(p) => p,
+                AttachPolicy::PerDisplay(map) => match map.get(&name) {
+                    Some(p) => p,
+                    None => continue,
+                },
+            };
+            match super::build_surface(mtm, &screen, player, self.ivars().scale) {
                 Ok(surface) => {
                     log::info!("attached new display: {name}");
                     self.ivars().surfaces.borrow_mut().push(surface);

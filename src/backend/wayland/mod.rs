@@ -15,6 +15,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_l
 use self::gl_renderer::{GlRenderer, OutputRender};
 use super::{Backend, PauseMode, RunOptions};
 use crate::displays::DisplayInfo;
+use crate::plan::Playback;
 use clap::ValueEnum;
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -79,7 +80,15 @@ impl Backend for WaylandBackend {
         displays::list_displays()
     }
 
-    fn run(mut self, video_path: String, options: RunOptions) -> anyhow::Result<()> {
+    fn run(mut self, playback: Playback, options: RunOptions) -> anyhow::Result<()> {
+        let video_path = match playback {
+            Playback::Mirror(path) => path,
+            Playback::PerDisplay(_) => {
+                anyhow::bail!(
+                    "per-display playback is not yet implemented on Wayland; landing in a later stage"
+                );
+            }
+        };
         // Bootstrap the renderer from the first configured output. Block until
         // at least one output is ready (handles slow compositors / cold-boot).
         loop {

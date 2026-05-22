@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 
-use crate::config::{Alias, Config, Display};
+use crate::config::{Alias, Config, Display, SearchPath};
 
 #[derive(Debug, Clone)]
 pub enum Source {
@@ -21,6 +21,46 @@ pub struct DisplayAssignment {
 pub enum Plan {
     Mirror(Source),
     PerDisplay(Vec<DisplayAssignment>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedAssignment {
+    pub native_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum Playback {
+    Mirror(String),
+    PerDisplay(Vec<ResolvedAssignment>),
+}
+
+pub fn resolve(plan: Plan, search_paths: &[SearchPath]) -> anyhow::Result<Playback> {
+    match plan {
+        Plan::Mirror(source) => Ok(Playback::Mirror(resolve_source(source, search_paths)?)),
+        Plan::PerDisplay(assignments) => {
+            let resolved: Vec<ResolvedAssignment> = assignments
+                .into_iter()
+                .map(|a| {
+                    let path = resolve_source(a.source, search_paths)?;
+                    Ok(ResolvedAssignment {
+                        native_id: a.native_id,
+                        path,
+                    })
+                })
+                .collect::<anyhow::Result<_>>()?;
+            Ok(Playback::PerDisplay(resolved))
+        }
+    }
+}
+
+fn resolve_source(source: Source, search_paths: &[SearchPath]) -> anyhow::Result<String> {
+    match source {
+        Source::Path(p) => Ok(p),
+        Source::Random => crate::wallpaper::pick_random(search_paths)
+            .ok_or_else(|| anyhow!("no wallpapers found in configured search paths"))
+            .map(|p| p.to_string_lossy().into_owned()),
+    }
 }
 
 #[derive(Debug, Default)]
