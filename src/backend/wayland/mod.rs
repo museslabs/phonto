@@ -6,6 +6,8 @@ mod gl_renderer;
 use std::{collections::HashMap, path::Path, sync::mpsc, time::Instant};
 
 use anyhow::Context;
+use gstreamer as gst;
+use gstreamer_gl as gst_gl;
 use wayland_client::{
     Connection, Dispatch, EventQueue, QueueHandle, WEnum, delegate_noop,
     protocol::{wl_callback, wl_compositor, wl_output, wl_registry, wl_surface},
@@ -48,21 +50,13 @@ pub struct WaylandBackend {
 impl WaylandBackend {
     pub fn new(layer: LayerMode, shader: Option<String>) -> anyhow::Result<Self> {
         let conn = Connection::connect_to_env().context("connect to Wayland display")?;
-        let mut eq = conn.new_event_queue();
+        let eq = conn.new_event_queue();
         let qh = eq.handle();
 
-        let mut state = State::new(conn, layer);
+        let state = State::new(conn, layer);
         state.conn.display().get_registry(&qh, ());
-        // 1st: registry Globals → bind compositor, layer_shell, wl_outputs.
-        eq.roundtrip(&mut state)
-            .context("initial Wayland roundtrip")?;
-        // 2nd: wl_output events (Name, Mode, Done) → create per-output layer surfaces.
-        eq.roundtrip(&mut state)
-            .context("wl_output info roundtrip")?;
-        // 3rd: layer_surface Configure events.
-        eq.roundtrip(&mut state)
-            .context("layer surface configure roundtrip")?;
-
+        // Defer roundtrips to run(), so the surface_policy is set before any
+        // wl_output Done events are dispatched.
         Ok(Self {
             state,
             eq,
@@ -81,16 +75,42 @@ impl Backend for WaylandBackend {
     }
 
     fn run(mut self, playback: Playback, options: RunOptions) -> anyhow::Result<()> {
-        let video_path = match playback {
-            Playback::Mirror(path) => path,
-            Playback::PerDisplay(_) => {
-                anyhow::bail!(
-                    "per-display playback is not yet implemented on Wayland; landing in a later stage"
-                );
+        // Collect the per-assignment paths and set the surface policy before
+        // any wl_output Done events fire (Done triggers try_create_layer_surface,
+        // which consults the policy).
+        let paths: Vec<String> = match &playback {
+            Playback::Mirror(path) => vec![path.clone()],
+            Playback::PerDisplay(assignments) => {
+                assignments.iter().map(|a| a.path.clone()).collect()
             }
         };
-        // Bootstrap the renderer from the first configured output. Block until
-        // at least one output is ready (handles slow compositors / cold-boot).
+        self.state.surface_policy = match &playback {
+            Playback::Mirror(_) => SurfacePolicy::All,
+            Playback::PerDisplay(assignments) => {
+                let map: HashMap<String, usize> = assignments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| (a.native_id.clone(), i))
+                    .collect();
+                SurfacePolicy::PerDisplay(map)
+            }
+        };
+
+        // Roundtrips after policy is set:
+        //   1. registry Globals → bind compositor, layer_shell, wl_outputs.
+        //   2. wl_output events (Name, Mode, Done) → create per-output layer surfaces.
+        //   3. layer_surface Configure events.
+        self.eq
+            .roundtrip(&mut self.state)
+            .context("initial Wayland roundtrip")?;
+        self.eq
+            .roundtrip(&mut self.state)
+            .context("wl_output info roundtrip")?;
+        self.eq
+            .roundtrip(&mut self.state)
+            .context("layer surface configure roundtrip")?;
+
+        // Bootstrap the renderer from the first renderable matched output.
         loop {
             if self.state.first_renderable_output().is_some() {
                 break;
@@ -111,18 +131,16 @@ impl Backend for WaylandBackend {
             .expect("just checked");
         let (renderer, first_render) = GlRenderer::new(
             &self.state.conn,
-            bootstrap.wl_surface.as_ref().expect("renderable has surface"),
+            bootstrap
+                .wl_surface
+                .as_ref()
+                .expect("renderable has surface"),
             bootstrap.width.max(1),
             bootstrap.height.max(1),
             self.shader.as_deref(),
         )?;
 
-        // Stash the first OutputRender into its OutputState.
-        self.state
-            .outputs
-            .get_mut(&bootstrap_name)
-            .unwrap()
-            .render = Some(first_render);
+        self.state.outputs.get_mut(&bootstrap_name).unwrap().render = Some(first_render);
 
         // Attach every other already-renderable output.
         let to_attach: Vec<u32> = self
@@ -139,21 +157,12 @@ impl Backend for WaylandBackend {
             o.render = Some(render);
         }
 
-        let (tx, rx) = mpsc::sync_channel(1);
-
-        let (gl_display, gl_context) =
-            decoder::wrap_gl(renderer.egl_display(), renderer.egl_context())?;
-
-        let decoder_gl_context = gl_context.clone();
-        std::thread::Builder::new()
-            .name("decoder".into())
-            .spawn(move || {
-                if let Err(e) =
-                    decoder::run(Path::new(&video_path), gl_display, decoder_gl_context, tx)
-                {
-                    log::error!("decoder error: {e:#}");
-                }
-            })?;
+        // Spawn one decoder per assignment. Each gets its own gst_gl::GLContext
+        // wrapping the same EGL context as the renderer.
+        let decoders: Vec<DecoderHandle> = paths
+            .into_iter()
+            .map(|path| spawn_decoder(path, &renderer))
+            .collect::<anyhow::Result<_>>()?;
 
         let mut paused = battery_observer::should_pause(&options.pause);
         let mut last_battery_check = Instant::now();
@@ -208,33 +217,41 @@ impl Backend for WaylandBackend {
                     .context("waiting for frame callback")?;
             }
 
-            let sample = rx.recv().context("receive decoded sample")?;
-            let frame = decoder::sample_to_frame(sample, &gl_context)?;
-            let video_dims = (frame.width, frame.height);
-
-            // Render to every renderable output.
-            let names: Vec<u32> = self
-                .state
-                .outputs
-                .iter()
-                .filter(|(_, o)| o.render.is_some())
-                .map(|(name, _)| *name)
-                .collect();
-            for name in names {
-                let o = self.state.outputs.get_mut(&name).unwrap();
-                let target_dims = (o.width.max(1), o.height.max(1));
-
-                // Frame callback must be requested before the commit that swap_buffers
-                // performs, so the compositor schedules the callback for that commit.
-                let surface = o.wl_surface.as_ref().expect("filtered");
-                surface.frame(&self.qh, name);
-                o.frame_callback_pending = true;
-
-                let render = o.render.as_mut().expect("filtered");
-                if render.dims() != target_dims {
-                    render.set_surface_size(&renderer, target_dims.0, target_dims.1);
+            // Group renderable outputs by decoder (assignment_index). Mirror
+            // collapses to one group; PerDisplay has one output per group.
+            let mut groups: HashMap<usize, Vec<u32>> = HashMap::new();
+            for (name, o) in self.state.outputs.iter() {
+                if o.render.is_none() {
+                    continue;
                 }
-                renderer.render(render, &frame, options.scale, video_dims)?;
+                let Some(idx) = o.assignment_index else {
+                    continue;
+                };
+                groups.entry(idx).or_default().push(*name);
+            }
+
+            for (idx, output_names) in groups {
+                let decoder = &decoders[idx];
+                let sample = decoder.rx.recv().context("receive decoded sample")?;
+                let frame = decoder::sample_to_frame(sample, &decoder.gl_context)?;
+                let video_dims = (frame.width, frame.height);
+
+                for name in output_names {
+                    let o = self.state.outputs.get_mut(&name).unwrap();
+                    let target_dims = (o.width.max(1), o.height.max(1));
+
+                    // Frame callback must precede the commit that swap_buffers
+                    // performs, so the compositor schedules it for that commit.
+                    let surface = o.wl_surface.as_ref().expect("filtered");
+                    surface.frame(&self.qh, name);
+                    o.frame_callback_pending = true;
+
+                    let render = o.render.as_mut().expect("filtered");
+                    if render.dims() != target_dims {
+                        render.set_surface_size(&renderer, target_dims.0, target_dims.1);
+                    }
+                    renderer.render(render, &frame, options.scale, video_dims)?;
+                }
             }
 
             self.eq
@@ -246,6 +263,38 @@ impl Backend for WaylandBackend {
                 .context("flush Wayland connection")?;
         }
     }
+}
+
+struct DecoderHandle {
+    rx: mpsc::Receiver<gst::Sample>,
+    gl_context: gst_gl::GLContext,
+    _handle: std::thread::JoinHandle<()>,
+}
+
+fn spawn_decoder(path: String, renderer: &GlRenderer) -> anyhow::Result<DecoderHandle> {
+    let (gl_display, gl_context) =
+        decoder::wrap_gl(renderer.egl_display(), renderer.egl_context())?;
+    let (tx, rx) = mpsc::sync_channel(1);
+    let decoder_gl_context = gl_context.clone();
+    let thread_name = format!(
+        "decoder:{}",
+        std::path::Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone())
+    );
+    let handle = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            if let Err(e) = decoder::run(Path::new(&path), gl_display, decoder_gl_context, tx) {
+                log::error!("decoder error for {path}: {e:#}");
+            }
+        })?;
+    Ok(DecoderHandle {
+        rx,
+        gl_context,
+        _handle: handle,
+    })
 }
 
 fn log_pause_state(paused: bool, mode: &PauseMode) {
@@ -271,6 +320,9 @@ struct OutputState {
     configured: bool,
     frame_callback_pending: bool,
     render: Option<OutputRender>,
+    /// Index into the backend's `decoders` Vec. Set by `try_create_layer_surface`
+    /// when the output matches the active SurfacePolicy.
+    assignment_index: Option<usize>,
 }
 
 impl OutputState {
@@ -286,12 +338,21 @@ impl OutputState {
             configured: false,
             frame_callback_pending: false,
             render: None,
+            assignment_index: None,
         }
     }
 
     fn is_renderable(&self) -> bool {
-        self.configured && self.wl_surface.is_some()
+        self.configured && self.wl_surface.is_some() && self.assignment_index.is_some()
     }
+}
+
+enum SurfacePolicy {
+    /// Every output gets a surface fed by decoder 0 (Mirror mode).
+    All,
+    /// Only outputs whose name matches a key in this map get a surface;
+    /// the value is the index into the backend's `decoders` Vec.
+    PerDisplay(HashMap<String, usize>),
 }
 
 struct State {
@@ -300,6 +361,7 @@ struct State {
     layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
     layer_mode: LayerMode,
     outputs: HashMap<u32, OutputState>,
+    surface_policy: SurfacePolicy,
 }
 
 impl State {
@@ -310,6 +372,8 @@ impl State {
             layer_shell: None,
             layer_mode,
             outputs: HashMap::new(),
+            // Replaced in Backend::run before any roundtrips happen.
+            surface_policy: SurfacePolicy::All,
         }
     }
 
@@ -329,12 +393,33 @@ impl State {
         };
         let layer = self.layer_mode.to_wlr();
 
+        // Decide whether this output gets a surface (and which decoder feeds it)
+        // based on the active SurfacePolicy.
+        let assignment_index = {
+            let Some(output) = self.outputs.get(&registry_name) else {
+                return;
+            };
+            if !output.output_done || output.wl_surface.is_some() {
+                return;
+            }
+            match &self.surface_policy {
+                SurfacePolicy::All => 0,
+                SurfacePolicy::PerDisplay(map) => match map.get(&output.name) {
+                    Some(&idx) => idx,
+                    None => {
+                        log::info!(
+                            "wl_output {:?} not in [[display]] assignments; leaving alone",
+                            output.name
+                        );
+                        return;
+                    }
+                },
+            }
+        };
+
         let Some(output) = self.outputs.get_mut(&registry_name) else {
             return;
         };
-        if !output.output_done || output.wl_surface.is_some() {
-            return;
-        }
 
         let wl_surface = compositor.create_surface(qh, ());
         let layer_surface = layer_shell.get_layer_surface(
@@ -362,6 +447,7 @@ impl State {
 
         output.wl_surface = Some(wl_surface);
         output.layer_surface = Some(layer_surface);
+        output.assignment_index = Some(assignment_index);
     }
 
     /// After compositor/layer_shell appear, try to create layer surfaces for
@@ -404,8 +490,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 }
                 "wl_output" => {
                     log::info!("wl_output advertised (registry name {name})");
-                    let output: wl_output::WlOutput =
-                        registry.bind(name, version.min(4), qh, name);
+                    let output: wl_output::WlOutput = registry.bind(name, version.min(4), qh, name);
                     state.outputs.insert(name, OutputState::new(output));
                 }
                 _ => {}
@@ -529,10 +614,10 @@ impl Dispatch<wl_callback::WlCallback, u32> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_callback::Event::Done { .. } = event {
-            if let Some(output) = state.outputs.get_mut(registry_name) {
-                output.frame_callback_pending = false;
-            }
+        if let wl_callback::Event::Done { .. } = event
+            && let Some(output) = state.outputs.get_mut(registry_name)
+        {
+            output.frame_callback_pending = false;
         }
     }
 }
