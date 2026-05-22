@@ -22,7 +22,7 @@ use objc2_quartz_core::CAAutoresizingMask;
 
 use self::battery_observer::BatteryObserver;
 use self::loop_observer::LoopObserver;
-use self::screen_observer::ScreenObserver;
+use self::screen_observer::{MirrorSurface, ScreenObserver};
 use super::{Backend, PauseMode, RunOptions};
 use crate::displays::DisplayInfo;
 use crate::scale::ScaleMode;
@@ -48,15 +48,6 @@ impl Backend for MacosBackend {
     }
 
     fn run(self, video_path: String, options: RunOptions) -> anyhow::Result<()> {
-        match Self::list_displays() {
-            Ok(displays) => {
-                for d in &displays {
-                    log::info!("detected display: {} ({}x{})", d.id, d.width, d.height);
-                }
-            }
-            Err(e) => log::warn!("failed to enumerate displays: {e:#}"),
-        }
-
         let mtm = self.mtm;
         let scale = options.scale;
 
@@ -64,36 +55,7 @@ impl Backend for MacosBackend {
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         app.finishLaunching();
 
-        let screen = NSScreen::mainScreen(mtm).context("no main screen")?;
-        let frame = screen.frame();
-        let backing_scale = screen.backingScaleFactor();
-
-        let window = unsafe {
-            NSWindow::initWithContentRect_styleMask_backing_defer(
-                mtm.alloc::<NSWindow>(),
-                frame,
-                NSWindowStyleMask::Borderless,
-                NSBackingStoreType::Buffered,
-                false,
-            )
-        };
-        window.setLevel(WALLPAPER_LEVEL);
-        window.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::FullScreenAuxiliary
-                | NSWindowCollectionBehavior::Stationary
-                | NSWindowCollectionBehavior::IgnoresCycle,
-        );
-        window.setOpaque(false);
-        window.setBackgroundColor(Some(&NSColor::clearColor()));
-        window.setHasShadow(false);
-        // `ReadOnly` so screen-capture / screen-sharing can read us. `None` blocks them.
-        window.setSharingType(NSWindowSharingType::ReadOnly);
-        window.setIgnoresMouseEvents(true);
-
-        let content_view = NSView::initWithFrame(mtm.alloc::<NSView>(), frame);
-        content_view.setWantsLayer(true);
-        window.setContentView(Some(&content_view));
+        let screens = NSScreen::screens(mtm);
 
         // AVAsset resolves relative paths against the process cwd, which isn't
         // what users expect from `phonto ./video.mp4`.
@@ -109,20 +71,74 @@ impl Backend for MacosBackend {
             player.setMuted(true);
         }
 
-        let player_layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(&player)) };
-        if let Some(gravity) = video_gravity_for(scale) {
-            unsafe { player_layer.setVideoGravity(gravity) };
-        }
-        player_layer.setFrame(content_view.bounds());
-        player_layer.setAutoresizingMask(
-            CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
-        );
-        player_layer.setContentsScale(backing_scale);
+        let mut surfaces: Vec<MirrorSurface> = Vec::new();
+        for screen in screens.iter() {
+            let name = screen.localizedName().to_string();
+            let frame = screen.frame();
+            let backing_scale = screen.backingScaleFactor();
 
-        let root_layer = content_view
-            .layer()
-            .context("content view has no root layer")?;
-        root_layer.addSublayer(&player_layer);
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    mtm.alloc::<NSWindow>(),
+                    frame,
+                    NSWindowStyleMask::Borderless,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            };
+            window.setLevel(WALLPAPER_LEVEL);
+            window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary
+                    | NSWindowCollectionBehavior::Stationary
+                    | NSWindowCollectionBehavior::IgnoresCycle,
+            );
+            window.setOpaque(false);
+            window.setBackgroundColor(Some(&NSColor::clearColor()));
+            window.setHasShadow(false);
+            // `ReadOnly` so screen-capture / screen-sharing can read us. `None` blocks them.
+            window.setSharingType(NSWindowSharingType::ReadOnly);
+            window.setIgnoresMouseEvents(true);
+
+            let content_view = NSView::initWithFrame(mtm.alloc::<NSView>(), frame);
+            content_view.setWantsLayer(true);
+            window.setContentView(Some(&content_view));
+
+            let player_layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(&player)) };
+            if let Some(gravity) = video_gravity_for(scale) {
+                unsafe { player_layer.setVideoGravity(gravity) };
+            }
+            player_layer.setFrame(content_view.bounds());
+            player_layer.setAutoresizingMask(
+                CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
+            );
+            player_layer.setContentsScale(backing_scale);
+
+            let root_layer = content_view
+                .layer()
+                .context("content view has no root layer")?;
+            root_layer.addSublayer(&player_layer);
+
+            window.makeKeyAndOrderFront(None);
+
+            log::info!(
+                "surface ready on {}: {}x{} @ {}x",
+                name,
+                frame.size.width as u32,
+                frame.size.height as u32,
+                backing_scale,
+            );
+
+            surfaces.push(MirrorSurface {
+                name,
+                window,
+                layer: player_layer,
+            });
+        }
+
+        if surfaces.is_empty() {
+            anyhow::bail!("no screens detected");
+        }
 
         // Loop: AVPlayer posts AVPlayerItemDidPlayToEndTimeNotification when the
         // item reaches its end. The observer seeks back to zero and resumes.
@@ -137,7 +153,7 @@ impl Backend for MacosBackend {
         }
 
         // Re-apply geometry on display reconfiguration.
-        let screen_observer = ScreenObserver::new(window.clone(), player_layer.clone());
+        let screen_observer = ScreenObserver::new(surfaces);
         unsafe {
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
                 &screen_observer,
@@ -146,8 +162,6 @@ impl Backend for MacosBackend {
                 None,
             );
         }
-
-        window.makeKeyAndOrderFront(None);
 
         let battery_observer = if matches!(options.pause, PauseMode::Never) {
             None
@@ -158,12 +172,7 @@ impl Backend for MacosBackend {
             unsafe { player.play() };
         }
 
-        log::info!(
-            "macOS backend ready: {}x{} window at level {}",
-            frame.size.width as u32,
-            frame.size.height as u32,
-            WALLPAPER_LEVEL,
-        );
+        log::info!("macOS backend ready at level {}", WALLPAPER_LEVEL);
 
         app.run();
         drop(loop_observer);
