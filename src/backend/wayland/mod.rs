@@ -344,6 +344,13 @@ impl State {
 
         wl_surface.commit();
 
+        let log_name = if output.name.is_empty() {
+            format!("wl_output#{registry_name}")
+        } else {
+            output.name.clone()
+        };
+        log::info!("created layer surface for {log_name}");
+
         output.wl_surface = Some(wl_surface);
         output.layer_surface = Some(layer_surface);
     }
@@ -387,14 +394,25 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     state.maybe_create_pending_layer_surfaces(qh);
                 }
                 "wl_output" => {
+                    log::info!("wl_output advertised (registry name {name})");
                     let output: wl_output::WlOutput =
                         registry.bind(name, version.min(4), qh, name);
                     state.outputs.insert(name, OutputState::new(output));
                 }
                 _ => {}
             },
-            // Output removed at runtime: leave cleanup for a later stage.
-            wl_registry::Event::GlobalRemove { .. } => {}
+            wl_registry::Event::GlobalRemove { name } => {
+                if let Some(removed) = state.outputs.remove(&name) {
+                    let label = if removed.name.is_empty() {
+                        format!("wl_output#{name}")
+                    } else {
+                        removed.name.clone()
+                    };
+                    log::info!("output removed: {label}");
+                    // OutputState's Drop tears down layer_surface, wl_surface,
+                    // wl_output proxies and the OutputRender (EGL surface).
+                }
+            }
             _ => {}
         }
     }
@@ -453,21 +471,42 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, u32> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        let Some(output) = state.outputs.get_mut(registry_name) else {
-            return;
-        };
-        if let zwlr_layer_surface_v1::Event::Configure {
-            serial,
-            width,
-            height,
-        } = event
-        {
-            layer_surface.ack_configure(serial);
-            if width > 0 && height > 0 {
-                output.width = width;
-                output.height = height;
+        match event {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                layer_surface.ack_configure(serial);
+                if let Some(output) = state.outputs.get_mut(registry_name) {
+                    if width > 0 && height > 0 {
+                        output.width = width;
+                        output.height = height;
+                    }
+                    output.configured = true;
+                    log::info!(
+                        "layer surface configured for {}: {}x{}",
+                        if output.name.is_empty() {
+                            format!("wl_output#{registry_name}")
+                        } else {
+                            output.name.clone()
+                        },
+                        output.width,
+                        output.height,
+                    );
+                }
             }
-            output.configured = true;
+            zwlr_layer_surface_v1::Event::Closed => {
+                if let Some(removed) = state.outputs.remove(registry_name) {
+                    let label = if removed.name.is_empty() {
+                        format!("wl_output#{registry_name}")
+                    } else {
+                        removed.name.clone()
+                    };
+                    log::info!("layer surface closed for {label}");
+                }
+            }
+            _ => {}
         }
     }
 }
