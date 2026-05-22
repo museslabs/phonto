@@ -96,7 +96,100 @@ Available layers are `background` (default), `bottom`, `top`, and `overlay`.
 
 Phonto also writes the currently selected video path to `~/.cache/phonto/current`.
 This is useful when `--rand` chooses a wallpaper and another tool needs to reuse
-the same video.
+the same video. For per-display playback there is no single "current" video, so the
+cache file is skipped in that mode.
+
+## Multi-monitor
+
+By default phonto mirrors a single video across every connected display. New
+monitors plugged in mid-session attach automatically, and unplugging then
+re-plugging a monitor brings the wallpaper back without restart.
+
+### Listing displays
+
+```bash
+phonto displays
+```
+
+The first column is the native ID for the current OS. You can pass that string
+straight into `--display`, or wire it into an `[[alias]]` block ([see below](#cross-platform-aliases)) to
+share one config across machines.
+
+### Pinning videos per display from the CLI
+
+Repeat `--display ID PATH` for each display you want to set. Every display must
+be named explicitly. There is no implicit default.
+
+```bash
+phonto --display "DELL U2723QE" /path/to/ocean.mp4 \
+       --display "eDP-1" /path/to/forest.mp4
+```
+
+The first value is the display ID (as printed by `phonto displays`, or an alias
+name from your config) and the second is the video path.
+
+For a random video on one specific display, use `--display-rand ID`. It picks
+from your `search_paths` the same way `--rand` does.
+
+```bash
+phonto --display "DELL U2723QE" /path/to/pinned.mp4 \
+       --display-rand "eDP-1"
+```
+
+`--display` and `--display-rand` can be mixed and repeated. Displays you don't
+mention get no wallpaper from phonto and keep whatever the OS is showing there.
+
+### Persistent assignment via config
+
+The same assignments belong in `config.toml` under `[[display]]` blocks. Then
+`phonto` with no arguments reads them.
+
+```toml
+[[display]]
+id = "DELL U2723QE"
+path = "~/Videos/ocean.mp4"
+
+[[display]]
+id = "eDP-1"
+random = true
+```
+
+Each `[[display]]` needs exactly one of `path` or `random = true`. Phonto errors
+at startup if both or neither are set.
+
+A `[[display]]` whose display is not currently connected is not an error.
+Phonto waits and attaches the wallpaper when that display appears.
+
+### Cross-platform aliases
+
+Native display IDs differ across operating systems. The same monitor might be
+`"DELL U2723QE"` on macOS and `"DP-1"` on a wlroots compositor. Alias blocks
+let you give a portable name to a physical display once and reference it from
+`[[display]].id`.
+
+```toml
+[[alias]]
+name = "main"
+wayland = "DP-1"
+macos = "DELL U2723QE"
+
+[[alias]]
+name = "laptop"
+wayland = "eDP-1"
+macos = "Built-in Retina Display"
+
+[[display]]
+id = "main"
+path = "~/Videos/ocean.mp4"
+
+[[display]]
+id = "laptop"
+random = true
+```
+
+Run `phonto displays` on each OS once to copy the right native name into the
+alias. The same dotfile then works on both. Either field is optional, so a
+laptop-only alias can leave the other one out.
 
 ## Lock screen backgrounds with hyprlock (Wayland)
 
