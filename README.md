@@ -254,6 +254,14 @@ depth = 2
 
 `depth = 0` scans only the top-level directory. `depth = 1` includes one level of subdirectories, and so on.
 
+### Path expansion
+
+Every path field in the config (`[[search_paths]].path`, `[[display]].path`)
+and every path on the CLI (positional, `--display ID PATH`, `--shader`)
+accepts a leading `~/` which expands to `$HOME`. The same
+`~/Downloads/wall.mp4` works on macOS (`/Users/you`) and Linux (`/home/you`)
+without editing the dotfile.
+
 ### GLSL shaders (Wayland only)
 
 `--shader PATH` applies a custom GLSL ES fragment shader to every frame. Pass the path to any `.glsl` file:
