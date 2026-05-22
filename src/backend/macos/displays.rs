@@ -5,8 +5,8 @@ use objc2_foundation::MainThreadMarker;
 use crate::displays::DisplayInfo;
 
 pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
-    let mtm = MainThreadMarker::new()
-        .context("macOS display enumeration must run on the main thread")?;
+    let mtm =
+        MainThreadMarker::new().context("macOS display enumeration must run on the main thread")?;
     let screens = NSScreen::screens(mtm);
     let mut out = Vec::new();
     for screen in screens.iter() {

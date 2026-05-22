@@ -16,8 +16,7 @@ pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
     let mut state = DisplaysState::default();
     conn.display().get_registry(&qh, ());
 
-    eq.roundtrip(&mut state)
-        .context("registry roundtrip")?;
+    eq.roundtrip(&mut state).context("registry roundtrip")?;
     eq.roundtrip(&mut state)
         .context("output events roundtrip")?;
 
@@ -69,11 +68,9 @@ impl Dispatch<wl_output::WlOutput, u32> for DisplaysState {
             return;
         };
         match event {
-            wl_output::Event::Geometry { make, model, .. } => {
-                if entry.description.is_empty() {
-                    let combined = format!("{make} {model}");
-                    entry.description = combined.trim().to_string();
-                }
+            wl_output::Event::Geometry { make, model, .. } if entry.description.is_empty() => {
+                let combined = format!("{make} {model}");
+                entry.description = combined.trim().to_string();
             }
             wl_output::Event::Mode {
                 flags,

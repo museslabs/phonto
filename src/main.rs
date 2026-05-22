@@ -14,7 +14,6 @@ use anyhow::Context;
 
 use backend::{Backend, PauseMode, RunOptions};
 use clap::Parser;
-#[cfg(target_os = "macos")]
 use clap::Subcommand;
 
 use scale::ScaleMode;
@@ -23,9 +22,8 @@ use scale::ScaleMode;
 #[command(version, about, long_about = None)]
 // Top-level args are only required for the "play a wallpaper" mode, not
 // when a subcommand is invoked.
-#[cfg_attr(target_os = "macos", command(subcommand_negates_reqs = true))]
+#[command(subcommand_negates_reqs = true)]
 struct Args {
-    #[cfg(target_os = "macos")]
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -62,12 +60,15 @@ struct Args {
     pause_below: Option<u8>,
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// List the displays phonto detects on this system.
+    Displays,
+
     /// Transcode a video and register it as the macOS lock-screen
     /// wallpaper (HEVC Main10 + temporal sub-layers; survives multiple
     /// lock cycles).
+    #[cfg(target_os = "macos")]
     InstallLiveLockscreen {
         /// Path to the video file (MP4/MOV).
         video: PathBuf,
@@ -87,9 +88,14 @@ fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    #[cfg(target_os = "macos")]
     if let Some(cmd) = args.command {
         match cmd {
+            Command::Displays => {
+                let detected = displays::list()?;
+                displays::print(&detected);
+                return Ok(());
+            }
+            #[cfg(target_os = "macos")]
             Command::InstallLiveLockscreen {
                 video,
                 name,
