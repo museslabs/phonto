@@ -1,5 +1,6 @@
 mod backend;
 mod config;
+mod displays;
 #[cfg(target_os = "macos")]
 mod macos_live_lockscreen;
 mod scale;

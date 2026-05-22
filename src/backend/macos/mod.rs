@@ -1,4 +1,5 @@
 mod battery_observer;
+mod displays;
 mod loop_observer;
 mod screen_observer;
 
@@ -23,6 +24,7 @@ use self::battery_observer::BatteryObserver;
 use self::loop_observer::LoopObserver;
 use self::screen_observer::ScreenObserver;
 use super::{Backend, PauseMode, RunOptions};
+use crate::displays::DisplayInfo;
 use crate::scale::ScaleMode;
 
 // One below kCGDesktopWindowLevel so a static system wallpaper sits on top of us.
@@ -41,7 +43,20 @@ impl MacosBackend {
 }
 
 impl Backend for MacosBackend {
+    fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
+        displays::list_displays()
+    }
+
     fn run(self, video_path: String, options: RunOptions) -> anyhow::Result<()> {
+        match Self::list_displays() {
+            Ok(displays) => {
+                for d in &displays {
+                    log::info!("detected display: {} ({}x{})", d.id, d.width, d.height);
+                }
+            }
+            Err(e) => log::warn!("failed to enumerate displays: {e:#}"),
+        }
+
         let mtm = self.mtm;
         let scale = options.scale;
 

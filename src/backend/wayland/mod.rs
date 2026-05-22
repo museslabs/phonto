@@ -1,5 +1,6 @@
 mod battery_observer;
 mod decoder;
+mod displays;
 mod gl_renderer;
 
 use std::{path::Path, sync::mpsc, time::Instant};
@@ -13,6 +14,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_l
 
 use self::gl_renderer::GlRenderer;
 use super::{Backend, PauseMode, RunOptions};
+use crate::displays::DisplayInfo;
 use clap::ValueEnum;
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -68,7 +70,20 @@ impl WaylandBackend {
 const BATTERY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Backend for WaylandBackend {
+    fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
+        displays::list_displays()
+    }
+
     fn run(mut self, video_path: String, options: RunOptions) -> anyhow::Result<()> {
+        match Self::list_displays() {
+            Ok(displays) => {
+                for d in &displays {
+                    log::info!("detected display: {} ({}x{})", d.id, d.width, d.height);
+                }
+            }
+            Err(e) => log::warn!("failed to enumerate displays: {e:#}"),
+        }
+
         let (tx, rx) = mpsc::sync_channel(1);
 
         let (gl_display, gl_context) =
