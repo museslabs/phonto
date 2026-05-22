@@ -73,67 +73,7 @@ impl Backend for MacosBackend {
 
         let mut surfaces: Vec<MirrorSurface> = Vec::new();
         for screen in screens.iter() {
-            let name = screen.localizedName().to_string();
-            let frame = screen.frame();
-            let backing_scale = screen.backingScaleFactor();
-
-            let window = unsafe {
-                NSWindow::initWithContentRect_styleMask_backing_defer(
-                    mtm.alloc::<NSWindow>(),
-                    frame,
-                    NSWindowStyleMask::Borderless,
-                    NSBackingStoreType::Buffered,
-                    false,
-                )
-            };
-            window.setLevel(WALLPAPER_LEVEL);
-            window.setCollectionBehavior(
-                NSWindowCollectionBehavior::CanJoinAllSpaces
-                    | NSWindowCollectionBehavior::FullScreenAuxiliary
-                    | NSWindowCollectionBehavior::Stationary
-                    | NSWindowCollectionBehavior::IgnoresCycle,
-            );
-            window.setOpaque(false);
-            window.setBackgroundColor(Some(&NSColor::clearColor()));
-            window.setHasShadow(false);
-            // `ReadOnly` so screen-capture / screen-sharing can read us. `None` blocks them.
-            window.setSharingType(NSWindowSharingType::ReadOnly);
-            window.setIgnoresMouseEvents(true);
-
-            let content_view = NSView::initWithFrame(mtm.alloc::<NSView>(), frame);
-            content_view.setWantsLayer(true);
-            window.setContentView(Some(&content_view));
-
-            let player_layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(&player)) };
-            if let Some(gravity) = video_gravity_for(scale) {
-                unsafe { player_layer.setVideoGravity(gravity) };
-            }
-            player_layer.setFrame(content_view.bounds());
-            player_layer.setAutoresizingMask(
-                CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
-            );
-            player_layer.setContentsScale(backing_scale);
-
-            let root_layer = content_view
-                .layer()
-                .context("content view has no root layer")?;
-            root_layer.addSublayer(&player_layer);
-
-            window.makeKeyAndOrderFront(None);
-
-            log::info!(
-                "surface ready on {}: {}x{} @ {}x",
-                name,
-                frame.size.width as u32,
-                frame.size.height as u32,
-                backing_scale,
-            );
-
-            surfaces.push(MirrorSurface {
-                name,
-                window,
-                layer: player_layer,
-            });
+            surfaces.push(build_surface(mtm, &screen, &player, scale)?);
         }
 
         if surfaces.is_empty() {
@@ -152,8 +92,9 @@ impl Backend for MacosBackend {
             );
         }
 
-        // Re-apply geometry on display reconfiguration.
-        let screen_observer = ScreenObserver::new(surfaces);
+        // Re-apply geometry on display reconfiguration, and attach new
+        // surfaces when a fresh display appears.
+        let screen_observer = ScreenObserver::new(surfaces, player.clone(), scale);
         unsafe {
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
                 &screen_observer,
@@ -181,6 +122,75 @@ impl Backend for MacosBackend {
 
         Ok(())
     }
+}
+
+pub(super) fn build_surface(
+    mtm: MainThreadMarker,
+    screen: &NSScreen,
+    player: &AVPlayer,
+    scale: ScaleMode,
+) -> anyhow::Result<MirrorSurface> {
+    let name = screen.localizedName().to_string();
+    let frame = screen.frame();
+    let backing_scale = screen.backingScaleFactor();
+
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            mtm.alloc::<NSWindow>(),
+            frame,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    window.setLevel(WALLPAPER_LEVEL);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::Stationary
+            | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
+    window.setHasShadow(false);
+    // `ReadOnly` so screen-capture / screen-sharing can read us. `None` blocks them.
+    window.setSharingType(NSWindowSharingType::ReadOnly);
+    window.setIgnoresMouseEvents(true);
+
+    let content_view = NSView::initWithFrame(mtm.alloc::<NSView>(), frame);
+    content_view.setWantsLayer(true);
+    window.setContentView(Some(&content_view));
+
+    let player_layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(player)) };
+    if let Some(gravity) = video_gravity_for(scale) {
+        unsafe { player_layer.setVideoGravity(gravity) };
+    }
+    player_layer.setFrame(content_view.bounds());
+    player_layer.setAutoresizingMask(
+        CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
+    );
+    player_layer.setContentsScale(backing_scale);
+
+    let root_layer = content_view
+        .layer()
+        .context("content view has no root layer")?;
+    root_layer.addSublayer(&player_layer);
+
+    window.makeKeyAndOrderFront(None);
+
+    log::info!(
+        "surface ready on {}: {}x{} @ {}x",
+        name,
+        frame.size.width as u32,
+        frame.size.height as u32,
+        backing_scale,
+    );
+
+    Ok(MirrorSurface {
+        name,
+        window,
+        layer: player_layer,
+    })
 }
 
 fn video_gravity_for(scale: ScaleMode) -> Option<&'static AVLayerVideoGravity> {
