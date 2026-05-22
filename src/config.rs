@@ -44,8 +44,10 @@ pub struct SearchPath {
 #[derive(Debug, Deserialize)]
 pub struct Alias {
     pub name: String,
+    #[cfg(target_os = "linux")]
     #[serde(default)]
     pub wayland: Option<String>,
+    #[cfg(target_os = "macos")]
     #[serde(default)]
     pub macos: Option<String>,
 }
@@ -79,6 +81,23 @@ fn config_path() -> PathBuf {
         })
         .join("phonto")
         .join("config.toml")
+}
+
+/// Expands a leading `~/` or `~` to `$HOME`. Leaves all other paths untouched.
+/// Lets the same `~/Downloads/wall.mp4` work on macOS and Linux despite the
+/// different home prefixes.
+pub fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!("{home}/{rest}");
+    }
+    if path == "~"
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return home;
+    }
+    path.to_string()
 }
 
 pub fn load() -> anyhow::Result<Config> {

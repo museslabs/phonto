@@ -56,7 +56,7 @@ pub fn resolve(plan: Plan, search_paths: &[SearchPath]) -> anyhow::Result<Playba
 
 fn resolve_source(source: Source, search_paths: &[SearchPath]) -> anyhow::Result<String> {
     match source {
-        Source::Path(p) => Ok(p),
+        Source::Path(p) => Ok(crate::config::expand_tilde(&p)),
         Source::Random => crate::wallpaper::pick_random(search_paths)
             .ok_or_else(|| anyhow!("no wallpapers found in configured search paths"))
             .map(|p| p.to_string_lossy().into_owned()),
