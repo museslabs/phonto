@@ -78,6 +78,17 @@ impl ScreenObserver {
             );
         }
 
+        // Drop surfaces whose screen is no longer connected.
+        self.ivars().surfaces.borrow_mut().retain(|surface| {
+            if by_name.contains_key(&surface.name) {
+                true
+            } else {
+                surface.window.orderOut(None);
+                log::info!("detached display: {}", surface.name);
+                false
+            }
+        });
+
         // Attach surfaces for newly-connected screens.
         let known: HashSet<String> = self
             .ivars()
