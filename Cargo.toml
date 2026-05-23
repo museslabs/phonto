@@ -110,3 +110,10 @@ objc2-io-kit = { version = "0.3", default-features = false, features = [
     "std",
     "ps",
 ] }
+
+[profile.release]
+debug = "none"
+strip = "symbols"
+lto = "fat"
+panic = "abort"
+codegen-units = 1
