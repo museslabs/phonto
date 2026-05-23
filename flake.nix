@@ -10,50 +10,88 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      rust-overlay,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = import nixpkgs {
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
 
+        cargoToml = (pkgs.lib.importTOML ./Cargo.toml).package;
+
+        gst_plugins = with pkgs.gst_all_1; [
+          gstreamer
+          gst-plugins-base
+          gst-plugins-good
+          gst-plugins-bad
+          gst-plugins-ugly
+          gst-libav
+        ];
+
+        linuxDeps =
+          with pkgs;
+          [
+            wayland
+            libGL
+            mesa
+          ]
+          ++ gst_plugins;
+
         rustToolchain = pkgs.rust-bin.stable.latest.default;
-
-        nativeBuildInputs = with pkgs; [
-          rustToolchain
-          pkg-config
-        ];
-
-        buildInputs = with pkgs; lib.optionals stdenv.isLinux [
-          gst_all_1.gstreamer
-          gst_all_1.gst-plugins-base
-          gst_all_1.gst-plugins-good
-          gst_all_1.gst-plugins-bad
-          gst_all_1.gst-plugins-ugly
-          gst_all_1.gst-libav
-          wayland
-          libGL
-          mesa
-        ];
-        # macOS: objc2-* crates declare framework links in their own build
-        # scripts; rustPlatform on darwin provides the SDK automatically.
       in
       {
-        packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "phonto";
-          version = "0.3.2";
-          src = ./.;
-          cargoLock.lockFile = ./Cargo.lock;
-          inherit nativeBuildInputs buildInputs;
-          GST_PLUGIN_SYSTEM_PATH_1_0 = pkgs.lib.optionalString pkgs.stdenv.isLinux "";
+        packages = {
+          default = self.packages.${system}.phonto;
+
+          phonto = pkgs.rustPlatform.buildRustPackage {
+            pname = cargoToml.name;
+            version = cargoToml.version;
+
+            src = ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+
+            nativeBuildInputs = with pkgs; [
+              rustToolchain
+              pkg-config
+              wrapGAppsHook4
+            ];
+
+            buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux linuxDeps;
+
+            dontWrapGApps = !pkgs.stdenv.isLinux;
+
+            meta = with pkgs.lib; {
+              description = cargoToml.description;
+              homepage = "https://github.com/museslabs/phonto";
+              license = licenses.gpl3Plus;
+              platforms = platforms.linux ++ platforms.darwin;
+              maintainers = with lib.maintainers; [ lonerOrz ];
+              mainProgram = "phonto";
+            };
+          };
         };
 
         devShells.default = pkgs.mkShell {
-          inherit nativeBuildInputs buildInputs;
-          LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux (
-            pkgs.lib.makeLibraryPath buildInputs
-          );
+          nativeBuildInputs = [
+            rustToolchain
+            pkgs.pkg-config
+            pkgs.gst_all_1.gstreamer
+          ];
+
+          buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux linuxDeps;
+
+          shellHook = pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            export GST_PLUGIN_PATH_1_0="${pkgs.lib.makeSearchPath "lib/gstreamer-1.0" gst_plugins}"
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath linuxDeps}:$LD_LIBRARY_PATH"
+          '';
         };
       }
     );
