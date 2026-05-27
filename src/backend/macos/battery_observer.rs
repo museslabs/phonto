@@ -2,6 +2,8 @@ use std::ffi::c_void;
 
 use objc2::rc::Retained;
 use objc2_av_foundation::AVPlayer;
+
+use super::shuffle_observer::CrossfadeState;
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFRunLoop, CFRunLoopSource,
     CFString, CFType, kCFRunLoopDefaultMode,
@@ -32,14 +34,23 @@ pub struct BatteryObserver {
 }
 
 struct Context {
-    player: Retained<AVPlayer>,
+    players: Vec<Retained<AVPlayer>>,
     mode: PauseMode,
+    crossfade: Option<CrossfadeState>,
 }
 
 impl BatteryObserver {
     /// Returns `None` only on IOKit setup failure (already logged).
-    pub fn install(player: Retained<AVPlayer>, mode: PauseMode) -> Option<Self> {
-        let mut ctx = Box::new(Context { player, mode });
+    pub fn install(
+        players: Vec<Retained<AVPlayer>>,
+        mode: PauseMode,
+        crossfade: Option<CrossfadeState>,
+    ) -> Option<Self> {
+        let mut ctx = Box::new(Context {
+            players,
+            mode,
+            crossfade,
+        });
         let ctx_ptr: *mut Context = &raw mut *ctx;
 
         let Some(source) = (unsafe {
@@ -61,7 +72,7 @@ impl BatteryObserver {
         };
         main.add_source(Some(&source), Some(mode_ref));
 
-        apply_state(&ctx.player, &ctx.mode);
+        apply_state(&ctx.players, &ctx.mode, ctx.crossfade.as_ref());
 
         Some(Self { _ctx: ctx, source })
     }
@@ -77,10 +88,14 @@ impl Drop for BatteryObserver {
 
 unsafe extern "C-unwind" fn power_changed(context: *mut c_void) {
     let ctx = unsafe { &*(context.cast::<Context>()) };
-    apply_state(&ctx.player, &ctx.mode);
+    apply_state(&ctx.players, &ctx.mode, ctx.crossfade.as_ref());
 }
 
-fn apply_state(player: &AVPlayer, mode: &PauseMode) {
+fn apply_state(
+    players: &[Retained<AVPlayer>],
+    mode: &PauseMode,
+    crossfade: Option<&CrossfadeState>,
+) {
     let on_batt = on_battery();
     let pct = battery_percent();
 
@@ -90,12 +105,35 @@ fn apply_state(player: &AVPlayer, mode: &PauseMode) {
         PauseMode::BelowPercent(threshold) => on_batt && pct.is_some_and(|p| p < *threshold),
     };
 
+    if let Some(state) = crossfade {
+        state.pause_gate.set(should_pause);
+
+        // Don't yank players out from under a crossfade. The shuffle observer
+        // already checks the gate when the transition lands and will pause or
+        // resume to match.
+        if state.transition_pending.get() {
+            log::debug!(
+                "deferring pause/play to end of in-flight transition (on_battery={on_batt}, charge={pct:?}%, should_pause={should_pause})"
+            );
+            return;
+        }
+    }
+
     if should_pause {
         log::info!("pausing wallpaper (on_battery={on_batt}, charge={pct:?}%)");
-        unsafe { player.pause() };
+        for p in players {
+            unsafe { p.pause() };
+        }
     } else {
         log::info!("playing wallpaper (on_battery={on_batt}, charge={pct:?}%)");
-        unsafe { player.play() };
+        let active = crossfade.map(|s| s.active.get());
+        for (idx, p) in players.iter().enumerate() {
+            if active == Some(idx) || active.is_none() {
+                unsafe { p.play() };
+            } else {
+                unsafe { p.pause() };
+            }
+        }
     }
 }
 

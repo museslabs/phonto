@@ -17,6 +17,17 @@ const DEFAULT_CONFIG: &str = "\
 # [[search_paths]]
 # path = \"/mnt/media/videos\"
 # depth = 2
+#
+# Named playlists let you group wallpapers by mood / context. Use them with
+# `phonto --playlist <name>` (optionally combined with `--shuffle-every 10m`).
+# Entries can mix directories (`path` + `depth`) and individual files (`file`).
+#
+# [[playlists]]
+# name = \"chill\"
+# entries = [
+#   { path = \"/home/user/wallpapers/chill\", depth = 1 },
+#   { file = \"/home/user/wallpapers/special.mp4\" },
+# ]
 ";
 
 #[derive(Debug, Deserialize)]
@@ -26,9 +37,24 @@ pub struct SearchPath {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum PlaylistEntry {
+    Dir { path: String, depth: u32 },
+    File { file: String },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Playlist {
+    pub name: String,
+    pub entries: Vec<PlaylistEntry>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub search_paths: Vec<SearchPath>,
+    #[serde(default)]
+    pub playlists: Vec<Playlist>,
 }
 
 fn config_path() -> PathBuf {

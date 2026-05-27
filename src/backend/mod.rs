@@ -1,3 +1,6 @@
+use std::path::PathBuf;
+use std::time::Duration;
+
 use crate::scale::ScaleMode;
 
 #[derive(Debug, Clone, Copy)]
@@ -14,10 +17,19 @@ pub enum PauseMode {
     BelowPercent(u8),
 }
 
+#[derive(Debug, Clone)]
+pub enum PlaybackSource {
+    Single(PathBuf),
+    Shuffle {
+        pool: Vec<PathBuf>,
+        interval: Duration,
+    },
+}
+
 pub trait Backend {
     /// Take ownership of the runtime. Blocks for the lifetime of the wallpaper —
     /// returns only on error or graceful shutdown.
-    fn run(self, video_path: String, options: RunOptions) -> anyhow::Result<()>;
+    fn run(self, source: PlaybackSource, options: RunOptions) -> anyhow::Result<()>;
 }
 
 #[cfg(target_os = "linux")]
