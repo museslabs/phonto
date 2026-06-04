@@ -20,22 +20,19 @@ use wayland_client::{Proxy, protocol::wl_surface::WlSurface};
 use super::decoder;
 use crate::scale::ScaleMode;
 
-/// Shared GL state: display, config, context, program, uniforms.
-/// One per backend. Created from a bootstrap wl_surface; additional
-/// outputs attach via `attach_output`, sharing the same context.
 pub struct GlRenderer {
     gl: glow::Context,
+    egl_display: usize,
+    egl_context: usize,
     display: Display,
     config: Config,
     context: PossiblyCurrentContext,
     scale_loc: glow::UniformLocation,
     resolution_loc: Option<glow::UniformLocation>,
-    egl_display_handle: usize,
-    egl_context_handle: usize,
+    surfaces: Vec<Option<RenderSurface>>,
 }
 
-/// Per-output GL state: one EGL window surface and its current dimensions.
-pub struct OutputRender {
+struct RenderSurface {
     surface: Surface<WindowSurface>,
     dims: (u32, u32),
     applied_video_dims: Option<(u32, u32)>,
@@ -63,42 +60,41 @@ impl GlRenderer {
 
     pub fn new(
         conn: &wayland_client::Connection,
-        bootstrap_surface: &WlSurface,
-        bootstrap_width: u32,
-        bootstrap_height: u32,
+        wl_surface: &WlSurface,
+        width: u32,
+        height: u32,
         fragment_src: Option<&str>,
-    ) -> anyhow::Result<(Self, OutputRender)> {
-        let display = Self::create_display(conn)?;
-        let config = Self::create_config(&display)?;
-        let gl_surface = Self::create_egl_surface(
-            bootstrap_surface,
-            bootstrap_width,
-            bootstrap_height,
-            &display,
-            &config,
-        )?;
-        let context = Self::create_context(&display, &config, &gl_surface)?;
+    ) -> anyhow::Result<Self> {
+        let gl_display = Self::create_display(conn)?;
+        let gl_config = Self::create_config(&gl_display)?;
+        let gl_surface = Self::create_surface(wl_surface, width, height, &gl_display, &gl_config)?;
+        let gl_context = Self::create_context(&gl_display, &gl_config, &gl_surface)?;
 
-        let egl_display_handle = match display.raw_display() {
-            GlRawDisplay::Egl(d) => d as usize,
+        let egl_display = match gl_display.raw_display() {
+            GlRawDisplay::Egl(display) => display as usize,
             _ => return Err(anyhow!("expected EGL display")),
         };
-        let egl_context_handle = match context.raw_context() {
-            RawContext::Egl(c) => c as usize,
+
+        let egl_context = match gl_context.raw_context() {
+            RawContext::Egl(ctx) => ctx as usize,
             _ => return Err(anyhow!("expected EGL context")),
         };
 
-        gl_surface.set_swap_interval(&context, SwapInterval::Wait(NonZeroU32::MIN))?;
+        gl_surface.set_swap_interval(&gl_context, SwapInterval::Wait(NonZeroU32::MIN))?;
 
         let gl = unsafe {
-            glow::Context::from_loader_function_cstr(|name| display.get_proc_address(name).cast())
+            glow::Context::from_loader_function_cstr(|name| {
+                gl_display.get_proc_address(name).cast()
+            })
         };
 
         let frag_src = fragment_src.unwrap_or(Self::FRAGMENT_SHADER);
+
         let (scale_loc, resolution_loc) = unsafe {
             let vertex = Self::compile_shader(&gl, glow::VERTEX_SHADER, Self::VERTEX_SHADER)?;
             let fragment = Self::compile_shader(&gl, glow::FRAGMENT_SHADER, frag_src)?;
             let program = Self::link_program(&gl, vertex, fragment)?;
+
             gl.use_program(Some(program));
 
             let tex_loc = gl
@@ -109,16 +105,17 @@ impl GlRenderer {
             let scale_loc = gl
                 .get_uniform_location(program, "u_scale")
                 .context("u_scale not found")?;
+            // Identity until the first frame tells us the source aspect.
             gl.uniform_2_f32(Some(&scale_loc), 1.0, 1.0);
 
             let resolution_loc = gl.get_uniform_location(program, "u_resolution");
             if let Some(ref loc) = resolution_loc {
-                gl.uniform_2_f32(Some(loc), bootstrap_width as f32, bootstrap_height as f32);
+                gl.uniform_2_f32(Some(loc), width as f32, height as f32);
             }
 
             let vbo = gl.create_buffer().map_err(|e| anyhow!(e))?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-            // Fullscreen quad as triangle strip: BL, BR, TL, TR.
+            // Fullscreen quad as triangle strip: BL, BR, TL, TR
             let verts: [f32; 8] = [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
             let bytes = std::slice::from_raw_parts(verts.as_ptr().cast::<u8>(), verts.len() * 4);
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
@@ -129,66 +126,90 @@ impl GlRenderer {
             gl.enable_vertex_attrib_array(pos_loc);
             gl.vertex_attrib_pointer_f32(pos_loc, 2, glow::FLOAT, false, 8, 0);
             gl.active_texture(glow::TEXTURE0);
+
             // Black clear so letterbox bars stay black under Fit/Center.
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
 
             (scale_loc, resolution_loc)
         };
 
-        let pipeline = Self {
+        Ok(Self {
             gl,
-            display,
-            config,
-            context,
+            egl_display,
+            egl_context,
+            display: gl_display,
+            config: gl_config,
+            context: gl_context,
             scale_loc,
             resolution_loc,
-            egl_display_handle,
-            egl_context_handle,
-        };
-        let first = OutputRender {
-            surface: gl_surface,
-            dims: (bootstrap_width, bootstrap_height),
-            applied_video_dims: None,
-        };
-        Ok((pipeline, first))
-    }
-
-    pub fn attach_output(
-        &self,
-        wl_surface: &WlSurface,
-        width: u32,
-        height: u32,
-    ) -> anyhow::Result<OutputRender> {
-        let gl_surface =
-            Self::create_egl_surface(wl_surface, width, height, &self.display, &self.config)?;
-        gl_surface.set_swap_interval(&self.context, SwapInterval::Wait(NonZeroU32::MIN))?;
-        Ok(OutputRender {
-            surface: gl_surface,
-            dims: (width, height),
-            applied_video_dims: None,
+            surfaces: vec![Some(RenderSurface {
+                surface: gl_surface,
+                dims: (width, height),
+                applied_video_dims: None,
+            })],
         })
     }
 
+    pub fn add_surface(
+        &mut self,
+        wl_surface: &WlSurface,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<usize> {
+        let gl_surface =
+            Self::create_surface(wl_surface, width, height, &self.display, &self.config)?;
+        gl_surface.set_swap_interval(&self.context, SwapInterval::Wait(NonZeroU32::MIN))?;
+        self.surfaces.push(Some(RenderSurface {
+            surface: gl_surface,
+            dims: (width, height),
+            applied_video_dims: None,
+        }));
+        Ok(self.surfaces.len() - 1)
+    }
+
     pub fn egl_display(&self) -> usize {
-        self.egl_display_handle
+        self.egl_display
     }
 
     pub fn egl_context(&self) -> usize {
-        self.egl_context_handle
+        self.egl_context
+    }
+
+    pub fn surface_dims(&self, idx: usize) -> (u32, u32) {
+        self.surfaces[idx]
+            .as_ref()
+            .expect("live render surface")
+            .dims
+    }
+
+    pub fn set_surface_size(&mut self, idx: usize, width: u32, height: u32) {
+        let s = self.surfaces[idx].as_mut().expect("live render surface");
+        s.dims = (width, height);
+        if let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
+            s.surface.resize(&self.context, w, h);
+        }
+        s.applied_video_dims = None;
+    }
+
+    pub fn remove_surface(&mut self, idx: usize) {
+        if let Some(slot) = self.surfaces.get_mut(idx) {
+            *slot = None;
+        }
     }
 
     pub fn render(
-        &self,
-        output: &mut OutputRender,
+        &mut self,
+        idx: usize,
         frame: &decoder::Frame,
-        scale: ScaleMode,
-        video_dims: (u32, u32),
+        mode: ScaleMode,
     ) -> anyhow::Result<()> {
+        let s = self.surfaces[idx].as_mut().expect("live render surface");
+
         self.context
-            .make_current(&output.surface)
+            .make_current(&s.surface)
             .context("make-current glutin context")?;
 
-        let (w, h) = output.dims;
+        let (w, h) = s.dims;
         unsafe {
             self.gl.viewport(0, 0, w as i32, h as i32);
             if let Some(ref loc) = self.resolution_loc {
@@ -196,12 +217,42 @@ impl GlRenderer {
             }
         }
 
-        if output.applied_video_dims != Some(video_dims) {
-            let (sx, sy) = compute_scale(output.dims, video_dims, scale);
+        let video_dims = (frame.width, frame.height);
+        if s.applied_video_dims != Some(video_dims) {
+            let (screen_w, screen_h) = s.dims;
+            let (video_w, video_h) = video_dims;
+            let scale = if screen_w == 0 || screen_h == 0 || video_w == 0 || video_h == 0 {
+                (1.0, 1.0)
+            } else {
+                let screen_aspect = screen_w as f32 / screen_h as f32;
+                let video_aspect = video_w as f32 / video_h as f32;
+                match mode {
+                    ScaleMode::Stretch => (1.0, 1.0),
+                    ScaleMode::Fit => {
+                        if video_aspect > screen_aspect {
+                            (1.0, screen_aspect / video_aspect)
+                        } else {
+                            (video_aspect / screen_aspect, 1.0)
+                        }
+                    }
+                    ScaleMode::Fill => {
+                        if video_aspect > screen_aspect {
+                            (video_aspect / screen_aspect, 1.0)
+                        } else {
+                            (1.0, screen_aspect / video_aspect)
+                        }
+                    }
+                    ScaleMode::Center => (
+                        video_w as f32 / screen_w as f32,
+                        video_h as f32 / screen_h as f32,
+                    ),
+                }
+            };
             unsafe {
-                self.gl.uniform_2_f32(Some(&self.scale_loc), sx, sy);
+                self.gl
+                    .uniform_2_f32(Some(&self.scale_loc), scale.0, scale.1);
             }
-            output.applied_video_dims = Some(video_dims);
+            s.applied_video_dims = Some(video_dims);
         }
 
         let texture =
@@ -212,57 +263,11 @@ impl GlRenderer {
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
 
-        output
-            .surface
+        s.surface
             .swap_buffers(&self.context)
             .context("swap_buffers")?;
+
         Ok(())
-    }
-}
-
-impl OutputRender {
-    pub fn dims(&self) -> (u32, u32) {
-        self.dims
-    }
-
-    pub fn set_surface_size(&mut self, renderer: &GlRenderer, width: u32, height: u32) {
-        self.dims = (width, height);
-        if let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
-            self.surface.resize(&renderer.context, w, h);
-        }
-        // Force scale recompute on next render.
-        self.applied_video_dims = None;
-    }
-}
-
-fn compute_scale(surface_dims: (u32, u32), video_dims: (u32, u32), mode: ScaleMode) -> (f32, f32) {
-    let (screen_w, screen_h) = surface_dims;
-    let (video_w, video_h) = video_dims;
-    if screen_w == 0 || screen_h == 0 || video_w == 0 || video_h == 0 {
-        return (1.0, 1.0);
-    }
-    let screen_aspect = screen_w as f32 / screen_h as f32;
-    let video_aspect = video_w as f32 / video_h as f32;
-    match mode {
-        ScaleMode::Stretch => (1.0, 1.0),
-        ScaleMode::Fit => {
-            if video_aspect > screen_aspect {
-                (1.0, screen_aspect / video_aspect)
-            } else {
-                (video_aspect / screen_aspect, 1.0)
-            }
-        }
-        ScaleMode::Fill => {
-            if video_aspect > screen_aspect {
-                (video_aspect / screen_aspect, 1.0)
-            } else {
-                (1.0, screen_aspect / video_aspect)
-            }
-        }
-        ScaleMode::Center => (
-            video_w as f32 / screen_w as f32,
-            video_h as f32 / screen_h as f32,
-        ),
     }
 }
 
@@ -291,7 +296,7 @@ impl GlRenderer {
             .context("no EGL config")
     }
 
-    fn create_egl_surface(
+    fn create_surface(
         wl_surface: &WlSurface,
         width: u32,
         height: u32,
