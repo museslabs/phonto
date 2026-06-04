@@ -10,7 +10,6 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 use anyhow::Context;
-
 use backend::{Backend, PauseMode, RunOptions};
 use clap::Parser;
 #[cfg(target_os = "macos")]
@@ -29,12 +28,24 @@ struct Args {
     command: Option<Command>,
 
     /// Path to the video file
-    #[arg(required_unless_present = "rand", conflicts_with = "rand")]
+    #[arg(
+        required_unless_present_any = ["rand", "playlist"],
+        conflicts_with_all = ["rand", "playlist"],
+    )]
     path: Option<String>,
 
-    /// Play a random wallpaper from your playlist
-    #[arg(long, conflicts_with = "path")]
+    /// Play from your `search_paths` pool
+    #[arg(long, conflicts_with = "playlist")]
     rand: bool,
+
+    /// Play from a named playlist defined in config
+    #[arg(long, value_name = "NAME")]
+    playlist: Option<String>,
+
+    /// Swap wallpapers from the pool at this interval (e.g. "30s", "10m", "1h").
+    /// Requires --rand or --playlist.
+    #[arg(long, value_name = "DURATION")]
+    shuffle_every: Option<String>,
 
     /// How to fit the video to the screen.
     #[arg(long, value_enum, default_value_t = ScaleMode::Fill)]
@@ -99,23 +110,20 @@ fn main() -> anyhow::Result<()> {
 
     let config = config::load()?;
 
-    let path = if args.rand {
-        wallpaper::pick_random(&config.search_paths)
-            .ok_or_else(|| anyhow::anyhow!("no wallpapers found in configured search paths"))?
-            .to_string_lossy()
-            .into_owned()
+    let selection = if args.rand {
+        wallpaper::SourceSelection::SearchPaths
+    } else if let Some(name) = args.playlist.as_deref() {
+        wallpaper::SourceSelection::Playlist(name)
     } else {
-        args.path
-            .expect("clap ensures path is set when --rand is not used")
+        wallpaper::SourceSelection::Path(
+            args.path
+                .as_deref()
+                .expect("clap requires a path when no pool is selected"),
+        )
     };
 
-    // Persist the resolved path so other tools (e.g. hyprlock) can read it.
-    if let Ok(home) = std::env::var("HOME") {
-        let cache_dir = std::path::Path::new(&home).join(".cache/phonto");
-        if std::fs::create_dir_all(&cache_dir).is_ok() {
-            let _ = std::fs::write(cache_dir.join("current"), &path);
-        }
-    }
+    let source = wallpaper::resolve_source(&config, selection, args.shuffle_every.as_deref())?;
+    wallpaper::write_current_if_single(&source);
 
     let pause = match (args.pause_on_battery, args.pause_below) {
         (true, _) => PauseMode::OnBattery,
@@ -137,9 +145,9 @@ fn main() -> anyhow::Result<()> {
                     .with_context(|| format!("failed to read shader file: {p}"))
             })
             .transpose()?;
-        backend::wayland::WaylandBackend::new(args.layer, shader)?.run(path, options)
+        backend::wayland::WaylandBackend::new(args.layer, shader)?.run(source, options)
     }
 
     #[cfg(target_os = "macos")]
-    return backend::macos::MacosBackend::new()?.run(path, options);
+    return backend::macos::MacosBackend::new()?.run(source, options);
 }

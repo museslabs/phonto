@@ -5,7 +5,7 @@ use objc2_foundation::{MainThreadMarker, NSNotification};
 
 pub struct ScreenObserverIvars {
     window: Retained<NSWindow>,
-    layer: Retained<AVPlayerLayer>,
+    layers: Vec<Retained<AVPlayerLayer>>,
 }
 
 define_class!(
@@ -22,8 +22,8 @@ define_class!(
 );
 
 impl ScreenObserver {
-    pub fn new(window: Retained<NSWindow>, layer: Retained<AVPlayerLayer>) -> Retained<Self> {
-        let ivars = ScreenObserverIvars { window, layer };
+    pub fn new(window: Retained<NSWindow>, layers: Vec<Retained<AVPlayerLayer>>) -> Retained<Self> {
+        let ivars = ScreenObserverIvars { window, layers };
         let this = Self::alloc().set_ivars(ivars);
         unsafe { msg_send![super(this), init] }
     }
@@ -41,7 +41,9 @@ impl ScreenObserver {
 
         let ivars = self.ivars();
         ivars.window.setFrame_display(frame, false);
-        ivars.layer.setContentsScale(backing_scale);
+        for layer in &ivars.layers {
+            layer.setContentsScale(backing_scale);
+        }
 
         log::info!(
             "display reconfigured: {}x{} @ {}x backing",
