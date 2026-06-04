@@ -32,14 +32,14 @@ pub struct BatteryObserver {
 }
 
 struct Context {
-    player: Retained<AVPlayer>,
+    players: Vec<Retained<AVPlayer>>,
     mode: PauseMode,
 }
 
 impl BatteryObserver {
     /// Returns `None` only on IOKit setup failure (already logged).
-    pub fn install(player: Retained<AVPlayer>, mode: PauseMode) -> Option<Self> {
-        let mut ctx = Box::new(Context { player, mode });
+    pub fn install(players: Vec<Retained<AVPlayer>>, mode: PauseMode) -> Option<Self> {
+        let mut ctx = Box::new(Context { players, mode });
         let ctx_ptr: *mut Context = &raw mut *ctx;
 
         let Some(source) = (unsafe {
@@ -61,7 +61,7 @@ impl BatteryObserver {
         };
         main.add_source(Some(&source), Some(mode_ref));
 
-        apply_state(&ctx.player, &ctx.mode);
+        apply_state(&ctx.players, &ctx.mode);
 
         Some(Self { _ctx: ctx, source })
     }
@@ -77,10 +77,10 @@ impl Drop for BatteryObserver {
 
 unsafe extern "C-unwind" fn power_changed(context: *mut c_void) {
     let ctx = unsafe { &*(context.cast::<Context>()) };
-    apply_state(&ctx.player, &ctx.mode);
+    apply_state(&ctx.players, &ctx.mode);
 }
 
-fn apply_state(player: &AVPlayer, mode: &PauseMode) {
+fn apply_state(players: &[Retained<AVPlayer>], mode: &PauseMode) {
     let on_batt = on_battery();
     let pct = battery_percent();
 
@@ -92,10 +92,14 @@ fn apply_state(player: &AVPlayer, mode: &PauseMode) {
 
     if should_pause {
         log::info!("pausing wallpaper (on_battery={on_batt}, charge={pct:?}%)");
-        unsafe { player.pause() };
+        for player in players {
+            unsafe { player.pause() };
+        }
     } else {
         log::info!("playing wallpaper (on_battery={on_batt}, charge={pct:?}%)");
-        unsafe { player.play() };
+        for player in players {
+            unsafe { player.play() };
+        }
     }
 }
 

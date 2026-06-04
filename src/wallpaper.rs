@@ -9,7 +9,8 @@ const WALLPAPER_EXTENSIONS: &[&str] = &["mp4", "mkv", "webm", "avi", "mov", "gif
 pub fn collect(search_paths: &[SearchPath]) -> Vec<PathBuf> {
     let mut wallpapers = Vec::new();
     for sp in search_paths {
-        walk(Path::new(&sp.path), sp.depth, 0, &mut wallpapers);
+        let expanded = crate::config::expand_tilde(&sp.path);
+        walk(Path::new(&expanded), sp.depth, 0, &mut wallpapers);
     }
     wallpapers
 }

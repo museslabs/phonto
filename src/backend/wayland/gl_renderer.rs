@@ -24,11 +24,18 @@ pub struct GlRenderer {
     gl: glow::Context,
     egl_display: usize,
     egl_context: usize,
-    surface: Surface<WindowSurface>,
+    display: Display,
+    config: Config,
     context: PossiblyCurrentContext,
     scale_loc: glow::UniformLocation,
     resolution_loc: Option<glow::UniformLocation>,
-    surface_dims: (u32, u32),
+    surfaces: Vec<Option<RenderSurface>>,
+}
+
+struct RenderSurface {
+    surface: Surface<WindowSurface>,
+    dims: (u32, u32),
+    applied_video_dims: Option<(u32, u32)>,
 }
 
 impl GlRenderer {
@@ -83,7 +90,7 @@ impl GlRenderer {
 
         let frag_src = fragment_src.unwrap_or(Self::FRAGMENT_SHADER);
 
-        unsafe {
+        let (scale_loc, resolution_loc) = unsafe {
             let vertex = Self::compile_shader(&gl, glow::VERTEX_SHADER, Self::VERTEX_SHADER)?;
             let fragment = Self::compile_shader(&gl, glow::FRAGMENT_SHADER, frag_src)?;
             let program = Self::link_program(&gl, vertex, fragment)?;
@@ -116,7 +123,6 @@ impl GlRenderer {
             let pos_loc = gl
                 .get_attrib_location(program, "a_pos")
                 .context("a_pos not found")?;
-
             gl.enable_vertex_attrib_array(pos_loc);
             gl.vertex_attrib_pointer_f32(pos_loc, 2, glow::FLOAT, false, 8, 0);
             gl.active_texture(glow::TEXTURE0);
@@ -124,72 +130,41 @@ impl GlRenderer {
             // Black clear so letterbox bars stay black under Fit/Center.
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
 
-            Ok(Self {
-                gl,
-                egl_display,
-                egl_context,
-                surface: gl_surface,
-                context: gl_context,
-                scale_loc,
-                resolution_loc,
-                surface_dims: (width, height),
-            })
-        }
-    }
-
-    pub fn surface_dims(&self) -> (u32, u32) {
-        self.surface_dims
-    }
-
-    pub fn set_surface_size(&mut self, width: u32, height: u32) {
-        self.surface_dims = (width, height);
-        if let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
-            self.surface.resize(&self.context, w, h);
-        }
-        unsafe {
-            self.gl.viewport(0, 0, width as i32, height as i32);
-            if let Some(ref loc) = self.resolution_loc {
-                self.gl
-                    .uniform_2_f32(Some(loc), width as f32, height as f32);
-            }
-        }
-    }
-
-    /// Recompute the on-screen quad scale for the given video pixel dimensions.
-    /// Call this when the source dimensions are first known (or change).
-    pub fn set_video_dimensions(&self, video_w: u32, video_h: u32, mode: ScaleMode) {
-        let (screen_w, screen_h) = self.surface_dims;
-        let scale = if screen_w == 0 || screen_h == 0 || video_w == 0 || video_h == 0 {
-            (1.0, 1.0)
-        } else {
-            let screen_aspect = screen_w as f32 / screen_h as f32;
-            let video_aspect = video_w as f32 / video_h as f32;
-            match mode {
-                ScaleMode::Stretch => (1.0, 1.0),
-                ScaleMode::Fit => {
-                    if video_aspect > screen_aspect {
-                        (1.0, screen_aspect / video_aspect)
-                    } else {
-                        (video_aspect / screen_aspect, 1.0)
-                    }
-                }
-                ScaleMode::Fill => {
-                    if video_aspect > screen_aspect {
-                        (video_aspect / screen_aspect, 1.0)
-                    } else {
-                        (1.0, screen_aspect / video_aspect)
-                    }
-                }
-                ScaleMode::Center => (
-                    video_w as f32 / screen_w as f32,
-                    video_h as f32 / screen_h as f32,
-                ),
-            }
+            (scale_loc, resolution_loc)
         };
-        unsafe {
-            self.gl
-                .uniform_2_f32(Some(&self.scale_loc), scale.0, scale.1);
-        }
+
+        Ok(Self {
+            gl,
+            egl_display,
+            egl_context,
+            display: gl_display,
+            config: gl_config,
+            context: gl_context,
+            scale_loc,
+            resolution_loc,
+            surfaces: vec![Some(RenderSurface {
+                surface: gl_surface,
+                dims: (width, height),
+                applied_video_dims: None,
+            })],
+        })
+    }
+
+    pub fn add_surface(
+        &mut self,
+        wl_surface: &WlSurface,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<usize> {
+        let gl_surface =
+            Self::create_surface(wl_surface, width, height, &self.display, &self.config)?;
+        gl_surface.set_swap_interval(&self.context, SwapInterval::Wait(NonZeroU32::MIN))?;
+        self.surfaces.push(Some(RenderSurface {
+            surface: gl_surface,
+            dims: (width, height),
+            applied_video_dims: None,
+        }));
+        Ok(self.surfaces.len() - 1)
     }
 
     pub fn egl_display(&self) -> usize {
@@ -200,23 +175,95 @@ impl GlRenderer {
         self.egl_context
     }
 
-    pub fn make_current(&self) -> anyhow::Result<()> {
-        self.context
-            .make_current(&self.surface)
-            .context("make-current glutin context")
+    pub fn surface_dims(&self, idx: usize) -> (u32, u32) {
+        self.surfaces[idx]
+            .as_ref()
+            .expect("live render surface")
+            .dims
     }
 
-    pub fn render(&self, frame: &decoder::Frame) -> anyhow::Result<()> {
+    pub fn set_surface_size(&mut self, idx: usize, width: u32, height: u32) {
+        let s = self.surfaces[idx].as_mut().expect("live render surface");
+        s.dims = (width, height);
+        if let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
+            s.surface.resize(&self.context, w, h);
+        }
+        s.applied_video_dims = None;
+    }
+
+    pub fn remove_surface(&mut self, idx: usize) {
+        if let Some(slot) = self.surfaces.get_mut(idx) {
+            *slot = None;
+        }
+    }
+
+    pub fn render(
+        &mut self,
+        idx: usize,
+        frame: &decoder::Frame,
+        mode: ScaleMode,
+    ) -> anyhow::Result<()> {
+        let s = self.surfaces[idx].as_mut().expect("live render surface");
+
+        self.context
+            .make_current(&s.surface)
+            .context("make-current glutin context")?;
+
+        let (w, h) = s.dims;
+        unsafe {
+            self.gl.viewport(0, 0, w as i32, h as i32);
+            if let Some(ref loc) = self.resolution_loc {
+                self.gl.uniform_2_f32(Some(loc), w as f32, h as f32);
+            }
+        }
+
+        let video_dims = (frame.width, frame.height);
+        if s.applied_video_dims != Some(video_dims) {
+            let (screen_w, screen_h) = s.dims;
+            let (video_w, video_h) = video_dims;
+            let scale = if screen_w == 0 || screen_h == 0 || video_w == 0 || video_h == 0 {
+                (1.0, 1.0)
+            } else {
+                let screen_aspect = screen_w as f32 / screen_h as f32;
+                let video_aspect = video_w as f32 / video_h as f32;
+                match mode {
+                    ScaleMode::Stretch => (1.0, 1.0),
+                    ScaleMode::Fit => {
+                        if video_aspect > screen_aspect {
+                            (1.0, screen_aspect / video_aspect)
+                        } else {
+                            (video_aspect / screen_aspect, 1.0)
+                        }
+                    }
+                    ScaleMode::Fill => {
+                        if video_aspect > screen_aspect {
+                            (video_aspect / screen_aspect, 1.0)
+                        } else {
+                            (1.0, screen_aspect / video_aspect)
+                        }
+                    }
+                    ScaleMode::Center => (
+                        video_w as f32 / screen_w as f32,
+                        video_h as f32 / screen_h as f32,
+                    ),
+                }
+            };
+            unsafe {
+                self.gl
+                    .uniform_2_f32(Some(&self.scale_loc), scale.0, scale.1);
+            }
+            s.applied_video_dims = Some(video_dims);
+        }
+
         let texture =
             glow::NativeTexture(NonZeroU32::new(frame.texture_id).context("zero GL texture id")?);
-
         unsafe {
             self.gl.clear(glow::COLOR_BUFFER_BIT);
             self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
 
-        self.surface
+        s.surface
             .swap_buffers(&self.context)
             .context("swap_buffers")?;
 
