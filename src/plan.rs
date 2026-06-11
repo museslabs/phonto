@@ -6,7 +6,7 @@ use crate::config::{Alias, Config, Display, SearchPath};
 
 #[derive(Debug, Clone)]
 pub struct YtDlpOpts {
-    pub format: String,
+    pub format: Option<String>,
     pub cookies_from_browser: Option<String>,
     pub extra_args: Vec<String>,
 }
@@ -14,7 +14,7 @@ pub struct YtDlpOpts {
 impl Default for YtDlpOpts {
     fn default() -> Self {
         Self {
-            format: "bestvideo".into(),
+            format: None,
             cookies_from_browser: None,
             extra_args: Vec::new(),
         }
@@ -52,7 +52,11 @@ pub enum Playback {
     PerDisplay(Vec<ResolvedAssignment>),
 }
 
-pub fn resolve(plan: Plan, search_paths: &[SearchPath], yt_dlp: &YtDlpOpts) -> anyhow::Result<Playback> {
+pub fn resolve(
+    plan: Plan,
+    search_paths: &[SearchPath],
+    yt_dlp: &YtDlpOpts,
+) -> anyhow::Result<Playback> {
     match plan {
         Plan::Mirror(source) => Ok(Playback::Mirror(resolve_source(
             source,
@@ -99,11 +103,14 @@ fn resolve_source(
 
 fn resolve_with_ytdlp(url: &str, opts: &YtDlpOpts) -> anyhow::Result<String> {
     let mut cmd = std::process::Command::new("yt-dlp");
-    cmd.args(["-f", &opts.format, "-g"]);
+    if let Some(format) = &opts.format {
+        cmd.args(["-f", format]);
+    }
     if let Some(browser) = &opts.cookies_from_browser {
         cmd.args(["--cookies-from-browser", browser]);
     }
     cmd.args(&opts.extra_args);
+    cmd.args(["-g"]);
     cmd.arg(url);
 
     let output = cmd
@@ -115,8 +122,7 @@ fn resolve_with_ytdlp(url: &str, opts: &YtDlpOpts) -> anyhow::Result<String> {
         bail!("yt-dlp failed:\n{stderr}");
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .context("yt-dlp output is not valid UTF-8")?;
+    let stdout = String::from_utf8(output.stdout).context("yt-dlp output is not valid UTF-8")?;
     let stream_url = stdout
         .lines()
         .next()

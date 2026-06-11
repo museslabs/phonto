@@ -88,9 +88,9 @@ struct Args {
     #[arg(long, value_name = "BROWSER")]
     cookies_from_browser: Option<String>,
 
-    /// yt-dlp format selector (default: "bestvideo" — highest video-only quality)
-    #[arg(long, value_name = "FORMAT", default_value = "bestvideo")]
-    yt_dlp_format: String,
+    /// yt-dlp format selector (default: yt-dlp decides)
+    #[arg(long, value_name = "FORMAT", default_value = None)]
+    yt_dlp_format: Option<String>,
 
     /// Extra arguments forwarded to yt-dlp (e.g. `--yt-dlp-args "--no-check-certificate"`)
     #[arg(long, value_name = "ARGS")]

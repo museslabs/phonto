@@ -139,12 +139,12 @@ phonto --cookies-from-browser chrome youtu.be/...
 
 ### Quality
 
-By default phonto requests the highest video-only quality (`-f bestvideo` — no audio, since wallpaper doesn't need it). Override with `--yt-dlp-format`:
+By default phonto uses the default yt-dlp quality. Override with `--yt-dlp-format`:
 
 ```bash
-phonto --yt-dlp-format "bestvideo+bestaudio" "youtube.com/..."   # best separate streams
-phonto --yt-dlp-format "720p" "youtube.com/..."                   # cap at 720p
-phonto --yt-dlp-format "worst" "youtube.com/..."                  # lowest quality
+phonto --yt-dlp-format "bestvideo" "youtube.com/..."   # best video
+phonto --yt-dlp-format "720p" "youtube.com/..."        # cap at 720p
+phonto --yt-dlp-format "worst" "youtube.com/..."       # lowest quality
 ```
 
 ### Extra yt-dlp arguments
