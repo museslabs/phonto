@@ -1,6 +1,6 @@
 use gst::MessageView::*;
 use std::str::FromStr;
-use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, mpsc::SyncSender};
 
 use anyhow::{Context, anyhow};
 use gstreamer as gst;
@@ -21,74 +21,87 @@ pub fn run(
     source: &str,
     gl_display: gst_gl::GLDisplay,
     gl_context: gst_gl::GLContext,
-    tx: SyncSender<gst::Sample>,
+    tx: Arc<SyncSender<gst::Sample>>,
 ) -> anyhow::Result<()> {
-    let pipeline = build_pipeline(source).context("build decoder pipeline")?;
+    let source = source.to_string();
 
-    let mut display_ctx = gst::Context::new("gst.gl.GLDisplay", true);
-    display_ctx
-        .get_mut()
-        .expect("freshly created Context has a unique reference")
-        .set_gl_display(&gl_display);
+    loop {
+        let pipeline = build_pipeline(&source).context("build decoder pipeline")?;
 
-    pipeline.set_context(&display_ctx);
+        let mut display_ctx = gst::Context::new("gst.gl.GLDisplay", true);
+        display_ctx
+            .get_mut()
+            .expect("freshly created Context has a unique reference")
+            .set_gl_display(&gl_display);
 
-    let mut app_ctx = gst::Context::new("gst.gl.app_context", true);
-    app_ctx
-        .get_mut()
-        .expect("freshly created Context has a unique reference")
-        .structure_mut()
-        .set("context", &gl_context);
+        pipeline.set_context(&display_ctx);
 
-    pipeline.set_context(&app_ctx);
+        let mut app_ctx = gst::Context::new("gst.gl.app_context", true);
+        app_ctx
+            .get_mut()
+            .expect("freshly created Context has a unique reference")
+            .structure_mut()
+            .set("context", &gl_context);
 
-    let appsink = pipeline
-        .by_name("sink")
-        .context("appsink not found in pipeline")?
-        .downcast::<gst_app::AppSink>()
-        .map_err(|_| anyhow!("`sink` is not an AppSink"))?;
+        pipeline.set_context(&app_ctx);
 
-    appsink.set_callbacks(
-        gst_app::AppSinkCallbacks::builder()
-            .new_sample(move |sink| {
-                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                tx.send(sample).map_err(|_| gst::FlowError::Eos)?;
-                Ok(gst::FlowSuccess::Ok)
-            })
-            .build(),
-    );
+        let appsink = pipeline
+            .by_name("sink")
+            .context("appsink not found in pipeline")?
+            .downcast::<gst_app::AppSink>()
+            .map_err(|_| anyhow!("`sink` is not an AppSink"))?;
 
-    pipeline
-        .set_state(gst::State::Playing)
-        .context("set pipeline state to Playing")?;
+        let tx_cb = Arc::clone(&tx);
+        appsink.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    tx_cb.send(sample).map_err(|_| gst::FlowError::Eos)?;
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
 
-    let bus = pipeline.bus().context("pipeline has no bus")?;
-    for msg in bus.iter_timed(gst::ClockTime::NONE) {
-        match msg.view() {
-            Eos(_) => {
-                if let Err(e) = pipeline.seek_simple(
-                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                    gst::ClockTime::ZERO,
-                ) {
-                    pipeline.set_state(gst::State::Null).ok();
-                    return Err(anyhow!("seek to loop failed: {e:?}"));
+        pipeline
+            .set_state(gst::State::Playing)
+            .context("set pipeline state to Playing")?;
+
+        let bus = pipeline.bus().context("pipeline has no bus")?;
+        let mut restart = false;
+        for msg in bus.iter_timed(gst::ClockTime::NONE) {
+            match msg.view() {
+                Eos(_) => {
+                    if pipeline
+                        .seek_simple(
+                            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                            gst::ClockTime::ZERO,
+                        )
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                    restart = true;
+                    break;
                 }
+                Error(err) => {
+                    pipeline.set_state(gst::State::Null).ok();
+                    return Err(anyhow!(
+                        "pipeline error from {:?}: {} ({:?})",
+                        err.src().map(|s| s.path_string()),
+                        err.error(),
+                        err.debug()
+                    ));
+                }
+                _ => {}
             }
-            Error(err) => {
-                pipeline.set_state(gst::State::Null).ok();
-                return Err(anyhow!(
-                    "pipeline error from {:?}: {} ({:?})",
-                    err.src().map(|s| s.path_string()),
-                    err.error(),
-                    err.debug()
-                ));
-            }
-            _ => {}
+        }
+
+        pipeline.set_state(gst::State::Null).ok();
+
+        if !restart {
+            return Ok(());
         }
     }
-
-    pipeline.set_state(gst::State::Null).ok();
-    Ok(())
 }
 
 // Build the GStreamer pipeline programmatically so the file path is set via the
@@ -155,7 +168,13 @@ fn build_pipeline(source: &str) -> anyhow::Result<gst::Pipeline> {
     } else {
         let decodebin = decodebin.as_ref().expect("decodebin3 present for files");
         pipeline
-            .add_many([&src, decodebin, &glupload, &glcolorconvert, appsink.upcast_ref()])
+            .add_many([
+                &src,
+                decodebin,
+                &glupload,
+                &glcolorconvert,
+                appsink.upcast_ref(),
+            ])
             .context("add elements to pipeline")?;
     }
 
