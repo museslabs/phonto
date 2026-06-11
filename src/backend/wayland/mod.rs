@@ -2,7 +2,7 @@ mod battery_observer;
 mod decoder;
 mod gl_renderer;
 
-use std::{collections::HashMap, path::Path, sync::mpsc, time::Instant};
+use std::{collections::HashMap, sync::mpsc, time::Instant};
 
 use anyhow::{Context, bail};
 use gstreamer as gst;
@@ -174,19 +174,19 @@ impl Backend for WaylandBackend {
                 decoder::wrap_gl(renderer.egl_display(), renderer.egl_context())?;
             let (tx, rx) = mpsc::sync_channel(1);
             let decoder_gl_context = gl_context.clone();
-            let thread_name = format!(
-                "decoder:{}",
-                Path::new(&path)
+            let short = if crate::config::is_url(&path) {
+                path.split('/').next_back().unwrap_or(&path).to_string()
+            } else {
+                std::path::Path::new(&path)
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.clone())
-            );
+            };
+            let thread_name = format!("decoder:{short}");
             std::thread::Builder::new()
                 .name(thread_name)
                 .spawn(move || {
-                    if let Err(e) =
-                        decoder::run(Path::new(&path), gl_display, decoder_gl_context, tx)
-                    {
+                    if let Err(e) = decoder::run(&path, gl_display, decoder_gl_context, tx) {
                         log::error!("decoder error for {path}: {e:#}");
                     }
                 })?;

@@ -83,6 +83,14 @@ fn config_path() -> PathBuf {
         .join("config.toml")
 }
 
+pub fn is_url(s: &str) -> bool {
+    s.starts_with("http://")
+        || s.starts_with("https://")
+        || s.starts_with("rtmp://")
+        || s.starts_with("rtsp://")
+        || s.starts_with("file://")
+}
+
 /// Expands a leading `~/` or `~` to `$HOME`. Leaves all other paths untouched.
 /// Lets the same `~/Downloads/wall.mp4` work on macOS and Linux despite the
 /// different home prefixes.

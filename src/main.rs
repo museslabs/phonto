@@ -28,7 +28,7 @@ struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Path to the video file
+    /// Path to the video file or a streaming URL (http, https, rtsp, rtmp)
     #[arg(conflicts_with_all = ["rand", "display", "display_rand"])]
     path: Option<String>,
 
