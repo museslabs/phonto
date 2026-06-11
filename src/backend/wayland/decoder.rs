@@ -66,12 +66,13 @@ pub fn run(
     for msg in bus.iter_timed(gst::ClockTime::NONE) {
         match msg.view() {
             Eos(_) => {
-                pipeline
-                    .seek_simple(
-                        gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                        gst::ClockTime::ZERO,
-                    )
-                    .context("seek to loop")?;
+                if let Err(e) = pipeline.seek_simple(
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    gst::ClockTime::ZERO,
+                ) {
+                    pipeline.set_state(gst::State::Null).ok();
+                    return Err(anyhow!("seek to loop failed: {e:?}"));
+                }
             }
             Error(err) => {
                 pipeline.set_state(gst::State::Null).ok();
