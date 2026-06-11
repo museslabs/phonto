@@ -14,7 +14,7 @@ pub struct YtDlpOpts {
 impl Default for YtDlpOpts {
     fn default() -> Self {
         Self {
-            format: "best".into(),
+            format: "bestvideo".into(),
             cookies_from_browser: None,
             extra_args: Vec::new(),
         }
