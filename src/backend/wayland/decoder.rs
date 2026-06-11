@@ -108,6 +108,9 @@ fn build_pipeline(source: &str) -> anyhow::Result<gst::Pipeline> {
 
         uri.connect("source-setup", false, |values| {
             let elem = values[1].get::<gst::Element>().expect("source-setup arg");
+            // YouTube's CDN (googlevideo.com) rejects requests without a
+            // browser-like User-Agent with 403 Forbidden. GStreamer's default
+            // souphttpsrc User-Agent is blocked.
             elem.set_property(
                 "user-agent",
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
