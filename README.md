@@ -82,6 +82,18 @@ Play a specific video:
 phonto /path/to/video.mp4
 ```
 
+Play a YouTube video or livestream (requires yt-dlp):
+```bash
+phonto "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+phonto youtu.be/dQw4w9WgXcQ    # bare URL, no https:// needed
+```
+
+Play a streaming URL directly (video-only, GStreamer handles it natively):
+```bash
+phonto https://example.com/stream.m3u8
+phonto rtsp://camera.local/stream
+```
+
 Play a random wallpaper from your configured search paths:
 ```bash
 phonto --rand
@@ -98,6 +110,55 @@ Phonto also writes the currently selected video path to `~/.cache/phonto/current
 This is useful when `--rand` chooses a wallpaper and another tool needs to reuse
 the same video. For per-display playback there is no single "current" video, so the
 cache file is skipped in that mode.
+
+## Streaming & YouTube (yt-dlp)
+
+YouTube URLs are resolved automatically through [yt-dlp](https://github.com/yt-dlp/yt-dlp). phonto detects `youtube.com`, `youtu.be`, and `m.youtube.com` — with or without `https://` prefix — and spawns `yt-dlp -g` to extract the direct stream URL. YouTube requires a browser-like User-Agent to avoid 403 errors, which phonto sets on the GStreamer pipeline automatically.
+
+**Dependencies:** yt-dlp must be installed and on your `$PATH`.
+
+```bash
+# Arch Linux
+sudo pacman -S yt-dlp
+
+# macOS
+brew install yt-dlp
+
+# pip (any platform)
+pip install yt-dlp
+```
+
+### Authentication
+
+YouTube may block yt-dlp without browser cookies. Pass `--cookies-from-browser` to use your logged-in session:
+
+```bash
+phonto --cookies-from-browser firefox "youtube.com/watch?v=..."
+phonto --cookies-from-browser chrome youtu.be/...
+```
+
+### Quality
+
+By default phonto requests the highest video-only quality (`-f bestvideo` — no audio, since wallpaper doesn't need it). Override with `--yt-dlp-format`:
+
+```bash
+phonto --yt-dlp-format "bestvideo+bestaudio" "youtube.com/..."   # best separate streams
+phonto --yt-dlp-format "720p" "youtube.com/..."                   # cap at 720p
+phonto --yt-dlp-format "worst" "youtube.com/..."                  # lowest quality
+```
+
+### Extra yt-dlp arguments
+
+Pass arbitrary flags through to yt-dlp with `--yt-dlp-args`:
+
+```bash
+phonto --yt-dlp-args "--no-check-certificate" "youtube.com/..."
+phonto --yt-dlp-args "--proxy socks5://127.0.0.1:9050" "youtube.com/..."
+```
+
+### How it works
+
+When phonto detects a YouTube URL it calls `yt-dlp -f <format> -g [--cookies-from-browser <browser>] [extra args] <url>` and takes the first stream URL from stdout. That URL feeds into GStreamer's `uridecodebin` with GPU decoding and rendering — the same pipeline used for local files.
 
 ## Multi-monitor
 
