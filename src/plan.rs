@@ -80,7 +80,7 @@ fn resolve_source(
                 return resolve_with_ytdlp(&yt_url, yt_dlp);
             }
             if crate::config::is_url(&p) {
-                Ok(p.lines().next().unwrap_or(&p).to_string())
+                Ok(p.trim().to_string())
             } else {
                 Ok(crate::config::expand_tilde(&p))
             }
