@@ -103,6 +103,8 @@ fn resolve_with_ytdlp(url: &str, opts: &YtDlpOpts) -> anyhow::Result<String> {
     cmd.args(["-g"]);
     cmd.arg(url);
 
+    log::info!("Resolving `{url}` using yt-dlp");
+
     let output = cmd
         .output()
         .context("failed to run yt-dlp (is it installed?)")?;
