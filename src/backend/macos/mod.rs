@@ -145,12 +145,7 @@ fn make_player(
 
     let url = if is_url {
         let s = NSString::from_str(video_path);
-        unsafe {
-            // SAFETY: is_url() already confirmed the string starts with a known
-            // scheme, so URLWithString will not return nil.
-            NSURL::URLWithString(&s)
-        }
-        .context("invalid URL")?
+        NSURL::URLWithString(&s).context("invalid URL")?
     } else {
         // AVAsset resolves relative paths against the process cwd, which isn't
         // what users expect from `phonto ./video.mp4`.
