@@ -4,21 +4,11 @@ use anyhow::{Context, anyhow, bail};
 
 use crate::config::{Alias, Config, Display, SearchPath};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct YtDlpOpts {
     pub format: Option<String>,
     pub cookies_from_browser: Option<String>,
     pub extra_args: Vec<String>,
-}
-
-impl Default for YtDlpOpts {
-    fn default() -> Self {
-        Self {
-            format: None,
-            cookies_from_browser: None,
-            extra_args: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
