@@ -121,7 +121,7 @@ YouTube URLs are resolved automatically through [yt-dlp](https://github.com/yt-d
 # Arch Linux
 sudo pacman -S yt-dlp
 
-# macOS
+# macOS/Linux
 brew install yt-dlp
 
 # pip (any platform)
@@ -142,9 +142,9 @@ phonto --cookies-from-browser chrome youtu.be/...
 By default phonto uses the default yt-dlp quality. Override with `--yt-dlp-format`:
 
 ```bash
-phonto --yt-dlp-format "bestvideo" "youtube.com/..."   # best video
-phonto --yt-dlp-format "720p" "youtube.com/..."        # cap at 720p
-phonto --yt-dlp-format "worst" "youtube.com/..."       # lowest quality
+phonto --yt-dlp-format "bestvideo" "youtube.com/..."         # best video
+phonto --yt-dlp-format "best[height<=720]" "youtube.com/..." # cap at 720p
+phonto --yt-dlp-format "worst" "youtube.com/..."             # lowest quality
 ```
 
 ### Extra yt-dlp arguments
@@ -155,6 +155,8 @@ Pass arbitrary flags through to yt-dlp with `--yt-dlp-args`:
 phonto --yt-dlp-args "--no-check-certificate" "youtube.com/..."
 phonto --yt-dlp-args "--proxy socks5://127.0.0.1:9050" "youtube.com/..."
 ```
+
+For more options, see [yt-dlp's Usage and Options](https://github.com/yt-dlp/yt-dlp#usage-and-options).
 
 ### How it works
 
