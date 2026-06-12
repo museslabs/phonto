@@ -1,6 +1,6 @@
 use gst::MessageView::*;
 use std::str::FromStr;
-use std::sync::{Arc, mpsc::SyncSender};
+use std::sync::mpsc::SyncSender;
 
 use anyhow::{Context, anyhow};
 use gstreamer as gst;
@@ -21,7 +21,7 @@ pub fn run(
     source: &str,
     gl_display: gst_gl::GLDisplay,
     gl_context: gst_gl::GLContext,
-    tx: Arc<SyncSender<gst::Sample>>,
+    tx: SyncSender<gst::Sample>,
 ) -> anyhow::Result<()> {
     let source = source.to_string();
 
@@ -51,7 +51,7 @@ pub fn run(
             .downcast::<gst_app::AppSink>()
             .map_err(|_| anyhow!("`sink` is not an AppSink"))?;
 
-        let tx_cb = Arc::clone(&tx);
+        let tx_cb = tx.clone();
         appsink.set_callbacks(
             gst_app::AppSinkCallbacks::builder()
                 .new_sample(move |sink| {

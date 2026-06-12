@@ -2,7 +2,7 @@ mod battery_observer;
 mod decoder;
 mod gl_renderer;
 
-use std::{collections::HashMap, sync::Arc, sync::mpsc, time::Instant};
+use std::{collections::HashMap, sync::mpsc, time::Instant};
 
 use anyhow::{Context, bail};
 use gstreamer as gst;
@@ -173,7 +173,7 @@ impl Backend for WaylandBackend {
             let (gl_display, gl_context) =
                 decoder::wrap_gl(renderer.egl_display(), renderer.egl_context())?;
             let (tx, rx) = mpsc::sync_channel(1);
-            let tx = Arc::new(tx);
+            let tx = tx;
             let decoder_gl_context = gl_context.clone();
             let short = if crate::config::is_url(&path) {
                 path.split('/').next_back().unwrap_or(&path).to_string()
