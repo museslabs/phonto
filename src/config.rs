@@ -83,6 +83,39 @@ fn config_path() -> PathBuf {
         .join("config.toml")
 }
 
+pub fn is_url(s: &str) -> bool {
+    s.starts_with("http://")
+        || s.starts_with("https://")
+        || s.starts_with("rtmp://")
+        || s.starts_with("rtsp://")
+        || s.starts_with("file://")
+}
+
+/// Returns `Some("https://...")` if `s` looks like a YouTube URL (with or
+/// without a protocol prefix). Returns `None` for non-YouTube inputs.
+pub fn maybe_youtube_url(s: &str) -> Option<String> {
+    let s = s.trim();
+    let stripped = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+
+    let is_yt = stripped.starts_with("www.youtube.com/")
+        || stripped.starts_with("youtube.com/")
+        || stripped.starts_with("youtu.be/")
+        || stripped.starts_with("m.youtube.com/");
+
+    if is_yt {
+        if s.starts_with("http") {
+            Some(s.to_string())
+        } else {
+            Some(format!("https://{stripped}"))
+        }
+    } else {
+        None
+    }
+}
+
 /// Expands a leading `~/` or `~` to `$HOME`. Leaves all other paths untouched.
 /// Lets the same `~/Downloads/wall.mp4` work on macOS and Linux despite the
 /// different home prefixes.

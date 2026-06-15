@@ -28,7 +28,8 @@ struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Path to the video file
+    /// Path to the video file, streaming URL (http, https, rtsp, rtmp),
+    /// or YouTube URL (resolved via yt-dlp).
     #[arg(conflicts_with_all = ["rand", "display", "display_rand"])]
     path: Option<String>,
 
@@ -80,6 +81,20 @@ struct Args {
     /// Pause playback when on battery and charge drops below PERCENT (1-100)
     #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(1..=100))]
     pause_below: Option<u8>,
+
+    /// Pass --cookies-from-browser <BROWSER> to yt-dlp for YouTube auth
+    ///
+    /// If YouTube is blocking you from accessing it, try using this option
+    #[arg(long, value_name = "BROWSER")]
+    cookies_from_browser: Option<String>,
+
+    /// yt-dlp format selector (default: yt-dlp decides)
+    #[arg(long, value_name = "FORMAT", default_value = None)]
+    yt_dlp_format: Option<String>,
+
+    /// Extra arguments forwarded to yt-dlp (e.g. `--yt-dlp-args "--no-check-certificate"`)
+    #[arg(long, value_name = "ARGS")]
+    yt_dlp_args: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -138,7 +153,18 @@ fn main() -> anyhow::Result<()> {
     };
 
     let plan = plan::build(args.path, args.rand, cli_per_display, &config)?;
-    let playback = plan::resolve(plan, &config.search_paths)?;
+
+    let yt_dlp = plan::YtDlpOpts {
+        format: args.yt_dlp_format,
+        cookies_from_browser: args.cookies_from_browser,
+        extra_args: args
+            .yt_dlp_args
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect(),
+    };
+    let playback = plan::resolve(plan, &config.search_paths, &yt_dlp)?;
 
     // Persist the resolved path so other tools (e.g. hyprlock) can read it.
     // For per-display playback there's no single "current" path; skip the cache.

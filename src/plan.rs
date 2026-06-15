@@ -4,6 +4,13 @@ use anyhow::{Context, anyhow, bail};
 
 use crate::config::{Alias, Config, Display, SearchPath};
 
+#[derive(Debug, Clone, Default)]
+pub struct YtDlpOpts {
+    pub format: Option<String>,
+    pub cookies_from_browser: Option<String>,
+    pub extra_args: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Source {
     Path(String),
@@ -35,14 +42,22 @@ pub enum Playback {
     PerDisplay(Vec<ResolvedAssignment>),
 }
 
-pub fn resolve(plan: Plan, search_paths: &[SearchPath]) -> anyhow::Result<Playback> {
+pub fn resolve(
+    plan: Plan,
+    search_paths: &[SearchPath],
+    yt_dlp: &YtDlpOpts,
+) -> anyhow::Result<Playback> {
     match plan {
-        Plan::Mirror(source) => Ok(Playback::Mirror(resolve_source(source, search_paths)?)),
+        Plan::Mirror(source) => Ok(Playback::Mirror(resolve_source(
+            source,
+            search_paths,
+            yt_dlp,
+        )?)),
         Plan::PerDisplay(assignments) => {
             let resolved: Vec<ResolvedAssignment> = assignments
                 .into_iter()
                 .map(|a| {
-                    let path = resolve_source(a.source, search_paths)?;
+                    let path = resolve_source(a.source, search_paths, yt_dlp)?;
                     Ok(ResolvedAssignment {
                         native_id: a.native_id,
                         path,
@@ -54,13 +69,59 @@ pub fn resolve(plan: Plan, search_paths: &[SearchPath]) -> anyhow::Result<Playba
     }
 }
 
-fn resolve_source(source: Source, search_paths: &[SearchPath]) -> anyhow::Result<String> {
+fn resolve_source(
+    source: Source,
+    search_paths: &[SearchPath],
+    yt_dlp: &YtDlpOpts,
+) -> anyhow::Result<String> {
     match source {
-        Source::Path(p) => Ok(crate::config::expand_tilde(&p)),
+        Source::Path(p) => {
+            if let Some(yt_url) = crate::config::maybe_youtube_url(&p) {
+                return resolve_with_ytdlp(&yt_url, yt_dlp);
+            }
+            if crate::config::is_url(&p) {
+                Ok(p.trim().to_string())
+            } else {
+                Ok(crate::config::expand_tilde(&p))
+            }
+        }
         Source::Random => crate::wallpaper::pick_random(search_paths)
             .ok_or_else(|| anyhow!("no wallpapers found in configured search paths"))
             .map(|p| p.to_string_lossy().into_owned()),
     }
+}
+
+fn resolve_with_ytdlp(url: &str, opts: &YtDlpOpts) -> anyhow::Result<String> {
+    let mut cmd = std::process::Command::new("yt-dlp");
+    if let Some(format) = &opts.format {
+        cmd.args(["-f", format]);
+    }
+    if let Some(browser) = &opts.cookies_from_browser {
+        cmd.args(["--cookies-from-browser", browser]);
+    }
+    cmd.args(&opts.extra_args);
+    cmd.args(["-g"]);
+    cmd.arg(url);
+
+    log::info!("Resolving `{url}` using yt-dlp");
+
+    let output = cmd
+        .output()
+        .context("failed to run yt-dlp (is it installed?)")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("yt-dlp failed:\n{stderr}");
+    }
+
+    let stdout = String::from_utf8(output.stdout).context("yt-dlp output is not valid UTF-8")?;
+    let stream_url = stdout
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow!("yt-dlp produced no output"))?;
+
+    log::info!("yt-dlp resolved: {stream_url}");
+    Ok(stream_url.to_string())
 }
 
 #[derive(Debug, Default)]

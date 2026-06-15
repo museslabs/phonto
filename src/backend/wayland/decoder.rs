@@ -1,5 +1,4 @@
 use gst::MessageView::*;
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::mpsc::SyncSender;
 
@@ -19,76 +18,90 @@ pub struct Frame {
 }
 
 pub fn run(
-    path: &Path,
+    source: &str,
     gl_display: gst_gl::GLDisplay,
     gl_context: gst_gl::GLContext,
     tx: SyncSender<gst::Sample>,
 ) -> anyhow::Result<()> {
-    let pipeline = build_pipeline(path).context("build decoder pipeline")?;
+    let source = source.to_string();
 
-    let mut display_ctx = gst::Context::new("gst.gl.GLDisplay", true);
-    display_ctx
-        .get_mut()
-        .expect("freshly created Context has a unique reference")
-        .set_gl_display(&gl_display);
+    loop {
+        let pipeline = build_pipeline(&source).context("build decoder pipeline")?;
 
-    pipeline.set_context(&display_ctx);
+        let mut display_ctx = gst::Context::new("gst.gl.GLDisplay", true);
+        display_ctx
+            .get_mut()
+            .expect("freshly created Context has a unique reference")
+            .set_gl_display(&gl_display);
 
-    let mut app_ctx = gst::Context::new("gst.gl.app_context", true);
-    app_ctx
-        .get_mut()
-        .expect("freshly created Context has a unique reference")
-        .structure_mut()
-        .set("context", &gl_context);
+        pipeline.set_context(&display_ctx);
 
-    pipeline.set_context(&app_ctx);
+        let mut app_ctx = gst::Context::new("gst.gl.app_context", true);
+        app_ctx
+            .get_mut()
+            .expect("freshly created Context has a unique reference")
+            .structure_mut()
+            .set("context", &gl_context);
 
-    let appsink = pipeline
-        .by_name("sink")
-        .context("appsink not found in pipeline")?
-        .downcast::<gst_app::AppSink>()
-        .map_err(|_| anyhow!("`sink` is not an AppSink"))?;
+        pipeline.set_context(&app_ctx);
 
-    appsink.set_callbacks(
-        gst_app::AppSinkCallbacks::builder()
-            .new_sample(move |sink| {
-                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                tx.send(sample).map_err(|_| gst::FlowError::Eos)?;
-                Ok(gst::FlowSuccess::Ok)
-            })
-            .build(),
-    );
+        let appsink = pipeline
+            .by_name("sink")
+            .context("appsink not found in pipeline")?
+            .downcast::<gst_app::AppSink>()
+            .map_err(|_| anyhow!("`sink` is not an AppSink"))?;
 
-    pipeline
-        .set_state(gst::State::Playing)
-        .context("set pipeline state to Playing")?;
+        let tx_cb = tx.clone();
+        appsink.set_callbacks(
+            gst_app::AppSinkCallbacks::builder()
+                .new_sample(move |sink| {
+                    let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                    tx_cb.send(sample).map_err(|_| gst::FlowError::Eos)?;
+                    Ok(gst::FlowSuccess::Ok)
+                })
+                .build(),
+        );
 
-    let bus = pipeline.bus().context("pipeline has no bus")?;
-    for msg in bus.iter_timed(gst::ClockTime::NONE) {
-        match msg.view() {
-            Eos(_) => {
-                pipeline
-                    .seek_simple(
-                        gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                        gst::ClockTime::ZERO,
-                    )
-                    .context("seek to loop")?;
+        pipeline
+            .set_state(gst::State::Playing)
+            .context("set pipeline state to Playing")?;
+
+        let bus = pipeline.bus().context("pipeline has no bus")?;
+        let mut restart = false;
+        for msg in bus.iter_timed(gst::ClockTime::NONE) {
+            match msg.view() {
+                Eos(_) => {
+                    if pipeline
+                        .seek_simple(
+                            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                            gst::ClockTime::ZERO,
+                        )
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                    restart = true;
+                    break;
+                }
+                Error(err) => {
+                    pipeline.set_state(gst::State::Null).ok();
+                    return Err(anyhow!(
+                        "pipeline error from {:?}: {} ({:?})",
+                        err.src().map(|s| s.path_string()),
+                        err.error(),
+                        err.debug()
+                    ));
+                }
+                _ => {}
             }
-            Error(err) => {
-                pipeline.set_state(gst::State::Null).ok();
-                return Err(anyhow!(
-                    "pipeline error from {:?}: {} ({:?})",
-                    err.src().map(|s| s.path_string()),
-                    err.error(),
-                    err.debug()
-                ));
-            }
-            _ => {}
+        }
+
+        pipeline.set_state(gst::State::Null).ok();
+
+        if !restart {
+            return Ok(());
         }
     }
-
-    pipeline.set_state(gst::State::Null).ok();
-    Ok(())
 }
 
 // Build the GStreamer pipeline programmatically so the file path is set via the
@@ -96,16 +109,41 @@ pub fn run(
 // description string. `gst::parse::launch` treats `"` as a string delimiter and
 // `!` as an element separator, so a filename containing those characters could
 // otherwise inject additional elements into the pipeline.
-fn build_pipeline(path: &Path) -> anyhow::Result<gst::Pipeline> {
+fn build_pipeline(source: &str) -> anyhow::Result<gst::Pipeline> {
     let pipeline = gst::Pipeline::default();
 
-    let filesrc = gst::ElementFactory::make("filesrc")
-        .property("location", path)
-        .build()
-        .context("create filesrc")?;
-    let decodebin = gst::ElementFactory::make("decodebin3")
-        .build()
-        .context("create decodebin3")?;
+    let is_url = crate::config::is_url(source);
+
+    let (src, decodebin): (gst::Element, Option<gst::Element>) = if is_url {
+        let uri = gst::ElementFactory::make("uridecodebin")
+            .property("uri", source)
+            .build()
+            .context("create uridecodebin")?;
+
+        uri.connect("source-setup", false, |values| {
+            let elem = values[1].get::<gst::Element>().expect("source-setup arg");
+            // YouTube's CDN (googlevideo.com) rejects requests without a
+            // browser-like User-Agent with 403 Forbidden. GStreamer's default
+            // souphttpsrc User-Agent is blocked.
+            elem.set_property(
+                "user-agent",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            );
+            None
+        });
+
+        (uri, None)
+    } else {
+        let fs = gst::ElementFactory::make("filesrc")
+            .property("location", source)
+            .build()
+            .context("create filesrc")?;
+        let db = gst::ElementFactory::make("decodebin3")
+            .build()
+            .context("create decodebin3")?;
+        (fs, Some(db))
+    };
+
     let glupload = gst::ElementFactory::make("glupload")
         .build()
         .context("create glupload")?;
@@ -123,38 +161,65 @@ fn build_pipeline(path: &Path) -> anyhow::Result<gst::Pipeline> {
         .max_buffers(1)
         .build();
 
-    pipeline
-        .add_many([
-            &filesrc,
-            &decodebin,
-            &glupload,
-            &glcolorconvert,
-            appsink.upcast_ref(),
-        ])
-        .context("add elements to pipeline")?;
+    if is_url {
+        pipeline
+            .add_many([&src, &glupload, &glcolorconvert, appsink.upcast_ref()])
+            .context("add elements to pipeline")?;
+    } else {
+        let decodebin = decodebin.as_ref().expect("decodebin3 present for files");
+        pipeline
+            .add_many([
+                &src,
+                decodebin,
+                &glupload,
+                &glcolorconvert,
+                appsink.upcast_ref(),
+            ])
+            .context("add elements to pipeline")?;
+    }
 
-    gst::Element::link_many([&filesrc, &decodebin]).context("link filesrc → decodebin3")?;
     gst::Element::link_many([&glupload, &glcolorconvert, appsink.upcast_ref()])
         .context("link glupload → glcolorconvert → appsink")?;
 
-    // decodebin3 exposes source pads as streams are discovered. glupload's sink
-    // pad only accepts video caps, so non-video pads (audio, subtitles) fail to
-    // link and are silently ignored.
-    let glupload_weak = glupload.downgrade();
-    decodebin.connect_pad_added(move |_, src_pad| {
-        let Some(glupload) = glupload_weak.upgrade() else {
-            return;
-        };
-        let Some(sink_pad) = glupload.static_pad("sink") else {
-            return;
-        };
-        if sink_pad.is_linked() {
-            return;
-        }
-        if let Err(err) = src_pad.link(&sink_pad) {
-            log::warn!("link decodebin3 video pad → glupload: {err:?}");
-        }
-    });
+    if is_url {
+        let glupload_weak = glupload.downgrade();
+        src.connect_pad_added(move |_src, src_pad| {
+            let Some(glupload) = glupload_weak.upgrade() else {
+                return;
+            };
+            let Some(sink_pad) = glupload.static_pad("sink") else {
+                return;
+            };
+            if sink_pad.is_linked() {
+                return;
+            }
+            if let Err(err) = src_pad.link(&sink_pad) {
+                log::warn!("link uridecodebin video pad → glupload: {err:?}");
+            }
+        });
+    } else {
+        let decodebin = decodebin.expect("decodebin3 present for files");
+        gst::Element::link_many([&src, &decodebin]).context("link filesrc → decodebin3")?;
+
+        let glupload_weak = glupload.downgrade();
+        // decodebin3 exposes source pads as streams are discovered. glupload's
+        // sink pad only accepts video caps, so non-video pads (audio, subtitles)
+        // fail to link and are silently ignored.
+        decodebin.connect_pad_added(move |_, src_pad| {
+            let Some(glupload) = glupload_weak.upgrade() else {
+                return;
+            };
+            let Some(sink_pad) = glupload.static_pad("sink") else {
+                return;
+            };
+            if sink_pad.is_linked() {
+                return;
+            }
+            if let Err(err) = src_pad.link(&sink_pad) {
+                log::warn!("link decodebin3 video pad → glupload: {err:?}");
+            }
+        });
+    }
 
     Ok(pipeline)
 }

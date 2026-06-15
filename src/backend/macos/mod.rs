@@ -141,13 +141,20 @@ fn make_player(
     mtm: MainThreadMarker,
     video_path: &str,
 ) -> anyhow::Result<(Retained<AVPlayerItem>, Retained<AVPlayer>)> {
-    // AVAsset resolves relative paths against the process cwd, which isn't
-    // what users expect from `phonto ./video.mp4`.
-    let abs = Path::new(video_path)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(video_path).to_path_buf());
-    let path_ns = NSString::from_str(&abs.to_string_lossy());
-    let url = NSURL::fileURLWithPath(&path_ns);
+    let is_url = crate::config::is_url(video_path);
+
+    let url = if is_url {
+        let s = NSString::from_str(video_path);
+        NSURL::URLWithString(&s).context("invalid URL")?
+    } else {
+        // AVAsset resolves relative paths against the process cwd, which isn't
+        // what users expect from `phonto ./video.mp4`.
+        let abs = Path::new(video_path)
+            .canonicalize()
+            .unwrap_or_else(|_| Path::new(video_path).to_path_buf());
+        let path_ns = NSString::from_str(&abs.to_string_lossy());
+        NSURL::fileURLWithPath(&path_ns)
+    };
 
     let item = unsafe { AVPlayerItem::playerItemWithURL(&url, mtm) };
     let player = unsafe { AVPlayer::playerWithPlayerItem(Some(&item), mtm) };
