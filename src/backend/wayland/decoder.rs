@@ -104,45 +104,49 @@ pub fn run(
     }
 }
 
-// Build the GStreamer pipeline programmatically so the file path is set via the
-// `location` GObject property instead of being interpolated into a pipeline
+// Build the GStreamer pipeline programmatically so the source is set via the
+// `uri` GObject property instead of being interpolated into a pipeline
 // description string. `gst::parse::launch` treats `"` as a string delimiter and
-// `!` as an element separator, so a filename containing those characters could
+// `!` as an element separator, so a source containing those characters could
 // otherwise inject additional elements into the pipeline.
 fn build_pipeline(source: &str) -> anyhow::Result<gst::Pipeline> {
     let pipeline = gst::Pipeline::default();
 
-    let is_url = crate::config::is_url(source);
+    // `uridecodebin3` takes a URI for both local files and remote URLs, so local
+    // paths are converted to an absolute `file://` URI. Unlike a bare
+    // `filesrc ! decodebin3`, routing local files through `uridecodebin3` lets
+    // its internal `urisourcebin` set up source negotiation correctly, which
+    // some containers (e.g. `hvc1`-tagged HEVC in MP4) need to auto-plug a
+    // decoder at all.
+    let uri = if crate::config::is_url(source) {
+        source.to_string()
+    } else {
+        let abs_path =
+            std::fs::canonicalize(source).with_context(|| format!("resolve path {source}"))?;
+        gst::glib::filename_to_uri(&abs_path, None)
+            .context("convert path to file:// URI")?
+            .to_string()
+    };
 
-    let (src, decodebin): (gst::Element, Option<gst::Element>) = if is_url {
-        let uri = gst::ElementFactory::make("uridecodebin")
-            .property("uri", source)
-            .build()
-            .context("create uridecodebin")?;
+    let decodebin = gst::ElementFactory::make("uridecodebin3")
+        .property("uri", &uri)
+        .build()
+        .context("create uridecodebin3")?;
 
-        uri.connect("source-setup", false, |values| {
-            let elem = values[1].get::<gst::Element>().expect("source-setup arg");
-            // YouTube's CDN (googlevideo.com) rejects requests without a
-            // browser-like User-Agent with 403 Forbidden. GStreamer's default
-            // souphttpsrc User-Agent is blocked.
+    decodebin.connect("source-setup", false, |values| {
+        let elem = values[1].get::<gst::Element>().expect("source-setup arg");
+        // YouTube's CDN (googlevideo.com) rejects requests without a
+        // browser-like User-Agent with 403 Forbidden. GStreamer's default
+        // souphttpsrc User-Agent is blocked. Setting this on local-file sources
+        // is harmless (the property is simply absent).
+        if elem.has_property("user-agent") {
             elem.set_property(
                 "user-agent",
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             );
-            None
-        });
-
-        (uri, None)
-    } else {
-        let fs = gst::ElementFactory::make("filesrc")
-            .property("location", source)
-            .build()
-            .context("create filesrc")?;
-        let db = gst::ElementFactory::make("decodebin3")
-            .build()
-            .context("create decodebin3")?;
-        (fs, Some(db))
-    };
+        }
+        None
+    });
 
     let glupload = gst::ElementFactory::make("glupload")
         .build()
@@ -161,65 +165,31 @@ fn build_pipeline(source: &str) -> anyhow::Result<gst::Pipeline> {
         .max_buffers(1)
         .build();
 
-    if is_url {
-        pipeline
-            .add_many([&src, &glupload, &glcolorconvert, appsink.upcast_ref()])
-            .context("add elements to pipeline")?;
-    } else {
-        let decodebin = decodebin.as_ref().expect("decodebin3 present for files");
-        pipeline
-            .add_many([
-                &src,
-                decodebin,
-                &glupload,
-                &glcolorconvert,
-                appsink.upcast_ref(),
-            ])
-            .context("add elements to pipeline")?;
-    }
+    pipeline
+        .add_many([&decodebin, &glupload, &glcolorconvert, appsink.upcast_ref()])
+        .context("add elements to pipeline")?;
 
     gst::Element::link_many([&glupload, &glcolorconvert, appsink.upcast_ref()])
         .context("link glupload → glcolorconvert → appsink")?;
 
-    if is_url {
-        let glupload_weak = glupload.downgrade();
-        src.connect_pad_added(move |_src, src_pad| {
-            let Some(glupload) = glupload_weak.upgrade() else {
-                return;
-            };
-            let Some(sink_pad) = glupload.static_pad("sink") else {
-                return;
-            };
-            if sink_pad.is_linked() {
-                return;
-            }
-            if let Err(err) = src_pad.link(&sink_pad) {
-                log::warn!("link uridecodebin video pad → glupload: {err:?}");
-            }
-        });
-    } else {
-        let decodebin = decodebin.expect("decodebin3 present for files");
-        gst::Element::link_many([&src, &decodebin]).context("link filesrc → decodebin3")?;
-
-        let glupload_weak = glupload.downgrade();
-        // decodebin3 exposes source pads as streams are discovered. glupload's
-        // sink pad only accepts video caps, so non-video pads (audio, subtitles)
-        // fail to link and are silently ignored.
-        decodebin.connect_pad_added(move |_, src_pad| {
-            let Some(glupload) = glupload_weak.upgrade() else {
-                return;
-            };
-            let Some(sink_pad) = glupload.static_pad("sink") else {
-                return;
-            };
-            if sink_pad.is_linked() {
-                return;
-            }
-            if let Err(err) = src_pad.link(&sink_pad) {
-                log::warn!("link decodebin3 video pad → glupload: {err:?}");
-            }
-        });
-    }
+    // uridecodebin3 exposes source pads as streams are discovered. glupload's
+    // sink pad only accepts video caps, so non-video pads (audio, subtitles)
+    // fail to link and are silently ignored.
+    let glupload_weak = glupload.downgrade();
+    decodebin.connect_pad_added(move |_, src_pad| {
+        let Some(glupload) = glupload_weak.upgrade() else {
+            return;
+        };
+        let Some(sink_pad) = glupload.static_pad("sink") else {
+            return;
+        };
+        if sink_pad.is_linked() {
+            return;
+        }
+        if let Err(err) = src_pad.link(&sink_pad) {
+            log::warn!("link uridecodebin3 video pad → glupload: {err:?}");
+        }
+    });
 
     Ok(pipeline)
 }
