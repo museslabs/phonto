@@ -69,7 +69,7 @@ pub fn resolve(
     }
 }
 
-fn resolve_source(
+pub fn resolve_source(
     source: Source,
     search_paths: &[SearchPath],
     yt_dlp: &YtDlpOpts,

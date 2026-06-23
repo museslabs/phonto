@@ -19,6 +19,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 rand = "0.9"
+image = { version = "0.25.10", features = ["png"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 glow = "0.17.0"

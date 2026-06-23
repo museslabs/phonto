@@ -6,6 +6,7 @@ use std::{collections::HashMap, sync::mpsc, time::Instant};
 
 use anyhow::{Context, bail};
 use gstreamer as gst;
+use gstreamer::prelude::ElementExt;
 use gstreamer_gl as gst_gl;
 use wayland_client::{
     Connection, Dispatch, EventQueue, QueueHandle, WEnum, delegate_noop,
@@ -80,6 +81,40 @@ impl Backend for WaylandBackend {
             .collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
+    }
+
+    fn dump(self, path: String, at: f64, out: std::path::PathBuf) -> anyhow::Result<()> {
+        let compositor = self
+            .state
+            .compositor
+            .as_ref()
+            .context("wl_compositor missing")?;
+
+        let wl_surface = compositor.create_surface(&self.qh, ());
+        let mut renderer =
+            GlRenderer::new(&self.state.conn, &wl_surface, 1, 1, self.shader.as_deref())?;
+
+        let (gl_display, gl_context) =
+            decoder::wrap_gl(renderer.egl_display(), renderer.egl_context())?;
+
+        let pipeline = decoder::build_pipeline(&path)?;
+        decoder::set_pipeline_gl_context(&pipeline, &gl_display, &gl_context);
+
+        let sample = decoder::pull_sample_at(&pipeline, at)?;
+        let frame = decoder::sample_to_frame(sample, &gl_context)?;
+        let rgba = renderer.render_frame_to_rgba(&frame)?;
+
+        image::save_buffer(
+            &out,
+            &rgba,
+            frame.width,
+            frame.height,
+            image::ColorType::Rgba8,
+        )
+        .with_context(|| format!("save frame to {}", out.display()))?;
+
+        pipeline.set_state(gst::State::Null)?;
+        Ok(())
     }
 
     fn run(mut self, playback: Playback, options: RunOptions) -> anyhow::Result<()> {

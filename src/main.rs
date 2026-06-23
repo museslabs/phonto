@@ -7,6 +7,8 @@ mod plan;
 mod scale;
 mod wallpaper;
 
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
@@ -102,6 +104,22 @@ enum Command {
     /// List the displays phonto detects on this system.
     Displays,
 
+    /// Dump image from video input
+    Dump {
+        #[arg()]
+        path: String,
+
+        #[arg(short, long, value_name = "OUT.png")]
+        out: PathBuf,
+
+        #[cfg(target_os = "linux")]
+        #[arg(long, value_name = "PATH")]
+        shader: Option<String>,
+
+        #[arg(long, value_name = "SECONDS", default_value = "0.0")]
+        at: f64,
+    },
+
     /// Transcode a video and register it as the macOS lock-screen
     /// wallpaper (HEVC Main10 + temporal sub-layers; survives multiple
     /// lock cycles).
@@ -131,6 +149,44 @@ fn main() -> anyhow::Result<()> {
                 let detected = displays::list()?;
                 displays::print(&detected);
                 return Ok(());
+            }
+            Command::Dump {
+                path,
+                at,
+                out,
+                #[cfg(target_os = "linux")]
+                shader,
+            } => {
+                let config = config::load()?;
+                let yt_dlp = plan::YtDlpOpts {
+                    format: args.yt_dlp_format,
+                    cookies_from_browser: args.cookies_from_browser,
+                    extra_args: args
+                        .yt_dlp_args
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .map(|s| s.to_string())
+                        .collect(),
+                };
+
+                let path =
+                    plan::resolve_source(plan::Source::Path(path), &config.search_paths, &yt_dlp)?;
+
+                #[cfg(target_os = "linux")]
+                {
+                    let shader = shader
+                        .as_deref()
+                        .map(|p| {
+                            std::fs::read_to_string(p)
+                                .with_context(|| format!("failed to read shader file: {p}"))
+                        })
+                        .transpose()?;
+
+                    return backend::wayland::WaylandBackend::new(args.layer, shader)?
+                        .dump(path, at, out);
+                }
+                #[cfg(not(target_os = "linux"))]
+                anyhow::bail!("dump is only supported on linux at the moment");
             }
             #[cfg(target_os = "macos")]
             Command::InstallLiveLockscreen {

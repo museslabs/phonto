@@ -50,6 +50,10 @@ impl Backend for MacosBackend {
         displays::list_displays()
     }
 
+    fn dump(self, _path: String, _at: f64, _out: std::path::PathBuf) -> anyhow::Result<()> {
+        anyhow::bail!("dump is not implemented on macos at the moment")
+    }
+
     fn run(self, playback: Playback, options: RunOptions) -> anyhow::Result<()> {
         let mtm = self.mtm;
         let scale = options.scale;
