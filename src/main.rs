@@ -7,9 +7,6 @@ mod plan;
 mod scale;
 mod wallpaper;
 
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
-#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
@@ -185,8 +182,8 @@ fn main() -> anyhow::Result<()> {
                     return backend::wayland::WaylandBackend::new(args.layer, shader)?
                         .dump(path, at, out);
                 }
-                #[cfg(not(target_os = "linux"))]
-                anyhow::bail!("dump is only supported on linux at the moment");
+                #[cfg(target_os = "macos")]
+                return backend::macos::MacosBackend::new()?.dump(path, at, out);
             }
             #[cfg(target_os = "macos")]
             Command::InstallLiveLockscreen {

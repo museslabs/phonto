@@ -50,8 +50,109 @@ impl Backend for MacosBackend {
         displays::list_displays()
     }
 
-    fn dump(self, _path: String, _at: f64, _out: std::path::PathBuf) -> anyhow::Result<()> {
-        anyhow::bail!("dump is not implemented on macos at the moment")
+    fn dump(self, path: String, at: f64, out: std::path::PathBuf) -> anyhow::Result<()> {
+        use anyhow::anyhow;
+        use objc2::runtime::AnyObject;
+        use objc2_av_foundation::{
+            AVAssetReader, AVAssetReaderTrackOutput, AVMediaTypeVideo, AVURLAsset,
+        };
+        use objc2_core_foundation::CFString;
+        use objc2_core_media::{CMTime, CMTimeRange, kCMTimePositiveInfinity};
+        use objc2_core_video::{
+            CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
+            CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
+            CVPixelBufferUnlockBaseAddress, kCVPixelBufferPixelFormatTypeKey,
+            kCVPixelFormatType_32BGRA, kCVReturnSuccess,
+        };
+        use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
+
+        let is_url = crate::config::is_url(&path);
+        let url = if is_url {
+            let s = NSString::from_str(&path);
+            NSURL::URLWithString(&s).context("invalid URL")?
+        } else {
+            let abs = std::path::Path::new(&path)
+                .canonicalize()
+                .unwrap_or_else(|_| std::path::Path::new(&path).to_path_buf());
+            let path_ns = NSString::from_str(&abs.to_string_lossy());
+            NSURL::fileURLWithPath(&path_ns)
+        };
+
+        let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) };
+
+        let video_type = unsafe { AVMediaTypeVideo }
+            .context("AVMediaTypeVideo constant unavailable")?
+            .to_string();
+        let all_tracks = unsafe { asset.tracks() };
+        let track = all_tracks
+            .iter()
+            .find(|t| unsafe { t.mediaType() }.to_string() == video_type)
+            .context("no video track in asset")?;
+
+        let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset) }
+            .map_err(|e| anyhow!("AVAssetReader init: {e:?}"))?;
+
+        let start = unsafe { CMTime::with_seconds(at, 600) };
+        let inf = unsafe { kCMTimePositiveInfinity };
+        let range = unsafe { CMTimeRange::new(start, inf) };
+        unsafe { reader.setTimeRange(range) };
+
+        let key_cf: &'static CFString = unsafe { kCVPixelBufferPixelFormatTypeKey };
+        let key_ns: &NSString = unsafe { &*(key_cf as *const CFString as *const NSString) };
+        let val = NSNumber::new_u32(kCVPixelFormatType_32BGRA);
+        let val_obj: &AnyObject = &val;
+        let settings = NSDictionary::<NSString, AnyObject>::from_slices(&[key_ns], &[val_obj]);
+
+        let output = unsafe {
+            AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
+                &track,
+                Some(&settings),
+            )
+        };
+        unsafe { reader.addOutput(&output) };
+
+        if !unsafe { reader.startReading() } {
+            let err = unsafe { reader.error() };
+            anyhow::bail!("AVAssetReader startReading failed: {err:?}");
+        }
+
+        let sample = unsafe { output.copyNextSampleBuffer() }
+            .context("no frame decoded at requested time")?;
+        let image_buf = unsafe { sample.image_buffer() }.context("sample has no image buffer")?;
+
+        let lock_flags = CVPixelBufferLockFlags(0);
+        let lock_status = unsafe { CVPixelBufferLockBaseAddress(&image_buf, lock_flags) };
+        if lock_status != kCVReturnSuccess {
+            anyhow::bail!("CVPixelBufferLockBaseAddress failed: {lock_status}");
+        }
+
+        let width = CVPixelBufferGetWidth(&image_buf);
+        let height = CVPixelBufferGetHeight(&image_buf);
+        let bpr = CVPixelBufferGetBytesPerRow(&image_buf);
+        let base = CVPixelBufferGetBaseAddress(&image_buf) as *const u8;
+
+        let mut rgba = Vec::with_capacity(width * height * 4);
+        for row in 0..height {
+            let row_ptr = unsafe { base.add(row * bpr) };
+            for col in 0..width {
+                let p = unsafe { std::slice::from_raw_parts(row_ptr.add(col * 4), 4) };
+                rgba.extend_from_slice(&[p[2], p[1], p[0], p[3]]);
+            }
+        }
+        unsafe { CVPixelBufferUnlockBaseAddress(&image_buf, lock_flags) };
+
+        unsafe { reader.cancelReading() };
+
+        image::save_buffer(
+            &out,
+            &rgba,
+            width as u32,
+            height as u32,
+            image::ColorType::Rgba8,
+        )
+        .with_context(|| format!("save frame to {}", out.display()))?;
+
+        Ok(())
     }
 
     fn run(self, playback: Playback, options: RunOptions) -> anyhow::Result<()> {
