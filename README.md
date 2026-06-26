@@ -106,14 +106,14 @@ phonto /path/to/video.mp4 --layer background
 
 Available layers are `background` (default), `bottom`, `top`, and `overlay`.
 
-Dump a still frame to an image file on Linux/Wayland:
+Dump a still frame to an image file:
 ```bash
 phonto dump PATH --out OUT.png [--at SECONDS] [--shader PATH]
 ```
 
 `dump` supports local files and resolved URLs. `--out`/`-o` is required,
 `--at` selects the timestamp in seconds (default `0.0`), and `--shader` applies
-a GLSL fragment shader before saving.
+a GLSL fragment shader before saving (only available on Wayland/Linux).
 
 Phonto also writes the currently selected video path to `~/.cache/phonto/current`.
 This is useful when `--rand` chooses a wallpaper and another tool needs to reuse
