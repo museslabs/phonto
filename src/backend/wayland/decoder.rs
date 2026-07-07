@@ -202,6 +202,12 @@ pub fn set_pipeline_gl_context(
 }
 
 pub fn pull_sample_at(pipeline: &gst::Pipeline, at: f64) -> anyhow::Result<gst::Sample> {
+    if !at.is_finite() || at < 0.0 {
+        return Err(anyhow!(
+            "seek timestamp must be a finite, non-negative number of seconds (got {at})"
+        ));
+    }
+
     let appsink = pipeline
         .by_name("sink")
         .context("appsink not found in pipeline")?

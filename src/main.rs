@@ -113,7 +113,7 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         shader: Option<String>,
 
-        #[arg(long, value_name = "SECONDS", default_value = "0.0")]
+        #[arg(long, value_name = "SECONDS", default_value = "0.0", value_parser = parse_seek_seconds)]
         at: f64,
     },
 
@@ -133,6 +133,21 @@ enum Command {
         #[arg(long)]
         remove: bool,
     },
+}
+
+/// Parse a `--at` seek offset. Rejects negative and non-finite values, which
+/// produce undefined/failed seeks in both the GStreamer and AVFoundation paths.
+fn parse_seek_seconds(s: &str) -> Result<f64, String> {
+    let secs: f64 = s
+        .parse()
+        .map_err(|_| format!("`{s}` is not a valid number"))?;
+    if !secs.is_finite() {
+        return Err("must be a finite number of seconds".to_string());
+    }
+    if secs < 0.0 {
+        return Err("must be zero or positive".to_string());
+    }
+    Ok(secs)
 }
 
 fn main() -> anyhow::Result<()> {

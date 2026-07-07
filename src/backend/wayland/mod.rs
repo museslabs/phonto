@@ -100,21 +100,29 @@ impl Backend for WaylandBackend {
         let pipeline = decoder::build_pipeline(&path)?;
         decoder::set_pipeline_gl_context(&pipeline, &gl_display, &gl_context);
 
-        let sample = decoder::pull_sample_at(&pipeline, at)?;
-        let frame = decoder::sample_to_frame(sample, &gl_context)?;
-        let rgba = renderer.render_frame_to_rgba(&frame)?;
+        let result = (|| {
+            let sample = decoder::pull_sample_at(&pipeline, at)?;
+            let frame = decoder::sample_to_frame(sample, &gl_context)?;
+            let rgba = renderer.render_frame_to_rgba(&frame)?;
 
-        image::save_buffer(
-            &out,
-            &rgba,
-            frame.width,
-            frame.height,
-            image::ColorType::Rgba8,
-        )
-        .with_context(|| format!("save frame to {}", out.display()))?;
+            image::save_buffer(
+                &out,
+                &rgba,
+                frame.width,
+                frame.height,
+                image::ColorType::Rgba8,
+            )
+            .with_context(|| format!("save frame to {}", out.display()))
+        })();
 
-        pipeline.set_state(gst::State::Null)?;
-        Ok(())
+        // Tear the pipeline down no matter how the frame grab went, so GL and
+        // GStreamer resources aren't left alive on the error path. Don't let a
+        // teardown failure mask the original error if there was one.
+        let teardown = pipeline.set_state(gst::State::Null);
+        if result.is_ok() {
+            teardown.context("reset pipeline to Null")?;
+        }
+        result
     }
 
     fn run(mut self, playback: Playback, options: RunOptions) -> anyhow::Result<()> {
