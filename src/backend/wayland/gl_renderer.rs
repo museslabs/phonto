@@ -203,72 +203,215 @@ impl GlRenderer {
         frame: &decoder::Frame,
         mode: ScaleMode,
     ) -> anyhow::Result<()> {
-        let s = self.surfaces[idx].as_mut().expect("live render surface");
-
-        self.context
-            .make_current(&s.surface)
-            .context("make-current glutin context")?;
-
-        let (w, h) = s.dims;
-        unsafe {
-            self.gl.viewport(0, 0, w as i32, h as i32);
-            if let Some(ref loc) = self.resolution_loc {
-                self.gl.uniform_2_f32(Some(loc), w as f32, h as f32);
-            }
-        }
-
         let video_dims = (frame.width, frame.height);
-        if s.applied_video_dims != Some(video_dims) {
-            let (screen_w, screen_h) = s.dims;
-            let (video_w, video_h) = video_dims;
-            let scale = if screen_w == 0 || screen_h == 0 || video_w == 0 || video_h == 0 {
-                (1.0, 1.0)
+        let (w, h, scale) = {
+            let s = self.surfaces[idx].as_mut().expect("live render surface");
+
+            self.context
+                .make_current(&s.surface)
+                .context("make-current glutin context")?;
+
+            let scale = if s.applied_video_dims != Some(video_dims) {
+                s.applied_video_dims = Some(video_dims);
+                Some(Self::scale_for(mode, s.dims, video_dims))
             } else {
-                let screen_aspect = screen_w as f32 / screen_h as f32;
-                let video_aspect = video_w as f32 / video_h as f32;
-                match mode {
-                    ScaleMode::Stretch => (1.0, 1.0),
-                    ScaleMode::Fit => {
-                        if video_aspect > screen_aspect {
-                            (1.0, screen_aspect / video_aspect)
-                        } else {
-                            (video_aspect / screen_aspect, 1.0)
-                        }
-                    }
-                    ScaleMode::Fill => {
-                        if video_aspect > screen_aspect {
-                            (video_aspect / screen_aspect, 1.0)
-                        } else {
-                            (1.0, screen_aspect / video_aspect)
-                        }
-                    }
-                    ScaleMode::Center => (
-                        video_w as f32 / screen_w as f32,
-                        video_h as f32 / screen_h as f32,
-                    ),
-                }
+                None
             };
-            unsafe {
-                self.gl
-                    .uniform_2_f32(Some(&self.scale_loc), scale.0, scale.1);
-            }
-            s.applied_video_dims = Some(video_dims);
-        }
 
-        let texture =
-            glow::NativeTexture(NonZeroU32::new(frame.texture_id).context("zero GL texture id")?);
-        unsafe {
-            self.gl.clear(glow::COLOR_BUFFER_BIT);
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-        }
+            (s.dims.0, s.dims.1, scale)
+        };
 
+        if let Some(scale) = scale {
+            self.set_scale(scale);
+        }
+        self.draw_frame(frame, w, h)?;
+
+        let s = self.surfaces[idx].as_ref().expect("live render surface");
         s.surface
             .swap_buffers(&self.context)
             .context("swap_buffers")?;
 
         Ok(())
     }
+
+    pub fn render_frame_to_rgba(&mut self, frame: &decoder::Frame) -> anyhow::Result<Vec<u8>> {
+        let width = frame.width;
+        let height = frame.height;
+        if width == 0 || height == 0 {
+            anyhow::bail!("decoded frame has zero dimensions");
+        }
+
+        {
+            let surface = self
+                .surfaces
+                .iter()
+                .flatten()
+                .next()
+                .context("no live render surface")?;
+            self.context
+                .make_current(&surface.surface)
+                .context("make-current glutin context")?;
+        }
+
+        let fbo = unsafe { self.gl.create_framebuffer().map_err(|e| anyhow!(e))? };
+        let color = unsafe { self.gl.create_texture().map_err(|e| anyhow!(e))? };
+
+        let result = {
+            unsafe {
+                self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(color));
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MIN_FILTER,
+                    glow::LINEAR as i32,
+                );
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_MAG_FILTER,
+                    glow::LINEAR as i32,
+                );
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_WRAP_S,
+                    glow::CLAMP_TO_EDGE as i32,
+                );
+                self.gl.tex_parameter_i32(
+                    glow::TEXTURE_2D,
+                    glow::TEXTURE_WRAP_T,
+                    glow::CLAMP_TO_EDGE as i32,
+                );
+                self.gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    width as i32,
+                    height as i32,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(None),
+                );
+                self.gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D,
+                    Some(color),
+                    0,
+                );
+
+                if self.gl.check_framebuffer_status(glow::FRAMEBUFFER) != glow::FRAMEBUFFER_COMPLETE
+                {
+                    anyhow::bail!("offscreen framebuffer is incomplete");
+                }
+            }
+
+            self.set_scale((1.0, 1.0));
+            self.draw_frame(frame, width, height)?;
+
+            let mut bottom_up = vec![0u8; width as usize * height as usize * 4];
+            unsafe {
+                self.gl.finish();
+                self.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+                self.gl.read_pixels(
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelPackData::Slice(Some(&mut bottom_up)),
+                );
+            }
+
+            Ok(flip_vertical(&bottom_up, width as usize, height as usize))
+        };
+
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl.delete_texture(color);
+            self.gl.delete_framebuffer(fbo);
+        }
+        self.invalidate_surface_draw_state();
+
+        result
+    }
+
+    fn draw_frame(&self, frame: &decoder::Frame, width: u32, height: u32) -> anyhow::Result<()> {
+        let texture =
+            glow::NativeTexture(NonZeroU32::new(frame.texture_id).context("zero GL texture id")?);
+
+        unsafe {
+            self.gl.viewport(0, 0, width as i32, height as i32);
+            if let Some(ref loc) = self.resolution_loc {
+                self.gl
+                    .uniform_2_f32(Some(loc), width as f32, height as f32);
+            }
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        }
+
+        Ok(())
+    }
+
+    fn set_scale(&self, scale: (f32, f32)) {
+        unsafe {
+            self.gl
+                .uniform_2_f32(Some(&self.scale_loc), scale.0, scale.1);
+        }
+    }
+
+    fn invalidate_surface_draw_state(&mut self) {
+        for surface in self.surfaces.iter_mut().flatten() {
+            surface.applied_video_dims = None;
+        }
+    }
+
+    fn scale_for(mode: ScaleMode, screen_dims: (u32, u32), video_dims: (u32, u32)) -> (f32, f32) {
+        let (screen_w, screen_h) = screen_dims;
+        let (video_w, video_h) = video_dims;
+        if screen_w == 0 || screen_h == 0 || video_w == 0 || video_h == 0 {
+            return (1.0, 1.0);
+        }
+
+        let screen_aspect = screen_w as f32 / screen_h as f32;
+        let video_aspect = video_w as f32 / video_h as f32;
+        match mode {
+            ScaleMode::Stretch => (1.0, 1.0),
+            ScaleMode::Fit => {
+                if video_aspect > screen_aspect {
+                    (1.0, screen_aspect / video_aspect)
+                } else {
+                    (video_aspect / screen_aspect, 1.0)
+                }
+            }
+            ScaleMode::Fill => {
+                if video_aspect > screen_aspect {
+                    (video_aspect / screen_aspect, 1.0)
+                } else {
+                    (1.0, screen_aspect / video_aspect)
+                }
+            }
+            ScaleMode::Center => (
+                video_w as f32 / screen_w as f32,
+                video_h as f32 / screen_h as f32,
+            ),
+        }
+    }
+}
+
+fn flip_vertical(src: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let stride = width * 4;
+    let mut out = vec![0u8; src.len()];
+
+    for y in 0..height {
+        let src_start = y * stride;
+        let dst_start = (height - 1 - y) * stride;
+        out[dst_start..dst_start + stride].copy_from_slice(&src[src_start..src_start + stride]);
+    }
+
+    out
 }
 
 impl GlRenderer {

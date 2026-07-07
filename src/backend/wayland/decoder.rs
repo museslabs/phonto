@@ -27,23 +27,7 @@ pub fn run(
 
     loop {
         let pipeline = build_pipeline(&source).context("build decoder pipeline")?;
-
-        let mut display_ctx = gst::Context::new("gst.gl.GLDisplay", true);
-        display_ctx
-            .get_mut()
-            .expect("freshly created Context has a unique reference")
-            .set_gl_display(&gl_display);
-
-        pipeline.set_context(&display_ctx);
-
-        let mut app_ctx = gst::Context::new("gst.gl.app_context", true);
-        app_ctx
-            .get_mut()
-            .expect("freshly created Context has a unique reference")
-            .structure_mut()
-            .set("context", &gl_context);
-
-        pipeline.set_context(&app_ctx);
+        set_pipeline_gl_context(&pipeline, &gl_display, &gl_context);
 
         let appsink = pipeline
             .by_name("sink")
@@ -109,7 +93,7 @@ pub fn run(
 // description string. `gst::parse::launch` treats `"` as a string delimiter and
 // `!` as an element separator, so a source containing those characters could
 // otherwise inject additional elements into the pipeline.
-fn build_pipeline(source: &str) -> anyhow::Result<gst::Pipeline> {
+pub fn build_pipeline(source: &str) -> anyhow::Result<gst::Pipeline> {
     let pipeline = gst::Pipeline::default();
 
     // `uridecodebin3` takes a URI for both local files and remote URLs, so local
@@ -192,6 +176,69 @@ fn build_pipeline(source: &str) -> anyhow::Result<gst::Pipeline> {
     });
 
     Ok(pipeline)
+}
+
+pub fn set_pipeline_gl_context(
+    pipeline: &gst::Pipeline,
+    gl_display: &gst_gl::GLDisplay,
+    gl_context: &gst_gl::GLContext,
+) {
+    let mut display_ctx = gst::Context::new("gst.gl.GLDisplay", true);
+    display_ctx
+        .get_mut()
+        .expect("freshly created Context has a unique reference")
+        .set_gl_display(gl_display);
+
+    pipeline.set_context(&display_ctx);
+
+    let mut app_ctx = gst::Context::new("gst.gl.app_context", true);
+    app_ctx
+        .get_mut()
+        .expect("freshly created Context has a unique reference")
+        .structure_mut()
+        .set("context", gl_context);
+
+    pipeline.set_context(&app_ctx);
+}
+
+pub fn pull_sample_at(pipeline: &gst::Pipeline, at: f64) -> anyhow::Result<gst::Sample> {
+    if !at.is_finite() || at < 0.0 {
+        return Err(anyhow!(
+            "seek timestamp must be a finite, non-negative number of seconds (got {at})"
+        ));
+    }
+
+    let appsink = pipeline
+        .by_name("sink")
+        .context("appsink not found in pipeline")?
+        .downcast::<gst_app::AppSink>()
+        .map_err(|_| anyhow!("`sink` is not an AppSink"))?;
+
+    appsink.set_property("sync", false);
+
+    pipeline
+        .set_state(gst::State::Paused)
+        .context("set pipeline state to Paused")?;
+    pipeline
+        .state(gst::ClockTime::from_seconds(5))
+        .0
+        .context("wait for pipeline to pause")?;
+
+    pipeline
+        .seek_simple(
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+            gst::ClockTime::from_seconds_f64(at),
+        )
+        .context("seek to dump timestamp")?;
+    pipeline
+        .state(gst::ClockTime::from_seconds(5))
+        .0
+        .context("wait for seek preroll")?;
+
+    appsink
+        .pull_preroll()
+        .or_else(|_| appsink.pull_sample())
+        .context("pull decoded sample")
 }
 
 pub fn sample_to_frame(
