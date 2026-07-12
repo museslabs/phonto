@@ -115,10 +115,18 @@ phonto dump PATH --out OUT.png [--at SECONDS] [--shader PATH]
 `--at` selects the timestamp in seconds (default `0.0`), and `--shader` applies
 a GLSL fragment shader before saving (only available on Wayland/Linux).
 
-Phonto also writes the currently selected video path to `~/.cache/phonto/current`.
+Phonto also writes the current playback settings to
+`~/.cache/phonto/current.json`. The file contains the resolved video `path` and
+the optional `shader` path, for example:
+
+```json
+{"path":"/path/to/video.mp4","shader":"/path/to/effect.glsl"}
+```
+
 This is useful when `--rand` chooses a wallpaper and another tool needs to reuse
-the same video. For per-display playback there is no single "current" video, so the
-cache file is skipped in that mode.
+the same video and shader. For per-display playback there is no single current
+video, so the cache file is skipped in that mode. Failure to update this
+auxiliary cache is logged but does not stop playback.
 
 ## Streaming & YouTube (yt-dlp)
 
@@ -270,7 +278,14 @@ on a higher layer while hyprlock is active. Start a second phonto process on the
 `overlay` layer before launching hyprlock:
 
 ```bash
-phonto "$(cat "$HOME/.cache/phonto/current")" --layer overlay &
+cache="$HOME/.cache/phonto/current.json"
+path="$(jq -r '.path' "$cache")"
+shader="$(jq -r '.shader // empty' "$cache")"
+shader_args=()
+if [[ -n "$shader" ]]; then
+    shader_args=(--shader "$shader")
+fi
+phonto "$path" "${shader_args[@]}" --layer overlay &
 phonto_lock_pid=$!
 
 hyprlock

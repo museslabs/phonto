@@ -1,4 +1,5 @@
 mod backend;
+mod cache;
 mod config;
 mod displays;
 #[cfg(target_os = "macos")]
@@ -236,12 +237,14 @@ fn main() -> anyhow::Result<()> {
 
     // Persist the resolved path so other tools (e.g. hyprlock) can read it.
     // For per-display playback there's no single "current" path; skip the cache.
-    if let plan::Playback::Mirror(ref path) = playback
-        && let Ok(home) = std::env::var("HOME")
-    {
-        let cache_dir = std::path::Path::new(&home).join(".cache/phonto");
-        if std::fs::create_dir_all(&cache_dir).is_ok() {
-            let _ = std::fs::write(cache_dir.join("current"), path);
+    if let plan::Playback::Mirror(ref path) = playback {
+        #[cfg(target_os = "linux")]
+        let shader = args.shader.as_deref();
+        #[cfg(not(target_os = "linux"))]
+        let shader = None;
+
+        if let Err(err) = cache::write(path, shader) {
+            log::warn!("failed to update playback cache: {err:#}");
         }
     }
 
