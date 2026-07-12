@@ -20,6 +20,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 rand = "0.9"
 image = { version = "0.25.10", features = ["png"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 glow = "0.17.0"
@@ -34,7 +35,6 @@ glutin = "0.32.3"
 raw-window-handle = "0.6.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v5"] }
 objc2 = "0.6"
