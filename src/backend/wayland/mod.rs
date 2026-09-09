@@ -94,8 +94,11 @@ impl Backend for WaylandBackend {
         let mut renderer =
             GlRenderer::new(&self.state.conn, &wl_surface, 1, 1, self.shader.as_deref())?;
 
-        let (gl_display, gl_context) =
-            decoder::wrap_gl(renderer.egl_display(), renderer.egl_context())?;
+        let (gl_display, gl_context) = decoder::wrap_gl(
+            renderer.egl_display(),
+            renderer.egl_context(),
+            renderer.gl_api(),
+        )?;
 
         let pipeline = decoder::build_pipeline(&path)?;
         decoder::set_pipeline_gl_context(&pipeline, &gl_display, &gl_context);
@@ -213,8 +216,11 @@ impl Backend for WaylandBackend {
         // One decoder per video path. Each wraps the same EGL context.
         let mut decoders: Vec<DecoderHandle> = Vec::with_capacity(paths.len());
         for path in paths {
-            let (gl_display, gl_context) =
-                decoder::wrap_gl(renderer.egl_display(), renderer.egl_context())?;
+            let (gl_display, gl_context) = decoder::wrap_gl(
+                renderer.egl_display(),
+                renderer.egl_context(),
+                renderer.gl_api(),
+            )?;
             let (tx, rx) = mpsc::sync_channel(1);
             let tx = tx;
             let decoder_gl_context = gl_context.clone();
