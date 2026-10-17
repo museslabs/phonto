@@ -7,9 +7,6 @@ mod wallpaper;
 
 use std::path::PathBuf;
 
-#[cfg(target_os = "linux")]
-use anyhow::Context;
-
 use backend::{Backend, PauseMode, RunOptions};
 use clap::Parser;
 use clap::Subcommand;
@@ -182,21 +179,13 @@ fn main() -> anyhow::Result<()> {
                 let path =
                     plan::resolve_source(plan::Source::Path(path), &config.search_paths, &yt_dlp)?;
 
-                #[cfg(target_os = "linux")]
-                {
-                    let shader = shader
-                        .as_deref()
-                        .map(|p| {
-                            std::fs::read_to_string(p)
-                                .with_context(|| format!("failed to read shader file: {p}"))
-                        })
-                        .transpose()?;
-
-                    return backend::wayland::WaylandBackend::new(args.layer, shader)?
-                        .dump(path, at, out);
-                }
-                #[cfg(target_os = "macos")]
-                return backend::macos::MacosBackend::new()?.dump(path, at, out);
+                let backend_options = backend::BackendOptions {
+                    #[cfg(target_os = "linux")]
+                    layer: args.layer,
+                    #[cfg(target_os = "linux")]
+                    shader,
+                };
+                return backend::create(backend_options)?.dump(path, at, out);
             }
             #[cfg(target_os = "macos")]
             Command::InstallLiveLockscreen {
@@ -252,20 +241,11 @@ fn main() -> anyhow::Result<()> {
         pause,
         scale: args.scale,
     };
-
-    #[cfg(target_os = "linux")]
-    {
-        let shader = args
-            .shader
-            .as_deref()
-            .map(|p| {
-                std::fs::read_to_string(p)
-                    .with_context(|| format!("failed to read shader file: {p}"))
-            })
-            .transpose()?;
-        backend::wayland::WaylandBackend::new(args.layer, shader)?.run(playback, options)
-    }
-
-    #[cfg(target_os = "macos")]
-    return backend::macos::MacosBackend::new()?.run(playback, options);
+    let backend_options = backend::BackendOptions {
+        #[cfg(target_os = "linux")]
+        layer: args.layer,
+        #[cfg(target_os = "linux")]
+        shader: args.shader,
+    };
+    backend::create(backend_options)?.run(playback, options)
 }
