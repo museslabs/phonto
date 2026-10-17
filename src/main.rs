@@ -1,8 +1,6 @@
 mod backend;
 mod config;
 mod displays;
-#[cfg(target_os = "macos")]
-mod macos_live_lockscreen;
 mod plan;
 mod scale;
 mod wallpaper;
@@ -205,7 +203,7 @@ fn main() -> anyhow::Result<()> {
                 video,
                 name,
                 remove,
-            } => return macos_live_lockscreen::install::run(video, name, remove),
+            } => return backend::macos::live_lockscreen::install::run(video, name, remove),
         }
     }
 
