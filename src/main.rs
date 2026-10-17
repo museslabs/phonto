@@ -198,16 +198,24 @@ fn main() -> anyhow::Result<()> {
 
     let config = config::load()?;
 
-    let cli_per_display = plan::CliPerDisplay {
-        pinned: args
-            .display
-            .chunks(2)
-            .map(|c| (c[0].clone(), c[1].clone()))
-            .collect(),
-        random: args.display_rand.clone(),
+    let request = if !args.display.is_empty() || !args.display_rand.is_empty() {
+        plan::Request::PerDisplay {
+            pinned: args
+                .display
+                .chunks(2)
+                .map(|c| (c[0].clone(), c[1].clone()))
+                .collect(),
+            random: args.display_rand,
+        }
+    } else {
+        match (args.path, args.rand) {
+            (Some(path), _) => plan::Request::Mirror(plan::Source::Path(path)),
+            (None, true) => plan::Request::Mirror(plan::Source::Random),
+            (None, false) => plan::Request::FromConfig,
+        }
     };
 
-    let plan = plan::build(args.path, args.rand, cli_per_display, &config)?;
+    let plan = plan::build(request, &config)?;
 
     let yt_dlp = plan::YtDlpOpts {
         format: args.yt_dlp_format,
