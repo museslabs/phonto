@@ -4,6 +4,7 @@ mod config;
 mod displays;
 mod plan;
 mod scale;
+mod state;
 mod wallpaper;
 
 use backend::{Backend, RunOptions};
@@ -46,15 +47,9 @@ fn main() -> anyhow::Result<()> {
     let plan = plan::build(cli.play.source.into(), &config)?;
     let playback = plan::resolve(plan, &config.search_paths, &cli.yt_dlp.into())?;
 
-    // Persist the resolved path so other tools (e.g. hyprlock) can read it.
-    // For per-display playback there's no single "current" path; skip the cache.
-    if let plan::Playback::Mirror(ref path) = playback
-        && let Ok(home) = std::env::var("HOME")
-    {
-        let cache_dir = std::path::Path::new(&home).join(".cache/phonto");
-        if std::fs::create_dir_all(&cache_dir).is_ok() {
-            let _ = std::fs::write(cache_dir.join("current"), path);
-        }
+    // Per-display playback has no single "current" path, so skip the cache.
+    if let plan::Playback::Mirror(path) = &playback {
+        state::write_current(path);
     }
 
     let options = RunOptions {
