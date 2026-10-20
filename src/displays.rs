@@ -6,11 +6,6 @@ pub struct DisplayInfo {
     pub height: u32,
 }
 
-pub fn list() -> anyhow::Result<Vec<DisplayInfo>> {
-    use crate::backend::{Backend, Platform};
-    Platform::list_displays()
-}
-
 pub fn print(displays: &[DisplayInfo]) {
     if displays.is_empty() {
         println!("no displays detected");
