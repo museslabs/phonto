@@ -127,7 +127,7 @@ pub struct RenderArgs {
     /// Which layer shell layer to render on (Linux/Wayland only).
     #[cfg(target_os = "linux")]
     #[arg(long, value_enum, default_value_t = crate::backend::wayland::LayerMode::Background)]
-    layer: crate::backend::wayland::LayerMode,
+    pub layer: crate::backend::wayland::LayerMode,
 
     /// Path to a GLSL fragment shader file to apply. The shader receives
     /// `u_tex` (sampler2D), `v_uv` (vec2), and optionally `u_resolution`
@@ -140,8 +140,6 @@ pub struct RenderArgs {
 impl RenderArgs {
     pub fn backend_options(&self) -> BackendOptions {
         BackendOptions {
-            #[cfg(target_os = "linux")]
-            layer: self.layer,
             #[cfg(target_os = "linux")]
             shader: self.shader.clone(),
         }
@@ -219,12 +217,9 @@ pub struct DumpArgs {
 }
 
 impl DumpArgs {
-    /// `dump` reads its own `--shader`, not the top-level one. The layer is
-    /// irrelevant since a dump never creates a layer surface.
+    /// `dump` reads its own `--shader`, not the top-level one.
     pub fn backend_options(&self) -> BackendOptions {
         BackendOptions {
-            #[cfg(target_os = "linux")]
-            layer: Default::default(),
             #[cfg(target_os = "linux")]
             shader: self.shader.clone(),
         }

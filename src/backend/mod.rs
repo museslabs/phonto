@@ -11,6 +11,8 @@ use crate::scale::ScaleMode;
 pub struct RunOptions {
     pub pause: PauseMode,
     pub scale: ScaleMode,
+    #[cfg(target_os = "linux")]
+    pub layer: wayland::LayerMode,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -48,8 +50,6 @@ pub type Platform = macos::MacosBackend;
 /// any; on macOS this is empty.
 #[derive(Debug)]
 pub struct BackendOptions {
-    #[cfg(target_os = "linux")]
-    pub layer: wayland::LayerMode,
     /// Path to a GLSL fragment shader file.
     #[cfg(target_os = "linux")]
     pub shader: Option<String>,
@@ -64,7 +64,7 @@ pub fn create(options: BackendOptions) -> anyhow::Result<Platform> {
             std::fs::read_to_string(p).with_context(|| format!("failed to read shader file: {p}"))
         })
         .transpose()?;
-    wayland::WaylandBackend::new(options.layer, shader)
+    wayland::WaylandBackend::new(shader)
 }
 
 #[cfg(target_os = "macos")]

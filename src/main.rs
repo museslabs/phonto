@@ -26,6 +26,8 @@ fn play(args: cli::PlayArgs, yt_dlp: cli::YtDlpArgs) -> anyhow::Result<()> {
     let options = backend::RunOptions {
         pause: args.power.pause_mode(),
         scale: args.render.scale,
+        #[cfg(target_os = "linux")]
+        layer: args.render.layer,
     };
     backend::create(args.render.backend_options())?.run(playback, options)
 }
