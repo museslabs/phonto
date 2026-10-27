@@ -33,12 +33,11 @@ pub struct WaylandBackend {
     state: State,
     eq: EventQueue<State>,
     qh: QueueHandle<State>,
-    layer: LayerMode,
     shader: Option<String>,
 }
 
 impl WaylandBackend {
-    pub fn new(layer: LayerMode, shader: Option<String>) -> anyhow::Result<Self> {
+    pub fn new(shader: Option<String>) -> anyhow::Result<Self> {
         let conn = Connection::connect_to_env().context("connect to Wayland display")?;
         let mut eq = conn.new_event_queue();
         let qh = eq.handle();
@@ -51,7 +50,6 @@ impl WaylandBackend {
             state,
             eq,
             qh,
-            layer,
             shader,
         })
     }
@@ -169,7 +167,7 @@ impl Backend for WaylandBackend {
         // Create one layer surface per chosen output.
         for &name in &chosen {
             let o = self.state.outputs.get_mut(&name).unwrap();
-            o.create_layer_surface(name, &compositor, &layer_shell, self.layer, &self.qh);
+            o.create_layer_surface(name, &compositor, &layer_shell, options.layer, &self.qh);
             o.decoder_idx = if mirror {
                 Some(0)
             } else {
@@ -272,7 +270,7 @@ impl Backend for WaylandBackend {
                 .collect();
             for &name in &new_outputs {
                 let o = self.state.outputs.get_mut(&name).unwrap();
-                o.create_layer_surface(name, &compositor, &layer_shell, self.layer, &self.qh);
+                o.create_layer_surface(name, &compositor, &layer_shell, options.layer, &self.qh);
                 o.decoder_idx = if mirror {
                     Some(0)
                 } else {

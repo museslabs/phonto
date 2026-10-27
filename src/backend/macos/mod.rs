@@ -1,5 +1,6 @@
 mod battery_observer;
 mod displays;
+pub mod live_lockscreen;
 mod loop_observer;
 mod screen_observer;
 

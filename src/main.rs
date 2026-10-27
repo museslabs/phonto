@@ -1,273 +1,65 @@
 mod backend;
+mod cli;
 mod config;
 mod displays;
-#[cfg(target_os = "macos")]
-mod macos_live_lockscreen;
 mod plan;
 mod scale;
+mod state;
 mod wallpaper;
 
-use std::path::PathBuf;
-
-#[cfg(target_os = "linux")]
-use anyhow::Context;
-
-use backend::{Backend, PauseMode, RunOptions};
 use clap::Parser;
-use clap::Subcommand;
 
-use scale::ScaleMode;
+use cli::{Cli, Command};
 
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-// Top-level args are only required for the "play a wallpaper" mode, not
-// when a subcommand is invoked.
-#[command(subcommand_negates_reqs = true)]
-struct Args {
-    #[command(subcommand)]
-    command: Option<Command>,
+use crate::backend::Backend;
 
-    /// Path to the video file, streaming URL (http, https, rtsp, rtmp),
-    /// or YouTube URL (resolved via yt-dlp).
-    #[arg(conflicts_with_all = ["rand", "display", "display_rand"])]
-    path: Option<String>,
+fn play(args: cli::PlayArgs, yt_dlp: cli::YtDlpArgs) -> anyhow::Result<()> {
+    let config = config::load()?;
+    let plan = plan::build(args.source.into(), &config)?;
+    let playback = plan::resolve(plan, &config.search_paths, &yt_dlp.into())?;
 
-    /// Play a random wallpaper from your playlist
-    #[arg(long, conflicts_with_all = ["path", "display", "display_rand"])]
-    rand: bool,
+    // Per-display playback has no single "current" path, so skip the cache.
+    if let plan::Playback::Mirror(path) = &playback {
+        state::write_current(path);
+    }
 
-    /// Pin a video to a specific display. Repeatable.
-    /// Pass the display ID exactly as `phonto displays` prints it, or an
-    /// [[alias]].name from your config.
-    #[arg(
-        long,
-        value_names = ["ID", "PATH"],
-        num_args = 2,
-        action = clap::ArgAction::Append,
-        conflicts_with_all = ["path", "rand"],
-    )]
-    display: Vec<String>,
-
-    /// Pick a random video for a specific display. Repeatable.
-    #[arg(
-        long = "display-rand",
-        value_name = "ID",
-        action = clap::ArgAction::Append,
-        conflicts_with_all = ["path", "rand"],
-    )]
-    display_rand: Vec<String>,
-
-    /// How to fit the video to the screen.
-    #[arg(long, value_enum, default_value_t = ScaleMode::Fill)]
-    scale: ScaleMode,
-
-    /// Which layer shell layer to render on (Linux/Wayland only).
-    #[cfg(target_os = "linux")]
-    #[arg(long, value_enum, default_value_t = backend::wayland::LayerMode::Background)]
-    layer: backend::wayland::LayerMode,
-
-    /// Path to a GLSL fragment shader file to apply. The shader receives
-    /// `u_tex` (sampler2D), `v_uv` (vec2), and optionally `u_resolution`
-    /// (vec2, surface size in pixels).
-    #[cfg(target_os = "linux")]
-    #[arg(long, value_name = "PATH")]
-    shader: Option<String>,
-
-    /// Pause playback while the system is on battery
-    #[arg(long, conflicts_with = "pause_below")]
-    pause_on_battery: bool,
-
-    /// Pause playback when on battery and charge drops below PERCENT (1-100)
-    #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(1..=100))]
-    pause_below: Option<u8>,
-
-    /// Pass --cookies-from-browser <BROWSER> to yt-dlp for YouTube auth
-    ///
-    /// If YouTube is blocking you from accessing it, try using this option
-    #[arg(long, value_name = "BROWSER")]
-    cookies_from_browser: Option<String>,
-
-    /// yt-dlp format selector (default: yt-dlp decides)
-    #[arg(long, value_name = "FORMAT", default_value = None)]
-    yt_dlp_format: Option<String>,
-
-    /// Extra arguments forwarded to yt-dlp (e.g. `--yt-dlp-args "--no-check-certificate"`)
-    #[arg(long, value_name = "ARGS")]
-    yt_dlp_args: Option<String>,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    /// List the displays phonto detects on this system.
-    Displays,
-
-    /// Dump image from video input
-    Dump {
-        #[arg()]
-        path: String,
-
-        #[arg(short, long, value_name = "OUT.png")]
-        out: PathBuf,
-
+    let options = backend::RunOptions {
+        pause: args.power.pause_mode(),
+        scale: args.render.scale,
         #[cfg(target_os = "linux")]
-        #[arg(long, value_name = "PATH")]
-        shader: Option<String>,
-
-        #[arg(long, value_name = "SECONDS", default_value = "0.0", value_parser = parse_seek_seconds)]
-        at: f64,
-    },
-
-    /// Transcode a video and register it as the macOS lock-screen
-    /// wallpaper (HEVC Main10 + temporal sub-layers; survives multiple
-    /// lock cycles).
-    #[cfg(target_os = "macos")]
-    InstallLiveLockscreen {
-        /// Path to the video file (MP4/MOV).
-        video: PathBuf,
-
-        /// Display name for the picker (defaults to the file stem).
-        #[arg(long)]
-        name: Option<String>,
-
-        /// Remove the previously-installed entry for this video and quit.
-        #[arg(long)]
-        remove: bool,
-    },
+        layer: args.render.layer,
+    };
+    backend::create(args.render.backend_options())?.run(playback, options)
 }
 
-/// Parse a `--at` seek offset. Rejects negative and non-finite values, which
-/// produce undefined/failed seeks in both the GStreamer and AVFoundation paths.
-fn parse_seek_seconds(s: &str) -> Result<f64, String> {
-    let secs: f64 = s
-        .parse()
-        .map_err(|_| format!("`{s}` is not a valid number"))?;
-    if !secs.is_finite() {
-        return Err("must be a finite number of seconds".to_string());
-    }
-    if secs < 0.0 {
-        return Err("must be zero or positive".to_string());
-    }
-    Ok(secs)
+fn dump(args: cli::DumpArgs, yt_dlp: cli::YtDlpArgs) -> anyhow::Result<()> {
+    let config = config::load()?;
+    let options = args.backend_options();
+    let path = plan::resolve_source(
+        plan::Source::Path(args.path),
+        &config.search_paths,
+        &yt_dlp.into(),
+    )?;
+    backend::create(options)?.dump(path, args.at, args.out)
 }
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let args = Args::parse();
-
-    if let Some(cmd) = args.command {
-        match cmd {
-            Command::Displays => {
-                let detected = displays::list()?;
-                displays::print(&detected);
-                return Ok(());
-            }
-            Command::Dump {
-                path,
-                at,
-                out,
-                #[cfg(target_os = "linux")]
-                shader,
-            } => {
-                let config = config::load()?;
-                let yt_dlp = plan::YtDlpOpts {
-                    format: args.yt_dlp_format,
-                    cookies_from_browser: args.cookies_from_browser,
-                    extra_args: args
-                        .yt_dlp_args
-                        .unwrap_or_default()
-                        .split_whitespace()
-                        .map(|s| s.to_string())
-                        .collect(),
-                };
-
-                let path =
-                    plan::resolve_source(plan::Source::Path(path), &config.search_paths, &yt_dlp)?;
-
-                #[cfg(target_os = "linux")]
-                {
-                    let shader = shader
-                        .as_deref()
-                        .map(|p| {
-                            std::fs::read_to_string(p)
-                                .with_context(|| format!("failed to read shader file: {p}"))
-                        })
-                        .transpose()?;
-
-                    return backend::wayland::WaylandBackend::new(args.layer, shader)?
-                        .dump(path, at, out);
-                }
-                #[cfg(target_os = "macos")]
-                return backend::macos::MacosBackend::new()?.dump(path, at, out);
-            }
-            #[cfg(target_os = "macos")]
-            Command::InstallLiveLockscreen {
-                video,
-                name,
-                remove,
-            } => return macos_live_lockscreen::install::run(video, name, remove),
+    let cli = Cli::parse();
+    match cli.command {
+        // No subcommand: play a wallpaper.
+        None => play(cli.play, cli.yt_dlp),
+        Some(Command::Displays) => {
+            displays::print(&backend::Platform::list_displays()?);
+            Ok(())
         }
+        Some(Command::Dump(args)) => dump(args, cli.yt_dlp),
+        #[cfg(target_os = "macos")]
+        Some(Command::InstallLiveLockscreen {
+            video,
+            name,
+            remove,
+        }) => backend::macos::live_lockscreen::install::run(video, name, remove),
     }
-
-    let config = config::load()?;
-
-    let cli_per_display = plan::CliPerDisplay {
-        pinned: args
-            .display
-            .chunks(2)
-            .map(|c| (c[0].clone(), c[1].clone()))
-            .collect(),
-        random: args.display_rand.clone(),
-    };
-
-    let plan = plan::build(args.path, args.rand, cli_per_display, &config)?;
-
-    let yt_dlp = plan::YtDlpOpts {
-        format: args.yt_dlp_format,
-        cookies_from_browser: args.cookies_from_browser,
-        extra_args: args
-            .yt_dlp_args
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect(),
-    };
-    let playback = plan::resolve(plan, &config.search_paths, &yt_dlp)?;
-
-    // Persist the resolved path so other tools (e.g. hyprlock) can read it.
-    // For per-display playback there's no single "current" path; skip the cache.
-    if let plan::Playback::Mirror(ref path) = playback
-        && let Ok(home) = std::env::var("HOME")
-    {
-        let cache_dir = std::path::Path::new(&home).join(".cache/phonto");
-        if std::fs::create_dir_all(&cache_dir).is_ok() {
-            let _ = std::fs::write(cache_dir.join("current"), path);
-        }
-    }
-
-    let pause = match (args.pause_on_battery, args.pause_below) {
-        (true, _) => PauseMode::OnBattery,
-        (false, Some(pct)) => PauseMode::BelowPercent(pct),
-        (false, None) => PauseMode::Never,
-    };
-    let options = RunOptions {
-        pause,
-        scale: args.scale,
-    };
-
-    #[cfg(target_os = "linux")]
-    {
-        let shader = args
-            .shader
-            .as_deref()
-            .map(|p| {
-                std::fs::read_to_string(p)
-                    .with_context(|| format!("failed to read shader file: {p}"))
-            })
-            .transpose()?;
-        backend::wayland::WaylandBackend::new(args.layer, shader)?.run(playback, options)
-    }
-
-    #[cfg(target_os = "macos")]
-    return backend::macos::MacosBackend::new()?.run(playback, options);
 }

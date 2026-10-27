@@ -6,18 +6,6 @@ pub struct DisplayInfo {
     pub height: u32,
 }
 
-pub fn list() -> anyhow::Result<Vec<DisplayInfo>> {
-    use crate::backend::Backend;
-    #[cfg(target_os = "macos")]
-    {
-        <crate::backend::macos::MacosBackend as Backend>::list_displays()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        <crate::backend::wayland::WaylandBackend as Backend>::list_displays()
-    }
-}
-
 pub fn print(displays: &[DisplayInfo]) {
     if displays.is_empty() {
         println!("no displays detected");

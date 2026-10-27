@@ -124,56 +124,53 @@ fn resolve_with_ytdlp(url: &str, opts: &YtDlpOpts) -> anyhow::Result<String> {
     Ok(stream_url.to_string())
 }
 
-#[derive(Debug, Default)]
-pub struct CliPerDisplay {
-    /// Pairs of (id, path) from repeated `--display ID PATH`.
-    pub pinned: Vec<(String, String)>,
-    /// IDs from repeated `--display-rand ID`.
-    pub random: Vec<String>,
+/// What the command line asked to play, before config is consulted.
+#[derive(Debug, Clone)]
+pub enum Request {
+    /// One source on every display: a positional path or `--rand`.
+    Mirror(Source),
+    /// Per-display assignments from `--display` / `--display-rand`.
+    PerDisplay {
+        /// Pairs of (id, path) from repeated `--display ID PATH`.
+        pinned: Vec<(String, String)>,
+        /// IDs from repeated `--display-rand ID`.
+        random: Vec<String>,
+    },
+    /// Nothing on the command line; fall back to config `[[display]]`.
+    FromConfig,
 }
 
-impl CliPerDisplay {
-    pub fn is_empty(&self) -> bool {
-        self.pinned.is_empty() && self.random.is_empty()
+/// Build a Plan from the CLI request, falling back to config `[[display]]`
+/// when the CLI names no source. If neither produces a source, returns Err.
+pub fn build(request: Request, config: &Config) -> anyhow::Result<Plan> {
+    match request {
+        Request::Mirror(source) => Ok(Plan::Mirror(source)),
+        Request::PerDisplay { pinned, random } => {
+            per_display_from_cli(pinned, random, &config.alias)
+        }
+        Request::FromConfig if !config.display.is_empty() => {
+            per_display_from_config(&config.display, &config.alias)
+        }
+        Request::FromConfig => bail!(
+            "no video source: pass a path, --rand, --display ID PATH, or configure [[display]] entries"
+        ),
     }
 }
 
-/// Build a Plan from CLI args and config. Precedence: CLI per-display flags >
-/// CLI positional/--rand > config `[[display]]`. If none of those produce a
-/// source, returns Err.
-pub fn build(
-    positional_path: Option<String>,
-    cli_rand: bool,
-    cli_per_display: CliPerDisplay,
-    config: &Config,
+fn per_display_from_cli(
+    pinned: Vec<(String, String)>,
+    random: Vec<String>,
+    aliases: &[Alias],
 ) -> anyhow::Result<Plan> {
-    if !cli_per_display.is_empty() {
-        return per_display_from_cli(cli_per_display, &config.alias);
-    }
-    if let Some(path) = positional_path {
-        return Ok(Plan::Mirror(Source::Path(path)));
-    }
-    if cli_rand {
-        return Ok(Plan::Mirror(Source::Random));
-    }
-    if !config.display.is_empty() {
-        return per_display_from_config(&config.display, &config.alias);
-    }
-    bail!(
-        "no video source: pass a path, --rand, --display ID PATH, or configure [[display]] entries"
-    );
-}
-
-fn per_display_from_cli(cli: CliPerDisplay, aliases: &[Alias]) -> anyhow::Result<Plan> {
     let mut entries: Vec<DisplayAssignment> = Vec::new();
-    for (id, path) in cli.pinned {
+    for (id, path) in pinned {
         let native_id = resolve_id(&id, aliases)?;
         entries.push(DisplayAssignment {
             native_id,
             source: Source::Path(path),
         });
     }
-    for id in cli.random {
+    for id in random {
         let native_id = resolve_id(&id, aliases)?;
         entries.push(DisplayAssignment {
             native_id,
