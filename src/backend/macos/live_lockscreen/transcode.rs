@@ -1,9 +1,10 @@
 //! HEVC Main10 transcoder for live lock-screen video.
 //!
 //! Drives `VTCompressionSession` directly because `AVAssetWriter`'s
-//! `outputSettings` dictionary does not expose the temporal sub-layer
-//! property keys. The encoded `CMSampleBuffer`s are then appended to an
-//! `AVAssetWriter` configured for pass-through.
+//! `outputSettings` refused `BaseLayerFrameRate` on macOS 26. macOS 27
+//! accepts it, but only this path has been tried on 26. The encoded
+//! `CMSampleBuffer`s are then appended to an `AVAssetWriter` configured for
+//! pass-through.
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -218,13 +219,15 @@ fn configure_session(session: &VTCompressionSession) -> Result<()> {
             "AllowFrameReordering",
         )?;
 
-        // Two temporal sub-layers in the VPS (`vps_max_sub_layers_minus1 = 1`).
-        // The lock-screen player needs this shape to re-arm across lock cycles.
+        // Without `BaseLayerFrameRate` the lock-screen player goes black after
+        // the first lock, even with two sub-layers declared in the VPS.
+        // `NumberOfTemporalLayers` is undocumented and changes nothing on
+        // macOS 27. It stays because macOS 26 is untested without it.
         let ntl_key = CFString::from_str("NumberOfTemporalLayers");
         let ntl_val = cfnum_i32(TEMPORAL_LAYER_COUNT);
         let st = VTSessionSetProperty(s, &ntl_key, Some(&ntl_val));
         if st != 0 {
-            bail!("NumberOfTemporalLayers failed: OSStatus {st}");
+            log::warn!("NumberOfTemporalLayers failed: OSStatus {st}, continuing without it");
         }
         let blfr = cfnum_f64(BASE_LAYER_FPS);
         vt_set(
