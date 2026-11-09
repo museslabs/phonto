@@ -22,21 +22,36 @@ use objc2_av_foundation::{
 use objc2_core_foundation::{
     CFNumber, CFNumberType, CFRetained, CFString, CFType, kCFBooleanFalse,
 };
-use objc2_core_media::{CMSampleBuffer, kCMTimeInvalid, kCMVideoCodecType_HEVC};
-use objc2_core_video::{
-    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+use objc2_core_media::{
+    CMFormatDescription, CMSampleBuffer, kCMFormatDescriptionExtension_ColorPrimaries,
+    kCMFormatDescriptionExtension_TransferFunction, kCMFormatDescriptionExtension_YCbCrMatrix,
+    kCMTimeInvalid, kCMVideoCodecType_HEVC,
 };
-use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
+use objc2_core_video::{
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL};
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
-    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
-    kVTCompressionPropertyKey_BaseLayerFrameRate, kVTCompressionPropertyKey_ExpectedFrameRate,
-    kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_BaseLayerFrameRate,
+    kVTCompressionPropertyKey_ColorPrimaries, kVTCompressionPropertyKey_DataRateLimits,
+    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, kVTCompressionPropertyKey_ProfileLevel,
-    kVTCompressionPropertyKey_RealTime, kVTProfileLevel_HEVC_Main10_AutoLevel,
+    kVTCompressionPropertyKey_Quality, kVTCompressionPropertyKey_RealTime,
+    kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
+    kVTProfileLevel_HEVC_Main10_AutoLevel,
 };
 
-const AVERAGE_BITRATE_BPS: i32 = 15_000_000;
+// Once DataRateLimits is set, the limit decides the bitrate and any Quality
+// below 1.0 gives the same output. Setting it still matters. An
+// AverageBitRate target in its place came out at less than half the bitrate.
+// 1.0 would be lossless for luma but ignores the limit.
+const QUALITY: f64 = 0.85;
+// 160 Mbps averaged over 5 s. That's the limit of HEVC level 5.1 High tier,
+// which 4K encodes signal. On two 4K test clips this stayed within about 1 dB
+// of Quality alone, and it held noisy footage to 107 Mbps instead of 1.8 Gbps.
+const RATE_LIMIT_BYTES: i32 = 100_000_000;
+const RATE_LIMIT_SECS: f64 = 5.0;
 const EXPECTED_FPS: i32 = 60;
 const MAX_KEYFRAME_INTERVAL: i32 = 120;
 const MAX_KEYFRAME_INTERVAL_SECS: f64 = 2.0;
@@ -110,6 +125,7 @@ fn open_input(
     Retained<AVAssetReaderTrackOutput>,
     i32,
     i32,
+    CFRetained<CMFormatDescription>,
 )> {
     let input_ns = NSString::from_str(&input.to_string_lossy());
     let url_in = NSURL::fileURLWithPath(&input_ns);
@@ -124,6 +140,11 @@ fn open_input(
     let width = size.width as i32;
     let height = size.height as i32;
     log::debug!("source: {width}x{height}");
+    let format = unsafe { track.formatDescriptions() }
+        .firstObject()
+        .map(|desc| unsafe { CFRetained::retain(NonNull::from(&*desc).cast::<CFType>()) })
+        .and_then(|desc| desc.downcast::<CMFormatDescription>().ok())
+        .context("video track has no format description")?;
 
     let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset) }
         .map_err(|e| anyhow!("AVAssetReader init failed: {e:?}"))?;
@@ -136,13 +157,14 @@ fn open_input(
     };
     unsafe { reader.addOutput(&reader_output) };
 
-    Ok((reader, reader_output, width, height))
+    Ok((reader, reader_output, width, height, format))
 }
 
 fn create_session(
     width: i32,
     height: i32,
     sink_ptr: *mut c_void,
+    source_format: &CMFormatDescription,
 ) -> Result<CFRetained<VTCompressionSession>> {
     let mut raw: *mut VTCompressionSession = ptr::null_mut();
     let st = unsafe {
@@ -163,11 +185,14 @@ fn create_session(
         bail!("VTCompressionSessionCreate failed: OSStatus {st}");
     }
     let session = unsafe { CFRetained::from_raw(NonNull::new(raw).unwrap()) };
-    configure_session(&session)?;
+    configure_session(&session, source_format)?;
     Ok(session)
 }
 
-fn configure_session(session: &VTCompressionSession) -> Result<()> {
+fn configure_session(
+    session: &VTCompressionSession,
+    source_format: &CMFormatDescription,
+) -> Result<()> {
     let s: &CFType = session;
     unsafe {
         let profile_level: &CFType = kVTProfileLevel_HEVC_Main10_AutoLevel;
@@ -178,13 +203,47 @@ fn configure_session(session: &VTCompressionSession) -> Result<()> {
             "ProfileLevel",
         )?;
 
-        let avg = cfnum_i32(AVERAGE_BITRATE_BPS);
+        let quality = cfnum_f64(QUALITY);
+        vt_set(s, kVTCompressionPropertyKey_Quality, &quality, "Quality")?;
+        let limits = NSArray::from_retained_slice(&[
+            NSNumber::new_i32(RATE_LIMIT_BYTES),
+            NSNumber::new_f64(RATE_LIMIT_SECS),
+        ]);
+        // NSArray is toll-free bridged to the CFArray VT expects.
+        let limits_cf: &CFType = &*(Retained::as_ptr(&limits) as *const CFType);
         vt_set(
             s,
-            kVTCompressionPropertyKey_AverageBitRate,
-            &avg,
-            "AverageBitRate",
+            kVTCompressionPropertyKey_DataRateLimits,
+            limits_cf,
+            "DataRateLimits",
         )?;
+
+        // Untagged output leaves the player to guess the source's colours.
+        for (ext_key, vt_key, name) in [
+            (
+                kCMFormatDescriptionExtension_ColorPrimaries,
+                kVTCompressionPropertyKey_ColorPrimaries,
+                "ColorPrimaries",
+            ),
+            (
+                kCMFormatDescriptionExtension_TransferFunction,
+                kVTCompressionPropertyKey_TransferFunction,
+                "TransferFunction",
+            ),
+            (
+                kCMFormatDescriptionExtension_YCbCrMatrix,
+                kVTCompressionPropertyKey_YCbCrMatrix,
+                "YCbCrMatrix",
+            ),
+        ] {
+            let Some(value) = source_format.extension(ext_key) else {
+                continue;
+            };
+            let st = VTSessionSetProperty(s, vt_key, Some(&value));
+            if st != 0 {
+                log::warn!("{name} failed: OSStatus {st}, output colours may be off");
+            }
+        }
 
         let fps = cfnum_i32(EXPECTED_FPS);
         vt_set(
@@ -371,7 +430,7 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let (reader, reader_output, width, height) = open_input(input)?;
+    let (reader, reader_output, width, height, source_format) = open_input(input)?;
 
     let sink: Box<SampleSink> = Box::new(SampleSink {
         samples: Mutex::new(Vec::new()),
@@ -379,7 +438,7 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
     });
     let sink_ptr = (&*sink as *const SampleSink) as *mut c_void;
 
-    let session = create_session(width, height, sink_ptr)?;
+    let session = create_session(width, height, sink_ptr, &source_format)?;
     let frames_in = encode_all(&reader, &reader_output, &session)?;
     unsafe { session.invalidate() };
 
@@ -403,13 +462,13 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
     Ok(())
 }
 
-// Asks the reader for 8-bit NV12 frames; VT converts internally. The output
-// profile is governed by `ProfileLevel`, not the input pixel format.
+// 10-bit even for 8-bit sources. VT's own 8-to-10-bit conversion loses
+// chroma detail at any bitrate.
 fn pixel_format_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
     let key_cf: &'static CFString = unsafe { kCVPixelBufferPixelFormatTypeKey };
     let key_ns: &NSString = unsafe { &*(key_cf as *const CFString as *const NSString) };
 
-    let val = NSNumber::new_u32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+    let val = NSNumber::new_u32(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange);
     let val_obj: &AnyObject = AsRef::<AnyObject>::as_ref(&*val);
     NSDictionary::<NSString, AnyObject>::from_slices(&[key_ns], &[val_obj])
 }
