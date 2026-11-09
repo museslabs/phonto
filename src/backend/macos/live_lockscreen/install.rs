@@ -11,9 +11,9 @@
 //   2. qlmanage thumbnail at 640px wide.
 //   3. Upsert into entries.json under a stable UUIDv5 keyed off the
 //      canonical source path.
-//   4. killall WallpaperAerialsExtension. Killing WallpaperAgent works
-//      equivalently. Either alone is sufficient. Without it the daemon
-//      keeps playing the previously cached AVAsset under the same UUID.
+//   4. killall WallpaperAgent. launchd restarts it along with a fresh
+//      WallpaperAerialsExtension. Without it the daemon keeps playing the
+//      previously cached AVAsset under the same UUID.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -458,13 +458,13 @@ fn file_url(path: &Path) -> String {
     out
 }
 
-// Force WallpaperAerialsExtension to re-read entries.json on its next
-// launch. Without this, an updated .mov at an existing UUID still plays
-// from the daemon's cached AVAsset. Killing WallpaperAgent works the same.
-// Either is sufficient.
+// Restart WallpaperAgent so a fresh WallpaperAerialsExtension re-reads
+// entries.json. Without this, an updated .mov at an existing UUID still
+// plays from the daemon's cached AVAsset. Killing only the extension leaves
+// the wallpaper black on macOS 27. WallpaperAgent doesn't reconnect to it.
 fn kick_aerials() {
     if let Ok(output) = Command::new("/usr/bin/killall")
-        .arg("WallpaperAerialsExtension")
+        .arg("WallpaperAgent")
         .output()
     {
         log_subprocess_output("killall", &output.stdout, &output.stderr);

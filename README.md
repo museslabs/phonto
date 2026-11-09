@@ -292,7 +292,7 @@ The lock screen is owned by `loginwindow`, which hides every non-Apple-signed wi
 phonto install-live-lockscreen /path/to/video.mp4
 ```
 
-This transcodes the video to HEVC Main10 with two temporal sub-layers (the exact bitstream shape the aerials extension requires for multi-cycle playback), generates a thumbnail, and registers the asset under a **Phonto** section in System Settings → Wallpaper.
+This transcodes the video to HEVC Main10 with two temporal sub-layers (the exact bitstream shape the aerials extension requires for multi-cycle playback), generates a thumbnail, and registers the asset under a **Phonto** section in System Settings → Wallpaper. It then restarts `WallpaperAgent` so macOS picks up the new entry, which makes your desktop wallpaper redraw once.
 
 To activate, open **System Settings → Wallpaper**, pick the **Phonto** category, click your entry, then lock the screen (Apple menu → Lock Screen) to verify it plays across cycles.
 
