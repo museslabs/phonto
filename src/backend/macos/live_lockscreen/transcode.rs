@@ -127,15 +127,15 @@ fn vt_set(session: &CFType, key: &CFString, value: &CFType, name: &str) -> Resul
     Ok(())
 }
 
-fn open_input(
-    input: &Path,
-) -> Result<(
-    Retained<AVAssetReader>,
-    Retained<AVAssetReaderTrackOutput>,
-    i32,
-    i32,
-    CFRetained<CMFormatDescription>,
-)> {
+struct SourceTrack {
+    reader: Retained<AVAssetReader>,
+    reader_output: Retained<AVAssetReaderTrackOutput>,
+    width: i32,
+    height: i32,
+    format: CFRetained<CMFormatDescription>,
+}
+
+fn open_input(input: &Path) -> Result<SourceTrack> {
     let input_ns = NSString::from_str(&input.to_string_lossy());
     let url_in = NSURL::fileURLWithPath(&input_ns);
     let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url_in, None) };
@@ -166,7 +166,13 @@ fn open_input(
     };
     unsafe { reader.addOutput(&reader_output) };
 
-    Ok((reader, reader_output, width, height, format))
+    Ok(SourceTrack {
+        reader,
+        reader_output,
+        width,
+        height,
+        format,
+    })
 }
 
 fn create_session(
@@ -494,7 +500,13 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
 }
 
 fn encode_to(input: &Path, output: &Path, movie: &mut Option<MovieWriter>) -> Result<()> {
-    let (reader, reader_output, width, height, source_format) = open_input(input)?;
+    let SourceTrack {
+        reader,
+        reader_output,
+        width,
+        height,
+        format,
+    } = open_input(input)?;
 
     let sink: Box<SampleSink> = Box::new(SampleSink {
         samples: Mutex::new(VecDeque::new()),
@@ -502,7 +514,7 @@ fn encode_to(input: &Path, output: &Path, movie: &mut Option<MovieWriter>) -> Re
     });
     let sink_ptr = (&*sink as *const SampleSink) as *mut c_void;
 
-    let session = create_session(width, height, sink_ptr, &source_format)?;
+    let session = create_session(width, height, sink_ptr, &format)?;
     let encoded = encode_all(&reader, &reader_output, &session, &sink, output, movie);
     // No VT callback may outlive `sink`. Invalidate before any early return.
     unsafe { session.invalidate() };
