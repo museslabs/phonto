@@ -3,16 +3,17 @@
 //! Drives `VTCompressionSession` directly because `AVAssetWriter`'s
 //! `outputSettings` refused `BaseLayerFrameRate` on macOS 26. macOS 27
 //! accepts it, but only this path has been tried on 26. The encoded
-//! `CMSampleBuffer`s are then appended to an `AVAssetWriter` configured for
-//! pass-through.
+//! `CMSampleBuffer`s are appended to a pass-through `AVAssetWriter` as they
+//! arrive.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow, bail};
-use objc2::rc::Retained;
+use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_av_foundation::{
     AVAssetReader, AVAssetReaderStatus, AVAssetReaderTrackOutput, AVAssetWriter,
@@ -59,8 +60,16 @@ const TEMPORAL_LAYER_COUNT: i32 = 2;
 const BASE_LAYER_FPS: f64 = (EXPECTED_FPS as f64) / 2.0;
 
 struct SampleSink {
-    samples: Mutex<Vec<CFRetained<CMSampleBuffer>>>,
+    samples: Mutex<VecDeque<CFRetained<CMSampleBuffer>>>,
     first_error: Mutex<i32>,
+}
+
+// Opened on the first encoded sample, because its format description carries
+// the parameter sets the pass-through input needs.
+struct MovieWriter {
+    writer: Retained<AVAssetWriter>,
+    input: Retained<AVAssetWriterInput>,
+    written: usize,
 }
 
 unsafe extern "C-unwind" fn output_callback(
@@ -84,7 +93,7 @@ unsafe extern "C-unwind" fn output_callback(
     if let Some(nn) = NonNull::new(sample) {
         // VT drops its reference once we return; retain for the writer pass.
         let retained: CFRetained<CMSampleBuffer> = unsafe { CFRetained::retain(nn) };
-        sink.samples.lock().unwrap().push(retained);
+        sink.samples.lock().unwrap().push_back(retained);
     }
 }
 
@@ -303,6 +312,9 @@ fn encode_all(
     reader: &AVAssetReader,
     reader_output: &AVAssetReaderTrackOutput,
     session: &VTCompressionSession,
+    sink: &SampleSink,
+    output: &Path,
+    movie: &mut Option<MovieWriter>,
 ) -> Result<usize> {
     if !unsafe { reader.startReading() } {
         let err = unsafe { reader.error() };
@@ -311,22 +323,31 @@ fn encode_all(
 
     let mut count: usize = 0;
     while unsafe { reader.status() } == AVAssetReaderStatus::Reading {
-        let Some(sample) = (unsafe { reader_output.copyNextSampleBuffer() }) else {
+        // Frees what AVFoundation autoreleases while reading and appending a frame.
+        let more = autoreleasepool(|_| -> Result<bool> {
+            let Some(sample) = (unsafe { reader_output.copyNextSampleBuffer() }) else {
+                return Ok(false);
+            };
+            let Some(pb) = (unsafe { sample.image_buffer() }) else {
+                return Ok(true);
+            };
+            let pts = unsafe { sample.presentation_time_stamp() };
+            let dur = unsafe { sample.duration() };
+            let mut flags = VTEncodeInfoFlags::empty();
+            let st =
+                unsafe { session.encode_frame(&pb, pts, dur, None, ptr::null_mut(), &mut flags) };
+            if st != 0 {
+                bail!("VTCompressionSessionEncodeFrame failed at frame {count}: OSStatus {st}");
+            }
+            count += 1;
+            if count.is_multiple_of(60) {
+                log::debug!("encoding... {count} frames");
+            }
+            drain(sink, output, movie, false)?;
+            Ok(true)
+        })?;
+        if !more {
             break;
-        };
-        let Some(pb) = (unsafe { sample.image_buffer() }) else {
-            continue;
-        };
-        let pts = unsafe { sample.presentation_time_stamp() };
-        let dur = unsafe { sample.duration() };
-        let mut flags = VTEncodeInfoFlags::empty();
-        let st = unsafe { session.encode_frame(&pb, pts, dur, None, ptr::null_mut(), &mut flags) };
-        if st != 0 {
-            bail!("VTCompressionSessionEncodeFrame failed at frame {count}: OSStatus {st}");
-        }
-        count += 1;
-        if count.is_multiple_of(60) {
-            log::debug!("encoding... {count} frames");
         }
     }
 
@@ -342,10 +363,10 @@ fn encode_all(
     Ok(count)
 }
 
-fn write_samples(output: &Path, samples: &[CFRetained<CMSampleBuffer>]) -> Result<usize> {
+fn open_writer(output: &Path, first: &CMSampleBuffer) -> Result<MovieWriter> {
     let media_type =
         unsafe { AVMediaTypeVideo }.context("AVMediaTypeVideo constant unavailable")?;
-    let first_format_desc = unsafe { samples[0].format_description() }
+    let first_format_desc = unsafe { first.format_description() }
         .context("first encoded sample has no format description")?;
 
     let output_ns = NSString::from_str(&output.to_string_lossy());
@@ -369,25 +390,54 @@ fn write_samples(output: &Path, samples: &[CFRetained<CMSampleBuffer>]) -> Resul
         let err = unsafe { writer.error() };
         bail!("AVAssetWriter startWriting failed: {err:?}");
     }
-    let first_pts = unsafe { samples[0].presentation_time_stamp() };
+    let first_pts = unsafe { first.presentation_time_stamp() };
     unsafe { writer.startSessionAtSourceTime(first_pts) };
 
-    let mut idx = 0usize;
-    while idx < samples.len() {
-        if unsafe { writer_input.isReadyForMoreMediaData() } {
-            if !unsafe { writer_input.appendSampleBuffer(&samples[idx]) } {
-                let err = unsafe { writer.error() };
-                bail!("AVAssetWriterInput.appendSampleBuffer at {idx} failed: {err:?}");
-            }
-            idx += 1;
-        } else {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-    unsafe { writer_input.markAsFinished() };
+    Ok(MovieWriter {
+        writer,
+        input: writer_input,
+        written: 0,
+    })
+}
 
-    finish_writing(writer)?;
-    Ok(idx)
+// Appends queued samples in encode order, opening the writer on the first.
+// Without `wait` it returns once the input is busy and leaves the rest queued.
+fn drain(
+    sink: &SampleSink,
+    output: &Path,
+    movie: &mut Option<MovieWriter>,
+    wait: bool,
+) -> Result<()> {
+    loop {
+        let Some(sample) = sink.samples.lock().unwrap().front().cloned() else {
+            return Ok(());
+        };
+        let movie = match movie {
+            Some(movie) => movie,
+            None => movie.insert(open_writer(output, &sample)?),
+        };
+        if !unsafe { movie.input.isReadyForMoreMediaData() } {
+            // A failed writer never becomes ready again.
+            if unsafe { movie.writer.status() } == AVAssetWriterStatus::Failed {
+                let err = unsafe { movie.writer.error() };
+                bail!("AVAssetWriter failed: {err:?}");
+            }
+            if !wait {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            continue;
+        }
+        if !unsafe { movie.input.appendSampleBuffer(&sample) } {
+            let err = unsafe { movie.writer.error() };
+            bail!(
+                "AVAssetWriterInput.appendSampleBuffer at {} failed: {err:?}",
+                movie.written
+            );
+        }
+        sink.samples.lock().unwrap().pop_front();
+        movie.written += 1;
+    }
 }
 
 // finishWriting blocks until the moov atom is flushed. On the main thread
@@ -430,17 +480,33 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
         let _ = std::fs::create_dir_all(parent);
     }
 
+    let mut movie = None;
+    let result = encode_to(input, output, &mut movie);
+    if result.is_err() {
+        // A failed transcode must not leave a partial movie in the Aerials
+        // folder. cancelWriting is a no-op once the writer has failed.
+        if let Some(movie) = &movie {
+            unsafe { movie.writer.cancelWriting() };
+        }
+        let _ = std::fs::remove_file(output);
+    }
+    result
+}
+
+fn encode_to(input: &Path, output: &Path, movie: &mut Option<MovieWriter>) -> Result<()> {
     let (reader, reader_output, width, height, source_format) = open_input(input)?;
 
     let sink: Box<SampleSink> = Box::new(SampleSink {
-        samples: Mutex::new(Vec::new()),
+        samples: Mutex::new(VecDeque::new()),
         first_error: Mutex::new(0),
     });
     let sink_ptr = (&*sink as *const SampleSink) as *mut c_void;
 
     let session = create_session(width, height, sink_ptr, &source_format)?;
-    let frames_in = encode_all(&reader, &reader_output, &session)?;
+    let encoded = encode_all(&reader, &reader_output, &session, &sink, output, movie);
+    // No VT callback may outlive `sink`. Invalidate before any early return.
     unsafe { session.invalidate() };
+    let frames_in = encoded?;
 
     {
         let fe = *sink.first_error.lock().unwrap();
@@ -448,15 +514,15 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
             bail!("encoder produced OSStatus {fe}");
         }
     }
-    let samples: Vec<CFRetained<CMSampleBuffer>> =
-        std::mem::take(&mut *sink.samples.lock().unwrap());
-    if samples.is_empty() {
+    drain(&sink, output, movie, true)?;
+    let Some(movie) = movie.take() else {
         bail!("encoder produced no samples");
-    }
+    };
     log::info!("encoded {frames_in} frames");
 
-    let written = write_samples(output, &samples)?;
-    log::info!("wrote {written} samples → {}", output.display());
+    unsafe { movie.input.markAsFinished() };
+    finish_writing(movie.writer)?;
+    log::info!("wrote {} samples → {}", movie.written, output.display());
 
     drop(sink); // outlives all VT callbacks
     Ok(())
