@@ -1,17 +1,19 @@
 //! HEVC Main10 transcoder for live lock-screen video.
 //!
 //! Drives `VTCompressionSession` directly because `AVAssetWriter`'s
-//! `outputSettings` dictionary does not expose the temporal sub-layer
-//! property keys. The encoded `CMSampleBuffer`s are then appended to an
-//! `AVAssetWriter` configured for pass-through.
+//! `outputSettings` refused `BaseLayerFrameRate` on macOS 26. macOS 27
+//! accepts it, but only this path has been tried on 26. The encoded
+//! `CMSampleBuffer`s are appended to a pass-through `AVAssetWriter` as they
+//! arrive.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, anyhow, bail};
-use objc2::rc::Retained;
+use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_av_foundation::{
     AVAssetReader, AVAssetReaderStatus, AVAssetReaderTrackOutput, AVAssetWriter,
@@ -21,21 +23,36 @@ use objc2_av_foundation::{
 use objc2_core_foundation::{
     CFNumber, CFNumberType, CFRetained, CFString, CFType, kCFBooleanFalse,
 };
-use objc2_core_media::{CMSampleBuffer, kCMTimeInvalid, kCMVideoCodecType_HEVC};
-use objc2_core_video::{
-    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+use objc2_core_media::{
+    CMFormatDescription, CMSampleBuffer, kCMFormatDescriptionExtension_ColorPrimaries,
+    kCMFormatDescriptionExtension_TransferFunction, kCMFormatDescriptionExtension_YCbCrMatrix,
+    kCMTimeInvalid, kCMVideoCodecType_HEVC,
 };
-use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
+use objc2_core_video::{
+    kCVPixelBufferPixelFormatTypeKey, kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSURL};
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSessionSetProperty,
-    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
-    kVTCompressionPropertyKey_BaseLayerFrameRate, kVTCompressionPropertyKey_ExpectedFrameRate,
-    kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_BaseLayerFrameRate,
+    kVTCompressionPropertyKey_ColorPrimaries, kVTCompressionPropertyKey_DataRateLimits,
+    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, kVTCompressionPropertyKey_ProfileLevel,
-    kVTCompressionPropertyKey_RealTime, kVTProfileLevel_HEVC_Main10_AutoLevel,
+    kVTCompressionPropertyKey_Quality, kVTCompressionPropertyKey_RealTime,
+    kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
+    kVTProfileLevel_HEVC_Main10_AutoLevel,
 };
 
-const AVERAGE_BITRATE_BPS: i32 = 15_000_000;
+// Once DataRateLimits is set, the limit decides the bitrate and any Quality
+// below 1.0 gives the same output. Setting it still matters. An
+// AverageBitRate target in its place came out at less than half the bitrate.
+// 1.0 would be lossless for luma but ignores the limit.
+const QUALITY: f64 = 0.85;
+// 160 Mbps averaged over 5 s. That's the limit of HEVC level 5.1 High tier,
+// which 4K encodes signal. On two 4K test clips this stayed within about 1 dB
+// of Quality alone, and it held noisy footage to 107 Mbps instead of 1.8 Gbps.
+const RATE_LIMIT_BYTES: i32 = 100_000_000;
+const RATE_LIMIT_SECS: f64 = 5.0;
 const EXPECTED_FPS: i32 = 60;
 const MAX_KEYFRAME_INTERVAL: i32 = 120;
 const MAX_KEYFRAME_INTERVAL_SECS: f64 = 2.0;
@@ -43,8 +60,16 @@ const TEMPORAL_LAYER_COUNT: i32 = 2;
 const BASE_LAYER_FPS: f64 = (EXPECTED_FPS as f64) / 2.0;
 
 struct SampleSink {
-    samples: Mutex<Vec<CFRetained<CMSampleBuffer>>>,
+    samples: Mutex<VecDeque<CFRetained<CMSampleBuffer>>>,
     first_error: Mutex<i32>,
+}
+
+// Opened on the first encoded sample, because its format description carries
+// the parameter sets the pass-through input needs.
+struct MovieWriter {
+    writer: Retained<AVAssetWriter>,
+    input: Retained<AVAssetWriterInput>,
+    written: usize,
 }
 
 unsafe extern "C-unwind" fn output_callback(
@@ -68,7 +93,7 @@ unsafe extern "C-unwind" fn output_callback(
     if let Some(nn) = NonNull::new(sample) {
         // VT drops its reference once we return; retain for the writer pass.
         let retained: CFRetained<CMSampleBuffer> = unsafe { CFRetained::retain(nn) };
-        sink.samples.lock().unwrap().push(retained);
+        sink.samples.lock().unwrap().push_back(retained);
     }
 }
 
@@ -102,14 +127,15 @@ fn vt_set(session: &CFType, key: &CFString, value: &CFType, name: &str) -> Resul
     Ok(())
 }
 
-fn open_input(
-    input: &Path,
-) -> Result<(
-    Retained<AVAssetReader>,
-    Retained<AVAssetReaderTrackOutput>,
-    i32,
-    i32,
-)> {
+struct SourceTrack {
+    reader: Retained<AVAssetReader>,
+    reader_output: Retained<AVAssetReaderTrackOutput>,
+    width: i32,
+    height: i32,
+    format: CFRetained<CMFormatDescription>,
+}
+
+fn open_input(input: &Path) -> Result<SourceTrack> {
     let input_ns = NSString::from_str(&input.to_string_lossy());
     let url_in = NSURL::fileURLWithPath(&input_ns);
     let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url_in, None) };
@@ -123,6 +149,11 @@ fn open_input(
     let width = size.width as i32;
     let height = size.height as i32;
     log::debug!("source: {width}x{height}");
+    let format = unsafe { track.formatDescriptions() }
+        .firstObject()
+        .map(|desc| unsafe { CFRetained::retain(NonNull::from(&*desc).cast::<CFType>()) })
+        .and_then(|desc| desc.downcast::<CMFormatDescription>().ok())
+        .context("video track has no format description")?;
 
     let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset) }
         .map_err(|e| anyhow!("AVAssetReader init failed: {e:?}"))?;
@@ -135,13 +166,20 @@ fn open_input(
     };
     unsafe { reader.addOutput(&reader_output) };
 
-    Ok((reader, reader_output, width, height))
+    Ok(SourceTrack {
+        reader,
+        reader_output,
+        width,
+        height,
+        format,
+    })
 }
 
 fn create_session(
     width: i32,
     height: i32,
     sink_ptr: *mut c_void,
+    source_format: &CMFormatDescription,
 ) -> Result<CFRetained<VTCompressionSession>> {
     let mut raw: *mut VTCompressionSession = ptr::null_mut();
     let st = unsafe {
@@ -162,11 +200,14 @@ fn create_session(
         bail!("VTCompressionSessionCreate failed: OSStatus {st}");
     }
     let session = unsafe { CFRetained::from_raw(NonNull::new(raw).unwrap()) };
-    configure_session(&session)?;
+    configure_session(&session, source_format)?;
     Ok(session)
 }
 
-fn configure_session(session: &VTCompressionSession) -> Result<()> {
+fn configure_session(
+    session: &VTCompressionSession,
+    source_format: &CMFormatDescription,
+) -> Result<()> {
     let s: &CFType = session;
     unsafe {
         let profile_level: &CFType = kVTProfileLevel_HEVC_Main10_AutoLevel;
@@ -177,13 +218,47 @@ fn configure_session(session: &VTCompressionSession) -> Result<()> {
             "ProfileLevel",
         )?;
 
-        let avg = cfnum_i32(AVERAGE_BITRATE_BPS);
+        let quality = cfnum_f64(QUALITY);
+        vt_set(s, kVTCompressionPropertyKey_Quality, &quality, "Quality")?;
+        let limits = NSArray::from_retained_slice(&[
+            NSNumber::new_i32(RATE_LIMIT_BYTES),
+            NSNumber::new_f64(RATE_LIMIT_SECS),
+        ]);
+        // NSArray is toll-free bridged to the CFArray VT expects.
+        let limits_cf: &CFType = &*(Retained::as_ptr(&limits) as *const CFType);
         vt_set(
             s,
-            kVTCompressionPropertyKey_AverageBitRate,
-            &avg,
-            "AverageBitRate",
+            kVTCompressionPropertyKey_DataRateLimits,
+            limits_cf,
+            "DataRateLimits",
         )?;
+
+        // Untagged output leaves the player to guess the source's colours.
+        for (ext_key, vt_key, name) in [
+            (
+                kCMFormatDescriptionExtension_ColorPrimaries,
+                kVTCompressionPropertyKey_ColorPrimaries,
+                "ColorPrimaries",
+            ),
+            (
+                kCMFormatDescriptionExtension_TransferFunction,
+                kVTCompressionPropertyKey_TransferFunction,
+                "TransferFunction",
+            ),
+            (
+                kCMFormatDescriptionExtension_YCbCrMatrix,
+                kVTCompressionPropertyKey_YCbCrMatrix,
+                "YCbCrMatrix",
+            ),
+        ] {
+            let Some(value) = source_format.extension(ext_key) else {
+                continue;
+            };
+            let st = VTSessionSetProperty(s, vt_key, Some(&value));
+            if st != 0 {
+                log::warn!("{name} failed: OSStatus {st}, output colours may be off");
+            }
+        }
 
         let fps = cfnum_i32(EXPECTED_FPS);
         vt_set(
@@ -218,13 +293,15 @@ fn configure_session(session: &VTCompressionSession) -> Result<()> {
             "AllowFrameReordering",
         )?;
 
-        // Two temporal sub-layers in the VPS (`vps_max_sub_layers_minus1 = 1`).
-        // The lock-screen player needs this shape to re-arm across lock cycles.
+        // Without `BaseLayerFrameRate` the lock-screen player goes black after
+        // the first lock, even with two sub-layers declared in the VPS.
+        // `NumberOfTemporalLayers` is undocumented and changes nothing on
+        // macOS 27. It stays because macOS 26 is untested without it.
         let ntl_key = CFString::from_str("NumberOfTemporalLayers");
         let ntl_val = cfnum_i32(TEMPORAL_LAYER_COUNT);
         let st = VTSessionSetProperty(s, &ntl_key, Some(&ntl_val));
         if st != 0 {
-            bail!("NumberOfTemporalLayers failed: OSStatus {st}");
+            log::warn!("NumberOfTemporalLayers failed: OSStatus {st}, continuing without it");
         }
         let blfr = cfnum_f64(BASE_LAYER_FPS);
         vt_set(
@@ -241,6 +318,9 @@ fn encode_all(
     reader: &AVAssetReader,
     reader_output: &AVAssetReaderTrackOutput,
     session: &VTCompressionSession,
+    sink: &SampleSink,
+    output: &Path,
+    movie: &mut Option<MovieWriter>,
 ) -> Result<usize> {
     if !unsafe { reader.startReading() } {
         let err = unsafe { reader.error() };
@@ -249,22 +329,31 @@ fn encode_all(
 
     let mut count: usize = 0;
     while unsafe { reader.status() } == AVAssetReaderStatus::Reading {
-        let Some(sample) = (unsafe { reader_output.copyNextSampleBuffer() }) else {
+        // Frees what AVFoundation autoreleases while reading and appending a frame.
+        let more = autoreleasepool(|_| -> Result<bool> {
+            let Some(sample) = (unsafe { reader_output.copyNextSampleBuffer() }) else {
+                return Ok(false);
+            };
+            let Some(pb) = (unsafe { sample.image_buffer() }) else {
+                return Ok(true);
+            };
+            let pts = unsafe { sample.presentation_time_stamp() };
+            let dur = unsafe { sample.duration() };
+            let mut flags = VTEncodeInfoFlags::empty();
+            let st =
+                unsafe { session.encode_frame(&pb, pts, dur, None, ptr::null_mut(), &mut flags) };
+            if st != 0 {
+                bail!("VTCompressionSessionEncodeFrame failed at frame {count}: OSStatus {st}");
+            }
+            count += 1;
+            if count.is_multiple_of(60) {
+                log::debug!("encoding... {count} frames");
+            }
+            drain(sink, output, movie, false)?;
+            Ok(true)
+        })?;
+        if !more {
             break;
-        };
-        let Some(pb) = (unsafe { sample.image_buffer() }) else {
-            continue;
-        };
-        let pts = unsafe { sample.presentation_time_stamp() };
-        let dur = unsafe { sample.duration() };
-        let mut flags = VTEncodeInfoFlags::empty();
-        let st = unsafe { session.encode_frame(&pb, pts, dur, None, ptr::null_mut(), &mut flags) };
-        if st != 0 {
-            bail!("VTCompressionSessionEncodeFrame failed at frame {count}: OSStatus {st}");
-        }
-        count += 1;
-        if count.is_multiple_of(60) {
-            log::debug!("encoding... {count} frames");
         }
     }
 
@@ -280,10 +369,10 @@ fn encode_all(
     Ok(count)
 }
 
-fn write_samples(output: &Path, samples: &[CFRetained<CMSampleBuffer>]) -> Result<usize> {
+fn open_writer(output: &Path, first: &CMSampleBuffer) -> Result<MovieWriter> {
     let media_type =
         unsafe { AVMediaTypeVideo }.context("AVMediaTypeVideo constant unavailable")?;
-    let first_format_desc = unsafe { samples[0].format_description() }
+    let first_format_desc = unsafe { first.format_description() }
         .context("first encoded sample has no format description")?;
 
     let output_ns = NSString::from_str(&output.to_string_lossy());
@@ -307,25 +396,54 @@ fn write_samples(output: &Path, samples: &[CFRetained<CMSampleBuffer>]) -> Resul
         let err = unsafe { writer.error() };
         bail!("AVAssetWriter startWriting failed: {err:?}");
     }
-    let first_pts = unsafe { samples[0].presentation_time_stamp() };
+    let first_pts = unsafe { first.presentation_time_stamp() };
     unsafe { writer.startSessionAtSourceTime(first_pts) };
 
-    let mut idx = 0usize;
-    while idx < samples.len() {
-        if unsafe { writer_input.isReadyForMoreMediaData() } {
-            if !unsafe { writer_input.appendSampleBuffer(&samples[idx]) } {
-                let err = unsafe { writer.error() };
-                bail!("AVAssetWriterInput.appendSampleBuffer at {idx} failed: {err:?}");
-            }
-            idx += 1;
-        } else {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    }
-    unsafe { writer_input.markAsFinished() };
+    Ok(MovieWriter {
+        writer,
+        input: writer_input,
+        written: 0,
+    })
+}
 
-    finish_writing(writer)?;
-    Ok(idx)
+// Appends queued samples in encode order, opening the writer on the first.
+// Without `wait` it returns once the input is busy and leaves the rest queued.
+fn drain(
+    sink: &SampleSink,
+    output: &Path,
+    movie: &mut Option<MovieWriter>,
+    wait: bool,
+) -> Result<()> {
+    loop {
+        let Some(sample) = sink.samples.lock().unwrap().front().cloned() else {
+            return Ok(());
+        };
+        let movie = match movie {
+            Some(movie) => movie,
+            None => movie.insert(open_writer(output, &sample)?),
+        };
+        if !unsafe { movie.input.isReadyForMoreMediaData() } {
+            // A failed writer never becomes ready again.
+            if unsafe { movie.writer.status() } == AVAssetWriterStatus::Failed {
+                let err = unsafe { movie.writer.error() };
+                bail!("AVAssetWriter failed: {err:?}");
+            }
+            if !wait {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            continue;
+        }
+        if !unsafe { movie.input.appendSampleBuffer(&sample) } {
+            let err = unsafe { movie.writer.error() };
+            bail!(
+                "AVAssetWriterInput.appendSampleBuffer at {} failed: {err:?}",
+                movie.written
+            );
+        }
+        sink.samples.lock().unwrap().pop_front();
+        movie.written += 1;
+    }
 }
 
 // finishWriting blocks until the moov atom is flushed. On the main thread
@@ -368,17 +486,39 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let (reader, reader_output, width, height) = open_input(input)?;
+    let mut movie = None;
+    let result = encode_to(input, output, &mut movie);
+    if result.is_err() {
+        // A failed transcode must not leave a partial movie in the Aerials
+        // folder. cancelWriting is a no-op once the writer has failed.
+        if let Some(movie) = &movie {
+            unsafe { movie.writer.cancelWriting() };
+        }
+        let _ = std::fs::remove_file(output);
+    }
+    result
+}
+
+fn encode_to(input: &Path, output: &Path, movie: &mut Option<MovieWriter>) -> Result<()> {
+    let SourceTrack {
+        reader,
+        reader_output,
+        width,
+        height,
+        format,
+    } = open_input(input)?;
 
     let sink: Box<SampleSink> = Box::new(SampleSink {
-        samples: Mutex::new(Vec::new()),
+        samples: Mutex::new(VecDeque::new()),
         first_error: Mutex::new(0),
     });
     let sink_ptr = (&*sink as *const SampleSink) as *mut c_void;
 
-    let session = create_session(width, height, sink_ptr)?;
-    let frames_in = encode_all(&reader, &reader_output, &session)?;
+    let session = create_session(width, height, sink_ptr, &format)?;
+    let encoded = encode_all(&reader, &reader_output, &session, &sink, output, movie);
+    // No VT callback may outlive `sink`. Invalidate before any early return.
     unsafe { session.invalidate() };
+    let frames_in = encoded?;
 
     {
         let fe = *sink.first_error.lock().unwrap();
@@ -386,27 +526,27 @@ pub fn transcode(input: &Path, output: &Path) -> Result<()> {
             bail!("encoder produced OSStatus {fe}");
         }
     }
-    let samples: Vec<CFRetained<CMSampleBuffer>> =
-        std::mem::take(&mut *sink.samples.lock().unwrap());
-    if samples.is_empty() {
+    drain(&sink, output, movie, true)?;
+    let Some(movie) = movie.take() else {
         bail!("encoder produced no samples");
-    }
+    };
     log::info!("encoded {frames_in} frames");
 
-    let written = write_samples(output, &samples)?;
-    log::info!("wrote {written} samples → {}", output.display());
+    unsafe { movie.input.markAsFinished() };
+    finish_writing(movie.writer)?;
+    log::info!("wrote {} samples → {}", movie.written, output.display());
 
     drop(sink); // outlives all VT callbacks
     Ok(())
 }
 
-// Asks the reader for 8-bit NV12 frames; VT converts internally. The output
-// profile is governed by `ProfileLevel`, not the input pixel format.
+// 10-bit even for 8-bit sources. VT's own 8-to-10-bit conversion loses
+// chroma detail at any bitrate.
 fn pixel_format_settings() -> Retained<NSDictionary<NSString, AnyObject>> {
     let key_cf: &'static CFString = unsafe { kCVPixelBufferPixelFormatTypeKey };
     let key_ns: &NSString = unsafe { &*(key_cf as *const CFString as *const NSString) };
 
-    let val = NSNumber::new_u32(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+    let val = NSNumber::new_u32(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange);
     let val_obj: &AnyObject = AsRef::<AnyObject>::as_ref(&*val);
     NSDictionary::<NSString, AnyObject>::from_slices(&[key_ns], &[val_obj])
 }

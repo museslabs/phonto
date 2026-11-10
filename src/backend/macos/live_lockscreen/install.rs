@@ -1,19 +1,19 @@
 // Install a video as the macOS desktop and lock-screen wallpaper by
-// injecting it into Apple's aerial catalog. WallpaperAerialsExtension
-// (Apple-signed, holds the private com.apple.private.wallpaper.extension
-// entitlement) plays the asset on the lock screen.
+// injecting it into Apple's aerial catalog. WallpaperAerialsExtension, which
+// is Apple-signed, plays the asset on the lock screen.
 //
 // Pipeline (`phonto install-live-lockscreen <video>`):
 //
-//   1. Transcode to HEVC Main10 with two temporal sub-layers in the VPS.
-//      Required for multi-cycle lock-screen playback. Implementation in
-//      the sibling `transcode` module.
+//   1. Transcode to HEVC Main10 with two temporal sub-layers from
+//      `BaseLayerFrameRate`. Declaring them in the VPS alone isn't enough
+//      for multi-cycle lock-screen playback. Implementation in the sibling
+//      `transcode` module.
 //   2. qlmanage thumbnail at 640px wide.
 //   3. Upsert into entries.json under a stable UUIDv5 keyed off the
 //      canonical source path.
-//   4. killall WallpaperAerialsExtension. Killing WallpaperAgent works
-//      equivalently. Either alone is sufficient. Without it the daemon
-//      keeps playing the previously cached AVAsset under the same UUID.
+//   4. killall WallpaperAgent. launchd restarts it along with a fresh
+//      WallpaperAerialsExtension. Without it the daemon keeps playing the
+//      previously cached AVAsset under the same UUID.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -425,7 +425,7 @@ fn phonto_category(rep_asset_id: &str, preview_url: &str) -> Category {
         subcategories: vec![phonto_subcategory(rep_asset_id, preview_url)],
         localized_description_key: Some(PHONTO_LABEL.to_string()),
         localized_name_key: Some(PHONTO_LABEL.to_string()),
-        // -1 sorts before Apple's Landscapes (which has 0).
+        // -1 sorts before Apple's categories, which start at 0.
         preferred_order: Some(-1),
         extra: Map::new(),
     }
@@ -458,13 +458,13 @@ fn file_url(path: &Path) -> String {
     out
 }
 
-// Force WallpaperAerialsExtension to re-read entries.json on its next
-// launch. Without this, an updated .mov at an existing UUID still plays
-// from the daemon's cached AVAsset. Killing WallpaperAgent works the same.
-// Either is sufficient.
+// Restart WallpaperAgent so a fresh WallpaperAerialsExtension re-reads
+// entries.json. Without this, an updated .mov at an existing UUID still
+// plays from the daemon's cached AVAsset. Killing only the extension leaves
+// the wallpaper black on macOS 27. WallpaperAgent doesn't reconnect to it.
 fn kick_aerials() {
     if let Ok(output) = Command::new("/usr/bin/killall")
-        .arg("WallpaperAerialsExtension")
+        .arg("WallpaperAgent")
         .output()
     {
         log_subprocess_output("killall", &output.stdout, &output.stderr);
