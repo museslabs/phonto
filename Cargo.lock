@@ -1501,6 +1501,7 @@ dependencies = [
  "gstreamer-gl-egl",
  "gstreamer-video",
  "image",
+ "libc",
  "log",
  "objc2",
  "objc2-app-kit",
@@ -1520,6 +1521,7 @@ dependencies = [
  "toml 0.8.23",
  "uuid",
  "wayland-client",
+ "wayland-protocols",
  "wayland-protocols-wlr",
 ]
 

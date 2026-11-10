@@ -23,6 +23,17 @@ pub enum PauseMode {
     BelowPercent(u8),
 }
 
+/// What `phonto dump` writes.
+#[derive(Debug)]
+pub struct DumpRequest {
+    pub path: String,
+    /// Seconds into the video, or seconds of procedural playback.
+    pub at: f64,
+    pub out: PathBuf,
+    /// The image size for procedural wallpapers. Videos keep their own size.
+    pub size: Option<(u32, u32)>,
+}
+
 pub trait Backend {
     /// Enumerate displays this backend can target. Cheap, does not start the runtime.
     fn list_displays() -> anyhow::Result<Vec<DisplayInfo>>;
@@ -31,7 +42,7 @@ pub trait Backend {
     /// returns only on error or graceful shutdown.
     fn run(self, playback: Playback, options: RunOptions) -> anyhow::Result<()>;
 
-    fn dump(self, path: String, at: f64, out: PathBuf) -> anyhow::Result<()>;
+    fn dump(self, request: DumpRequest) -> anyhow::Result<()>;
 }
 
 #[cfg(target_os = "linux")]

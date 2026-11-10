@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod displays;
 mod plan;
+mod procedural;
 mod scale;
 mod state;
 mod wallpaper;
@@ -40,7 +41,12 @@ fn dump(args: cli::DumpArgs, yt_dlp: cli::YtDlpArgs) -> anyhow::Result<()> {
         &config.search_paths,
         &yt_dlp.into(),
     )?;
-    backend::create(options)?.dump(path, args.at, args.out)
+    backend::create(options)?.dump(backend::DumpRequest {
+        path,
+        at: args.at,
+        out: args.out,
+        size: args.size,
+    })
 }
 
 fn main() -> anyhow::Result<()> {

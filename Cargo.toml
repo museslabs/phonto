@@ -20,6 +20,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 rand = "0.9"
 image = { version = "0.25.10", features = ["png"] }
+libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 glow = "0.17.0"
@@ -30,6 +31,8 @@ gstreamer-gl = "0.24"
 gstreamer-gl-egl = "0.24"
 wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols-wlr = { version = "0.2", features = ["client"] }
+# cursor-shape-v1 is a staging protocol, gated on both features.
+wayland-protocols = { version = "0.31", features = ["client", "staging", "unstable"] }
 glutin = "0.32.3"
 raw-window-handle = "0.6.2"
 
