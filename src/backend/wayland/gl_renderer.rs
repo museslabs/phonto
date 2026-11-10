@@ -20,6 +20,10 @@ use wayland_client::{Proxy, protocol::wl_surface::WlSurface};
 use super::decoder;
 use crate::scale::ScaleMode;
 
+/// The attribute location of the vertex positions of the fullscreen quad.
+/// Every program binds `a_pos` here, so all programs share one quad.
+const POSITION_ATTRIB: u32 = 0;
+
 pub struct GlRenderer {
     gl: glow::Context,
     egl_display: usize,
@@ -27,7 +31,10 @@ pub struct GlRenderer {
     display: Display,
     config: Config,
     context: PossiblyCurrentContext,
+    program: glow::Program,
     scale_loc: glow::UniformLocation,
+    /// `None` if a custom `--shader` does not read `v_uv`.
+    flip_y_loc: Option<glow::UniformLocation>,
     resolution_loc: Option<glow::UniformLocation>,
     surfaces: Vec<Option<RenderSurface>>,
 }
@@ -35,16 +42,41 @@ pub struct GlRenderer {
 struct RenderSurface {
     surface: Surface<WindowSurface>,
     dims: (u32, u32),
-    applied_video_dims: Option<(u32, u32)>,
+}
+
+/// A texture to draw to a surface, and its orientation.
+#[derive(Debug, Clone, Copy)]
+pub struct TextureRef {
+    pub texture: glow::Texture,
+    pub width: u32,
+    pub height: u32,
+    /// True for a texture that GL drew into (first row at the bottom). A
+    /// decoded video frame has its first row at the top.
+    pub flip_y: bool,
+}
+
+impl TextureRef {
+    pub fn from_frame(frame: &decoder::Frame) -> anyhow::Result<Self> {
+        Ok(Self {
+            texture: glow::NativeTexture(
+                NonZeroU32::new(frame.texture_id).context("zero GL texture id")?,
+            ),
+            width: frame.width,
+            height: frame.height,
+            flip_y: false,
+        })
+    }
 }
 
 impl GlRenderer {
     const VERTEX_SHADER: &str = r#"#version 300 es
         uniform vec2 u_scale;
-        in vec2 a_pos;
+        uniform float u_flip_y;
+        layout(location = 0) in vec2 a_pos;
         out vec2 v_uv;
         void main() {
-            v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);
+            float v = 0.5 - a_pos.y * 0.5;
+            v_uv = vec2(a_pos.x * 0.5 + 0.5, mix(v, 1.0 - v, u_flip_y));
             gl_Position = vec4(a_pos * u_scale, 0.0, 1.0);
         }
     "#;
@@ -90,7 +122,7 @@ impl GlRenderer {
 
         let frag_src = fragment_src.unwrap_or(Self::FRAGMENT_SHADER);
 
-        let (scale_loc, resolution_loc) = unsafe {
+        let (program, scale_loc, flip_y_loc, resolution_loc) = unsafe {
             let vertex = Self::compile_shader(&gl, glow::VERTEX_SHADER, Self::VERTEX_SHADER)?;
             let fragment = Self::compile_shader(&gl, glow::FRAGMENT_SHADER, frag_src)?;
             let program = Self::link_program(&gl, vertex, fragment)?;
@@ -108,6 +140,10 @@ impl GlRenderer {
             // Identity until the first frame tells us the source aspect.
             gl.uniform_2_f32(Some(&scale_loc), 1.0, 1.0);
 
+            // It only changes v_uv. If a post-processing shader ignores v_uv,
+            // the linker removes it.
+            let flip_y_loc = gl.get_uniform_location(program, "u_flip_y");
+
             let resolution_loc = gl.get_uniform_location(program, "u_resolution");
             if let Some(ref loc) = resolution_loc {
                 gl.uniform_2_f32(Some(loc), width as f32, height as f32);
@@ -120,17 +156,14 @@ impl GlRenderer {
             let bytes = std::slice::from_raw_parts(verts.as_ptr().cast::<u8>(), verts.len() * 4);
             gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
 
-            let pos_loc = gl
-                .get_attrib_location(program, "a_pos")
-                .context("a_pos not found")?;
-            gl.enable_vertex_attrib_array(pos_loc);
-            gl.vertex_attrib_pointer_f32(pos_loc, 2, glow::FLOAT, false, 8, 0);
+            gl.enable_vertex_attrib_array(POSITION_ATTRIB);
+            gl.vertex_attrib_pointer_f32(POSITION_ATTRIB, 2, glow::FLOAT, false, 8, 0);
             gl.active_texture(glow::TEXTURE0);
 
             // Black clear so letterbox bars stay black under Fit/Center.
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
 
-            (scale_loc, resolution_loc)
+            (program, scale_loc, flip_y_loc, resolution_loc)
         };
 
         Ok(Self {
@@ -140,12 +173,13 @@ impl GlRenderer {
             display: gl_display,
             config: gl_config,
             context: gl_context,
+            program,
             scale_loc,
+            flip_y_loc,
             resolution_loc,
             surfaces: vec![Some(RenderSurface {
                 surface: gl_surface,
                 dims: (width, height),
-                applied_video_dims: None,
             })],
         })
     }
@@ -162,9 +196,12 @@ impl GlRenderer {
         self.surfaces.push(Some(RenderSurface {
             surface: gl_surface,
             dims: (width, height),
-            applied_video_dims: None,
         }));
         Ok(self.surfaces.len() - 1)
+    }
+
+    pub fn gl(&self) -> &glow::Context {
+        &self.gl
     }
 
     pub fn egl_display(&self) -> usize {
@@ -188,7 +225,6 @@ impl GlRenderer {
         if let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
             s.surface.resize(&self.context, w, h);
         }
-        s.applied_video_dims = None;
     }
 
     pub fn remove_surface(&mut self, idx: usize) {
@@ -197,36 +233,37 @@ impl GlRenderer {
         }
     }
 
+    /// Makes the context current on surface `idx`, so GL calls draw into it.
+    pub fn make_current(&self, idx: usize) -> anyhow::Result<()> {
+        let s = self.surfaces[idx].as_ref().expect("live render surface");
+        self.context
+            .make_current(&s.surface)
+            .context("make-current glutin context")
+    }
+
     pub fn render(
-        &mut self,
+        &self,
         idx: usize,
         frame: &decoder::Frame,
         mode: ScaleMode,
     ) -> anyhow::Result<()> {
-        let video_dims = (frame.width, frame.height);
-        let (w, h, scale) = {
-            let s = self.surfaces[idx].as_mut().expect("live render surface");
+        self.present(idx, TextureRef::from_frame(frame)?, mode)
+    }
 
-            self.context
-                .make_current(&s.surface)
-                .context("make-current glutin context")?;
-
-            let scale = if s.applied_video_dims != Some(video_dims) {
-                s.applied_video_dims = Some(video_dims);
-                Some(Self::scale_for(mode, s.dims, video_dims))
-            } else {
-                None
-            };
-
-            (s.dims.0, s.dims.1, scale)
-        };
-
-        if let Some(scale) = scale {
-            self.set_scale(scale);
-        }
-        self.draw_frame(frame, w, h)?;
-
+    /// Draws `texture` to surface `idx`, fitted by `mode`, through the
+    /// post-processing shader if there is one. Then swaps the buffers.
+    pub fn present(&self, idx: usize, texture: TextureRef, mode: ScaleMode) -> anyhow::Result<()> {
         let s = self.surfaces[idx].as_ref().expect("live render surface");
+        self.context
+            .make_current(&s.surface)
+            .context("make-current glutin context")?;
+
+        let scale = Self::scale_for(mode, s.dims, (texture.width, texture.height));
+        unsafe {
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+        self.draw_texture(texture, s.dims, scale);
+
         s.surface
             .swap_buffers(&self.context)
             .context("swap_buffers")?;
@@ -234,11 +271,16 @@ impl GlRenderer {
         Ok(())
     }
 
-    pub fn render_frame_to_rgba(&mut self, frame: &decoder::Frame) -> anyhow::Result<Vec<u8>> {
-        let width = frame.width;
-        let height = frame.height;
+    /// Draws `texture` into an offscreen image of `width` x `height` pixels,
+    /// stretched to fill it. Returns the RGBA rows from top to bottom.
+    pub fn render_texture_to_rgba(
+        &self,
+        texture: TextureRef,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<Vec<u8>> {
         if width == 0 || height == 0 {
-            anyhow::bail!("decoded frame has zero dimensions");
+            anyhow::bail!("cannot render a {width}x{height} image");
         }
 
         {
@@ -305,8 +347,7 @@ impl GlRenderer {
                 }
             }
 
-            self.set_scale((1.0, 1.0));
-            self.draw_frame(frame, width, height)?;
+            self.draw_texture(texture, (width, height), (1.0, 1.0));
 
             let mut bottom_up = vec![0u8; width as usize * height as usize * 4];
             unsafe {
@@ -331,40 +372,33 @@ impl GlRenderer {
             self.gl.delete_texture(color);
             self.gl.delete_framebuffer(fbo);
         }
-        self.invalidate_surface_draw_state();
 
         result
     }
 
-    fn draw_frame(&self, frame: &decoder::Frame, width: u32, height: u32) -> anyhow::Result<()> {
-        let texture =
-            glow::NativeTexture(NonZeroU32::new(frame.texture_id).context("zero GL texture id")?);
-
+    /// Draws `texture` into the bound framebuffer. It binds all the state that
+    /// it uses, because the procedural passes share the context and change
+    /// that state.
+    fn draw_texture(&self, texture: TextureRef, (width, height): (u32, u32), scale: (f32, f32)) {
         unsafe {
+            self.gl.use_program(Some(self.program));
             self.gl.viewport(0, 0, width as i32, height as i32);
+            self.gl
+                .uniform_2_f32(Some(&self.scale_loc), scale.0, scale.1);
+            self.gl.uniform_1_f32(
+                self.flip_y_loc.as_ref(),
+                if texture.flip_y { 1.0 } else { 0.0 },
+            );
             if let Some(ref loc) = self.resolution_loc {
                 self.gl
                     .uniform_2_f32(Some(loc), width as f32, height as f32);
             }
             self.gl.clear(glow::COLOR_BUFFER_BIT);
             self.gl.active_texture(glow::TEXTURE0);
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-        }
-
-        Ok(())
-    }
-
-    fn set_scale(&self, scale: (f32, f32)) {
-        unsafe {
+            self.gl.bind_sampler(0, None);
             self.gl
-                .uniform_2_f32(Some(&self.scale_loc), scale.0, scale.1);
-        }
-    }
-
-    fn invalidate_surface_draw_state(&mut self) {
-        for surface in self.surfaces.iter_mut().flatten() {
-            surface.applied_video_dims = None;
+                .bind_texture(glow::TEXTURE_2D, Some(texture.texture));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -475,7 +509,11 @@ impl GlRenderer {
             .context("eglMakeCurrent")
     }
 
-    fn compile_shader(gl: &glow::Context, ty: u32, source: &str) -> anyhow::Result<glow::Shader> {
+    pub fn compile_shader(
+        gl: &glow::Context,
+        ty: u32,
+        source: &str,
+    ) -> anyhow::Result<glow::Shader> {
         unsafe {
             let shader = gl.create_shader(ty).map_err(|e| anyhow!(e))?;
             gl.shader_source(shader, source);
@@ -490,7 +528,7 @@ impl GlRenderer {
         }
     }
 
-    fn link_program(
+    pub fn link_program(
         gl: &glow::Context,
         vertex: glow::Shader,
         fragment: glow::Shader,

@@ -66,7 +66,8 @@ pub struct PlayArgs {
 #[derive(Args, Debug)]
 pub struct SourceArgs {
     /// Path to the video file, streaming URL (http, https, rtsp, rtmp),
-    /// or YouTube URL (resolved via yt-dlp).
+    /// YouTube URL (resolved via yt-dlp), or procedural wallpaper (a `.glsl`
+    /// file, or a directory with a manifest.toml).
     #[arg(conflicts_with_all = ["rand", "display", "display_rand"])]
     path: Option<String>,
 
@@ -120,7 +121,7 @@ impl From<SourceArgs> for Request {
 // How and where frames are drawn.
 #[derive(Args, Debug)]
 pub struct RenderArgs {
-    /// How to fit the video to the screen.
+    /// How to fit the video to the screen. Procedural wallpapers always fill it.
     #[arg(long, value_enum, default_value_t = ScaleMode::Fill)]
     pub scale: ScaleMode,
 
@@ -202,6 +203,7 @@ impl From<YtDlpArgs> for YtDlpOpts {
 
 #[derive(Args, Debug)]
 pub struct DumpArgs {
+    /// Video, URL, or procedural wallpaper to take the frame from.
     #[arg()]
     pub path: String,
 
@@ -214,6 +216,11 @@ pub struct DumpArgs {
 
     #[arg(long, value_name = "SECONDS", default_value = "0.0", value_parser = parse_seek_seconds)]
     pub at: f64,
+
+    /// Image size for procedural wallpapers (default 1920x1080). Videos keep
+    /// their own size.
+    #[arg(long, value_name = "WIDTHxHEIGHT", value_parser = parse_size)]
+    pub size: Option<(u32, u32)>,
 }
 
 impl DumpArgs {
@@ -224,6 +231,18 @@ impl DumpArgs {
             shader: self.shader.clone(),
         }
     }
+}
+
+/// Parse a `--size` such as `2560x1440`.
+fn parse_size(s: &str) -> Result<(u32, u32), String> {
+    let (w, h) = s
+        .split_once(['x', 'X'])
+        .ok_or_else(|| format!("`{s}` is not WIDTHxHEIGHT"))?;
+    let parse = |v: &str| match v.trim().parse::<u32>() {
+        Ok(n) if (1..=16384).contains(&n) => Ok(n),
+        _ => Err(format!("`{v}` is not a size between 1 and 16384")),
+    };
+    Ok((parse(w)?, parse(h)?))
 }
 
 /// Parse a `--at` seek offset. Rejects negative and non-finite values, which
