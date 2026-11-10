@@ -104,7 +104,11 @@ impl Backend for MacosBackend {
         let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset) }
             .map_err(|e| anyhow!("AVAssetReader init: {e:?}"))?;
 
-        let start = unsafe { CMTime::with_seconds(at, 600) };
+        // In tests the reader starts on the frame shown at `start`, open GOP aside. `with_seconds`
+        // truncates to whole ticks, and a player reports a frame's start in whole nanoseconds,
+        // rounded either way. The start could then land just before its frame, as most did at
+        // 1/600 s ticks. A microsecond of slack, far shorter than any frame, keeps it in.
+        let start = unsafe { CMTime::with_seconds(at + 1e-6, 1_000_000_000) };
         let inf = unsafe { kCMTimePositiveInfinity };
         let range = unsafe { CMTimeRange::new(start, inf) };
         unsafe { reader.setTimeRange(range) };
