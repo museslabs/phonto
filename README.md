@@ -5,7 +5,7 @@
 
 > phonto (/'fon.to/) — from Greek φόντο: background
 
-GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust. Also supports live lockscreen wallpapers on macOS.
+GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust. Also supports live lockscreen wallpapers on macOS, and interactive procedural (shader) wallpapers on Wayland.
 
 
 ![example](./mac-example.gif)
@@ -94,6 +94,13 @@ phonto https://example.com/stream.m3u8
 phonto rtsp://camera.local/stream
 ```
 
+Play a procedural wallpaper, a GLSL shader that phonto draws live (Wayland
+only, see [Procedural wallpapers](#procedural-wallpapers-wayland)):
+```bash
+phonto examples/procedural/plasma.glsl
+phonto examples/procedural/life        # a pack directory with a manifest.toml
+```
+
 Play a random wallpaper from your configured search paths:
 ```bash
 phonto --rand
@@ -108,12 +115,14 @@ Available layers are `background` (default), `bottom`, `top`, and `overlay`.
 
 Dump a still frame to an image file:
 ```bash
-phonto dump PATH --out OUT.png [--at SECONDS] [--shader PATH]
+phonto dump PATH --out OUT.png [--at SECONDS] [--shader PATH] [--size WIDTHxHEIGHT]
 ```
 
-`dump` supports local files and resolved URLs. `--out`/`-o` is required,
-`--at` selects the timestamp in seconds (default `0.0`), and `--shader` applies
-a GLSL fragment shader before saving (only available on Wayland/Linux).
+`dump` supports local files, resolved URLs and procedural wallpapers. `--out`/`-o`
+is required, `--at` selects the timestamp in seconds (default `0.0`), and `--shader`
+applies a GLSL fragment shader before saving (only available on Wayland/Linux).
+`--size` sets the image size for procedural wallpapers (default `1920x1080`).
+Videos keep their own size.
 
 Phonto also writes the currently selected video path to `~/.cache/phonto/current`.
 This is useful when `--rand` chooses a wallpaper and another tool needs to reuse
@@ -262,6 +271,150 @@ random = true
 Run `phonto displays` on each OS once to copy the right native name into the
 alias. The same dotfile then works on both. Either field is optional, so a
 laptop-only alias can leave the other one out.
+
+## Procedural wallpapers (Wayland)
+
+phonto can also draw a GLSL shader as your wallpaper, live, instead of a
+video. The shaders use the conventions of [Shadertoy](https://www.shadertoy.com),
+so most Shadertoy shaders work after a copy and paste. A shader can react to
+the pointer. It can also keep state from one frame to the next, for
+simulations such as the Game of Life.
+
+Three examples are in [`examples/procedural`](examples/procedural):
+
+```bash
+phonto examples/procedural/plasma.glsl   # one file
+phonto examples/procedural/life          # a pack: a buffer pass and an image pass
+phonto examples/procedural/koi           # a koi pond
+```
+
+The koi pond shows all the features. If you click the water, food drops, and
+the koi swim to it and feed. If you hold the button and drag, a wake follows
+the pointer. Moving the pointer without a click does nothing. The light
+follows your clock, from dawn to a night with a moon and fireflies. To preview
+a different hour, set `HOUR_OVERRIDE` at the top of
+`examples/procedural/koi/common.glsl`.
+
+You can use a procedural wallpaper everywhere that you can use a video path:
+`--display ID PATH`, `[[display]].path`, the hyprlock recipe, `--shader`
+post-processing, and `dump`. `--rand` also picks pack directories, and `.glsl`
+files that have a `mainImage` function. A procedural wallpaper always fills the
+screen, so `--scale` has no effect. macOS support is planned, with the same
+format.
+
+### Single-file wallpapers
+
+A single-file wallpaper is a `.glsl` file with the `mainImage` function of
+Shadertoy:
+
+```glsl
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 uv = fragCoord / iResolution.xy;
+    fragColor = vec4(0.5 + 0.5 * cos(iTime + uv.xyx + vec3(0, 2, 4)), 1.0);
+}
+```
+
+Do not declare the `#version` line, the default precisions, or the uniforms in
+the table below. phonto adds them. If the file has a `#version` line, phonto
+ignores it. The code is GLSL ES 3.00, the language of WebGL 2. A single file
+draws at the full output resolution, at a maximum of 60 fps.
+
+### Inputs
+
+Uniforms are the inputs that phonto sets before each frame:
+
+| Uniform | Type | Meaning |
+|---|---|---|
+| `iResolution` | `vec3` | The size of this pass in pixels. `z` is 1. |
+| `iImageResolution` | `vec3` | Only in phonto. The size of the image pass. It is different from `iResolution` in a buffer with its own `size` or `height`. |
+| `iTime` | `float` | Seconds of playback. It stops during a pause. It goes back to 0 after 24 hours, to keep float precision. |
+| `iTimeDelta` | `float` | Seconds since the last frame. The maximum is 0.25, or two frame periods below 8 fps. |
+| `iFrameRate` | `float` | Frames per second, smoothed. |
+| `iFrame` | `int` | The number of frames drawn on this display. It starts at 0 again when the display changes size. |
+| `iDate` | `vec4` | Year, month (0 to 11), day (1 to 31), and seconds since local midnight. |
+| `iMouse` | `vec4` | The same as on Shadertoy. `xy` is the drag position and `zw` is the click position. `z` is positive while the left button is pressed. `w` is positive only on the frame of the click. |
+| `iPointer` | `vec4` | Only in phonto. `xy` is the pointer position. `z` is 1 while the pointer is over the wallpaper. `w` is 1 while the left button is pressed. Use it for hover effects. |
+| `iChannel0` to `iChannel7` | `sampler2D` | The channels of the pass (see Packs). A channel without an input is black. Shadertoy has four channels. Channels 4 to 7 are only in phonto. |
+| `iChannelResolution[8]` | `vec3` | The size of each channel in pixels. |
+
+`fragCoord` is in the pixels of the pass, with the origin at the bottom left,
+as on Shadertoy. `iMouse` and `iPointer` are always in the pixels of the image
+pass. In a buffer with its own size, multiply them by
+`iResolution.xy / iImageResolution.xy`.
+
+The wallpaper gets the pointer only where no window covers it, because
+Wayland does not tell other clients where the pointer is. phonto does not use
+keyboard input. `iChannelTime` and `iSampleRate` exist only so that shaders
+that declare sound inputs compile.
+
+### Packs
+
+A pack is a directory with a `manifest.toml`, shaders, and optional images. It
+adds up to eight buffer passes. A buffer pass (a buffer) draws offscreen, and
+other passes can read its output. A buffer can read its own last frame, so it
+can keep state. The image pass draws the result on screen.
+
+```toml
+name = "Life"              # optional, the default is the directory name
+fps = 30                   # frame-rate cap, 0 = refresh rate of the display (default 60)
+render_scale = 0.25        # draw at a fraction of the output size, 0 < scale <= 1 (default 1)
+common = "common.glsl"     # optional, added before the code of every pass
+
+[[buffer]]                 # 0 to 8, drawn in this order every frame
+name = "cells"
+shader = "cells.glsl"
+channels = [{ buffer = "cells", filter = "nearest", wrap = "repeat" }]
+
+[image]                    # the pass on screen
+shader = "image.glsl"
+channels = ["cells", "noise.png"]
+```
+
+A buffer draws at the size of the image pass, unless it sets one of these
+keys:
+
+| Key | Meaning |
+|---|---|
+| `size = [16, 2]` | A fixed size in pixels, for state such as one texel for each creature. |
+| `height = 300` | A fixed height. The width follows the aspect ratio of the screen, so a simulation behaves the same at all resolutions. |
+| `format` | `rgba16f` (default), `rgba32f` for precise state such as positions, or `rgba8` to use less memory. If the GPU cannot draw to the format, phonto uses a smaller format and writes a warning. |
+| `once = true` | The buffer draws only when the wallpaper starts or the display changes size. Then it keeps the result. Use it for content that does not change, such as a background. |
+
+`channels[n]` is the input of `iChannelN`, up to eight channels. A channel is
+a string or a table. A string is a buffer name, or else the path of an image
+in the pack. A table has exactly one of `buffer = "name"` or
+`texture = "file.png"`, and optional sampling keys:
+
+| Key | Values | Default |
+|---|---|---|
+| `filter` | `nearest`, `linear`, `mipmap` (only for textures) | `linear` for buffers, `mipmap` for textures |
+| `wrap` | `clamp`, `repeat`, `mirror` | `clamp` for buffers, `repeat` for textures |
+
+If a buffer already drew in this frame, a pass that reads it gets the output
+of this frame. If a pass reads itself, or a buffer that draws later, it gets
+the output of the last frame. Shadertoy works the same way. By default, a
+buffer stores 16-bit floats, so it can hold values outside 0 to 1. Images
+(PNG, JPEG, and the other formats of the `image` crate) load with
+`uv = (0, 0)` at their bottom-left corner.
+
+Each display gets its own buffers at its own size, so the state of a wallpaper
+is different on each display. A shader compile error gives the file and the
+line. For example, `0:12` is line 12 of the shader of the pass, and `1:12` is
+line 12 of the common file.
+
+### Performance
+
+A video costs almost nothing, because the hardware decodes it. A shader costs
+the work that it does for each pixel in each frame, so a complex shader can
+keep the GPU busy. To make a wallpaper cheaper:
+
+- Lower `fps`. 30 fps is enough for slow motion.
+- Lower `render_scale`. At 0.5, phonto draws a quarter of the pixels and
+  scales them up with linear filtering.
+- Give smooth buffers a smaller `height`. Draw content that does not change in
+  a `once = true` buffer.
+- Use `--pause-on-battery` or `--pause-below`. Time stops during the pause and
+  continues after it.
 
 ## Lock screen backgrounds with hyprlock (Wayland)
 
