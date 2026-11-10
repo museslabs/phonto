@@ -1,0 +1,65 @@
+# A koi pond. Click the water to drop food, and the koi swim to it. Hold the
+# button and drag to pull a wake through the water. The light follows your
+# clock, from dawn to a night with a moon.
+#
+#   phonto examples/procedural/koi
+
+name = "Koi Pond"
+fps = 30
+common = "common.glsl"
+
+# The koi: one column for each fish (see common.glsl).
+[[buffer]]
+name = "fish"
+shader = "fish.glsl"
+size = [16, 3]
+format = "rgba32f"
+channels = [{ buffer = "fish", filter = "nearest" }]
+
+# The water surface: a wave simulation with two steps for each frame. A fixed
+# height keeps the size and speed of ripples the same at all resolutions.
+[[buffer]]
+name = "water-a"
+shader = "water-a.glsl"
+height = 300
+channels = [{ buffer = "fish", filter = "nearest" }, "water-b"]
+
+[[buffer]]
+name = "water-b"
+shader = "water-b.glsl"
+height = 300
+channels = [{ buffer = "fish", filter = "nearest" }, "water-a"]
+
+# For each small area of the screen: the koi, shadows, pads, and fireflies
+# that can show there. The image pass then skips the others.
+[[buffer]]
+name = "tiles"
+shader = "tiles.glsl"
+height = 72
+format = "rgba32f"
+channels = [{ buffer = "fish", filter = "nearest" }, "water-b"]
+
+# The light that the ripples focus on the pond bed. It is soft, so half
+# height is enough.
+[[buffer]]
+name = "caustics"
+shader = "caustics.glsl"
+height = 540
+format = "rgba8"
+
+# The pond bed. It does not change, so it is drawn once at full resolution.
+[[buffer]]
+name = "bed"
+shader = "bed.glsl"
+format = "rgba8"
+once = true
+
+[image]
+shader = "image.glsl"
+channels = [
+    { buffer = "fish", filter = "nearest" },
+    "water-b",
+    { buffer = "tiles", filter = "nearest" },
+    { buffer = "bed", wrap = "clamp" },
+    { buffer = "caustics", wrap = "clamp" },
+]

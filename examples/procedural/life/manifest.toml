@@ -1,0 +1,19 @@
+# The Game of Life of Conway. Move the pointer over the desktop to add a few
+# cells. Hold the left button to draw. `phonto examples/procedural/life`
+
+name = "Life"
+fps = 30
+# Every pass draws at a quarter of the screen size: one cell for 4x4 pixels.
+render_scale = 0.25
+common = "common.glsl"
+
+# The board. Each frame reads the last one.
+# x = 1 if the cell is alive, y = a glow that fades after the cell dies.
+[[buffer]]
+name = "cells"
+shader = "cells.glsl"
+channels = [{ buffer = "cells", filter = "nearest", wrap = "repeat" }]
+
+[image]
+shader = "image.glsl"
+channels = ["cells"]
