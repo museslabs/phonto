@@ -380,6 +380,7 @@ pub(super) fn build_surface(
 
     Ok(MirrorSurface {
         name,
+        display_id: displays::display_id(screen),
         window,
         layer: player_layer,
     })

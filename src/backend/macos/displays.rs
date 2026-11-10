@@ -1,8 +1,20 @@
 use anyhow::Context;
 use objc2_app_kit::NSScreen;
-use objc2_foundation::MainThreadMarker;
+use objc2_foundation::{MainThreadMarker, NSNumber, NSString};
 
 use crate::displays::DisplayInfo;
+
+/// The screen's CGDirectDisplayID, or 0 (kCGNullDirectDisplay) if it has none.
+/// Read from `deviceDescription` because `NSScreen.CGDirectDisplayID` needs
+/// macOS 26.
+pub fn display_id(screen: &NSScreen) -> u32 {
+    let key = NSString::from_str("NSScreenNumber");
+    screen
+        .deviceDescription()
+        .objectForKey(&key)
+        .and_then(|number| number.downcast::<NSNumber>().ok())
+        .map_or(0, |number| number.unsignedIntValue())
+}
 
 pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
     let mtm =

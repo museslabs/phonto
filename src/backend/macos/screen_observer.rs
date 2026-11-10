@@ -1,15 +1,19 @@
 use objc2::{AnyThread, DefinedClass, define_class, msg_send, rc::Retained, runtime::NSObject};
 use objc2_app_kit::{NSScreen, NSWindow};
 use objc2_av_foundation::{AVPlayer, AVPlayerLayer};
-use objc2_foundation::{MainThreadMarker, NSNotification, NSRect};
+use objc2_foundation::{MainThreadMarker, NSNotification};
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+use super::displays::display_id;
 use crate::scale::ScaleMode;
 
 pub struct MirrorSurface {
     pub name: String,
+    /// Ties the surface to its screen. Two screens can share a name, but not a
+    /// display ID.
+    pub display_id: u32,
     pub window: Retained<NSWindow>,
     pub layer: Retained<AVPlayerLayer>,
 }
@@ -63,21 +67,28 @@ impl ScreenObserver {
         };
         let screens = NSScreen::screens(mtm);
 
-        let mut by_name: HashMap<String, (NSRect, f64)> = HashMap::new();
-        for screen in screens.iter() {
-            let name = screen.localizedName().to_string();
-            by_name
-                .entry(name)
-                .or_insert((screen.frame(), screen.backingScaleFactor()));
-        }
+        let by_id: HashMap<u32, Retained<NSScreen>> = screens
+            .iter()
+            .map(|screen| (display_id(&screen), screen))
+            .collect();
 
-        // Update geometry for surfaces whose screen is still connected.
-        for surface in self.ivars().surfaces.borrow().iter() {
-            let Some(&(frame, backing)) = by_name.get(&surface.name) else {
+        // Update surfaces whose screen is still connected.
+        for surface in self.ivars().surfaces.borrow_mut().iter_mut() {
+            let Some(screen) = by_id.get(&surface.display_id) else {
                 continue;
             };
+            let frame = screen.frame();
+            let backing = screen.backingScaleFactor();
             surface.window.setFrame_display(frame, false);
             surface.layer.setContentsScale(backing);
+            let name = screen.localizedName().to_string();
+            if name != surface.name {
+                // macOS renames a screen when a monitor of the same model
+                // connects or disconnects. It then stops drawing our window on
+                // it until it's ordered front again.
+                surface.window.makeKeyAndOrderFront(None);
+                surface.name = name;
+            }
             log::info!(
                 "display reconfigured: {} -> {}x{} @ {}x",
                 surface.name,
@@ -89,7 +100,7 @@ impl ScreenObserver {
 
         // Drop surfaces whose screen is no longer connected.
         self.ivars().surfaces.borrow_mut().retain(|surface| {
-            if by_name.contains_key(&surface.name) {
+            if by_id.contains_key(&surface.display_id) {
                 true
             } else {
                 surface.window.orderOut(None);
@@ -99,18 +110,18 @@ impl ScreenObserver {
         });
 
         // Attach surfaces for newly-connected screens (subject to attach policy).
-        let known: HashSet<String> = self
+        let known: HashSet<u32> = self
             .ivars()
             .surfaces
             .borrow()
             .iter()
-            .map(|s| s.name.clone())
+            .map(|s| s.display_id)
             .collect();
         for screen in screens.iter() {
-            let name = screen.localizedName().to_string();
-            if known.contains(&name) {
+            if known.contains(&display_id(&screen)) {
                 continue;
             }
+            let name = screen.localizedName().to_string();
             let player = match &self.ivars().policy {
                 AttachPolicy::Mirror(p) => p,
                 AttachPolicy::PerDisplay(map) => match map.get(&name) {
