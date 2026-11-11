@@ -19,6 +19,9 @@ const DEFAULT_FPS: f32 = 60.0;
 #[derive(Debug)]
 pub struct Pack {
     pub name: String,
+    /// If true, phonto reads the playback monitor of the system while this
+    /// pack runs.
+    pub audio: bool,
     /// The frame-rate cap. `None` draws at the refresh rate of the display.
     pub fps: Option<f32>,
     /// The fraction of the output resolution that every pass draws at.
@@ -153,6 +156,8 @@ impl fmt::Debug for Texture {
 #[serde(deny_unknown_fields)]
 struct Manifest {
     name: Option<String>,
+    #[serde(default)]
+    audio: bool,
     fps: Option<f32>,
     render_scale: Option<f32>,
     common: Option<String>,
@@ -226,6 +231,7 @@ impl Pack {
         }
         Ok(Self {
             name: file_stem(path),
+            audio: false,
             fps: Some(DEFAULT_FPS),
             render_scale: 1.0,
             common: None,
@@ -303,6 +309,7 @@ impl Pack {
 
         Ok(Self {
             name: m.name.unwrap_or_else(|| file_stem(dir)),
+            audio: m.audio,
             fps,
             render_scale,
             common,
@@ -530,6 +537,7 @@ mod tests {
         dir.write("plasma.glsl", SHADER);
         let pack = Pack::load(&dir.0.join("plasma.glsl")).unwrap();
         assert_eq!(pack.name, "plasma");
+        assert!(!pack.audio);
         assert_eq!(pack.fps, Some(DEFAULT_FPS));
         assert_eq!(pack.render_scale, 1.0);
         assert!(pack.buffers.is_empty());
@@ -554,6 +562,7 @@ mod tests {
             MANIFEST,
             r#"
             name = "Test"
+            audio = true
             fps = 0
             render_scale = 0.5
 
@@ -574,6 +583,7 @@ mod tests {
         );
         let pack = Pack::load(&dir.0).unwrap();
         assert_eq!(pack.name, "Test");
+        assert!(pack.audio);
         assert_eq!(pack.fps, None);
         assert_eq!(pack.render_scale, 0.5);
         assert_eq!(pack.buffers.len(), 2);

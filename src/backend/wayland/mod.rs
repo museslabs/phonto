@@ -1,3 +1,4 @@
+mod audio;
 mod battery_observer;
 mod decoder;
 mod gl_renderer;
@@ -29,7 +30,7 @@ use self::gl_renderer::{GlRenderer, TextureRef};
 use super::{Backend, DumpRequest, PauseMode, RunOptions};
 use crate::displays::DisplayInfo;
 use crate::plan::Playback;
-use crate::procedural::{Clock, FrameInputs, FrameLimiter, Pack, Pointer, local_date};
+use crate::procedural::{AudioFrame, Clock, FrameInputs, FrameLimiter, Pack, Pointer, local_date};
 use crate::scale::ScaleMode;
 use clap::ValueEnum;
 
@@ -312,9 +313,29 @@ impl Backend for WaylandBackend {
             });
         }
 
+        // One capture gives audio to all the sources that use it, on all
+        // outputs.
+        let mut audio = if sources
+            .iter()
+            .any(|s| matches!(s, Source::Procedural(p) if p.audio))
+        {
+            match audio::AudioCapture::start() {
+                Ok(capture) => Some(capture),
+                Err(err) => {
+                    log::warn!("no system audio, so the wallpaper draws without it: {err:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let mut paused = battery_observer::should_pause(&options.pause);
         let mut last_battery_check = Instant::now();
         log_pause_state(paused, &options.pause);
+        if let Some(audio) = &audio {
+            audio.set_paused(paused);
+        }
 
         loop {
             if last_battery_check.elapsed() >= BATTERY_POLL_INTERVAL {
@@ -322,6 +343,9 @@ impl Backend for WaylandBackend {
                 if new_paused != paused {
                     paused = new_paused;
                     log_pause_state(paused, &options.pause);
+                    if let Some(audio) = &audio {
+                        audio.set_paused(paused);
+                    }
                 }
                 last_battery_check = Instant::now();
             }
@@ -426,6 +450,9 @@ impl Backend for WaylandBackend {
             // Draw each output from its source. The frame callback is
             // requested before swap_buffers, so the compositor schedules it
             // with that commit.
+            let audio_frame = audio
+                .as_mut()
+                .map_or_else(AudioFrame::default, |a| a.snapshot());
             for (source_idx, output_names) in groups {
                 let source = &mut sources[source_idx];
                 let tick = match source {
@@ -468,6 +495,11 @@ impl Backend for WaylandBackend {
                                 date,
                                 mouse,
                                 pointer,
+                                audio: if p.audio {
+                                    audio_frame
+                                } else {
+                                    AudioFrame::default()
+                                },
                             };
                             let target = o.target.as_mut().expect("target created above");
                             let texture = p.program.render(gl, target, &inputs);
@@ -535,6 +567,7 @@ impl Source {
 
 struct ProceduralSource {
     program: procedural::Program,
+    audio: bool,
     /// All outputs that show this source share it, so mirrored outputs stay
     /// in sync.
     clock: Clock,
@@ -545,6 +578,7 @@ impl ProceduralSource {
     fn new(gl: &glow::Context, pack: &Pack) -> anyhow::Result<Self> {
         Ok(Self {
             program: procedural::Program::compile(gl, pack)?,
+            audio: pack.audio,
             clock: Clock::new(pack.fps),
             limiter: FrameLimiter::new(pack.fps),
         })
