@@ -270,6 +270,7 @@ pub fn sample_to_frame(
 pub fn wrap_gl(
     egl_display: usize,
     egl_context: usize,
+    api: super::gl_renderer::GlApi,
 ) -> anyhow::Result<(gst_gl::GLDisplay, gst_gl::GLContext)> {
     gst::init().context("gst::init")?;
 
@@ -278,13 +279,13 @@ pub fn wrap_gl(
 
     let gl_display = gl_display.upcast::<gst_gl::GLDisplay>();
 
+    let api = match api {
+        super::gl_renderer::GlApi::OpenGl => gst_gl::GLAPI::OPENGL3,
+        super::gl_renderer::GlApi::Gles => gst_gl::GLAPI::GLES2,
+    };
+
     let gl_context = unsafe {
-        gst_gl::GLContext::new_wrapped(
-            &gl_display,
-            egl_context,
-            gst_gl::GLPlatform::EGL,
-            gst_gl::GLAPI::GLES2,
-        )
+        gst_gl::GLContext::new_wrapped(&gl_display, egl_context, gst_gl::GLPlatform::EGL, api)
     }
     .context("wrap EGL context for GStreamer")?;
 

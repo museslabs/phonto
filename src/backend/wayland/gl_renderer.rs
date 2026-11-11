@@ -5,8 +5,8 @@ use glow::HasContext;
 use glutin::{
     config::{Config, ConfigTemplateBuilder},
     context::{
-        AsRawContext, ContextApi, ContextAttributesBuilder, PossiblyCurrentContext, RawContext,
-        Version,
+        AsRawContext, ContextApi, ContextAttributesBuilder, GlProfile, PossiblyCurrentContext,
+        RawContext, Version,
     },
     display::{AsRawDisplay, Display, DisplayApiPreference, RawDisplay as GlRawDisplay},
     prelude::{GlDisplay, NotCurrentGlContext, PossiblyCurrentGlContext},
@@ -30,6 +30,13 @@ pub struct GlRenderer {
     scale_loc: glow::UniformLocation,
     resolution_loc: Option<glow::UniformLocation>,
     surfaces: Vec<Option<RenderSurface>>,
+    api: GlApi,
+}
+
+#[derive(Clone, Copy)]
+pub enum GlApi {
+    OpenGl,
+    Gles,
 }
 
 struct RenderSurface {
@@ -39,7 +46,7 @@ struct RenderSurface {
 }
 
 impl GlRenderer {
-    const VERTEX_SHADER: &str = r#"#version 300 es
+    const OPENGL_VERTEX_SHADER: &str = r#"#version 330 core
         uniform vec2 u_scale;
         in vec2 a_pos;
         out vec2 v_uv;
@@ -48,7 +55,24 @@ impl GlRenderer {
             gl_Position = vec4(a_pos * u_scale, 0.0, 1.0);
         }
     "#;
-    const FRAGMENT_SHADER: &str = r#"#version 300 es
+    const OPENGL_FRAGMENT_SHADER: &str = r#"#version 330 core
+        uniform sampler2D u_tex;
+        in vec2 v_uv;
+        out vec4 frag_color;
+        void main() {
+            frag_color = texture(u_tex, v_uv);
+        }
+    "#;
+    const GLES_VERTEX_SHADER: &str = r#"#version 300 es
+        uniform vec2 u_scale;
+        in vec2 a_pos;
+        out vec2 v_uv;
+        void main() {
+            v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);
+            gl_Position = vec4(a_pos * u_scale, 0.0, 1.0);
+        }
+    "#;
+    const GLES_FRAGMENT_SHADER: &str = r#"#version 300 es
         precision mediump float;
         uniform sampler2D u_tex;
         in vec2 v_uv;
@@ -65,10 +89,41 @@ impl GlRenderer {
         height: u32,
         fragment_src: Option<&str>,
     ) -> anyhow::Result<Self> {
+        match Self::new_with_api(conn, wl_surface, width, height, fragment_src, GlApi::OpenGl) {
+            Ok(renderer) => Ok(renderer),
+            Err(open_gl_error) => {
+                log::warn!(
+                    "desktop OpenGL renderer unavailable ({open_gl_error:#}); falling back to OpenGL ES"
+                );
+                Self::new_with_api(
+                    conn,
+                    wl_surface,
+                    width,
+                    height,
+                    fragment_src,
+                    GlApi::Gles,
+                )
+                .with_context(|| {
+                    format!(
+                        "create OpenGL ES renderer after desktop OpenGL failed: {open_gl_error:#}"
+                    )
+                })
+            }
+        }
+    }
+
+    fn new_with_api(
+        conn: &wayland_client::Connection,
+        wl_surface: &WlSurface,
+        width: u32,
+        height: u32,
+        fragment_src: Option<&str>,
+        api: GlApi,
+    ) -> anyhow::Result<Self> {
         let gl_display = Self::create_display(conn)?;
-        let gl_config = Self::create_config(&gl_display)?;
+        let gl_config = Self::create_config(&gl_display, api)?;
         let gl_surface = Self::create_surface(wl_surface, width, height, &gl_display, &gl_config)?;
-        let gl_context = Self::create_context(&gl_display, &gl_config, &gl_surface)?;
+        let gl_context = Self::create_context(&gl_display, &gl_config, &gl_surface, api)?;
 
         let egl_display = match gl_display.raw_display() {
             GlRawDisplay::Egl(display) => display as usize,
@@ -88,10 +143,14 @@ impl GlRenderer {
             })
         };
 
-        let frag_src = fragment_src.unwrap_or(Self::FRAGMENT_SHADER);
+        let (vertex_src, default_fragment_src) = match api {
+            GlApi::OpenGl => (Self::OPENGL_VERTEX_SHADER, Self::OPENGL_FRAGMENT_SHADER),
+            GlApi::Gles => (Self::GLES_VERTEX_SHADER, Self::GLES_FRAGMENT_SHADER),
+        };
+        let frag_src = fragment_src.unwrap_or(default_fragment_src);
 
         let (scale_loc, resolution_loc) = unsafe {
-            let vertex = Self::compile_shader(&gl, glow::VERTEX_SHADER, Self::VERTEX_SHADER)?;
+            let vertex = Self::compile_shader(&gl, glow::VERTEX_SHADER, vertex_src)?;
             let fragment = Self::compile_shader(&gl, glow::FRAGMENT_SHADER, frag_src)?;
             let program = Self::link_program(&gl, vertex, fragment)?;
 
@@ -113,6 +172,8 @@ impl GlRenderer {
                 gl.uniform_2_f32(Some(loc), width as f32, height as f32);
             }
 
+            let vao = gl.create_vertex_array().map_err(|e| anyhow!(e))?;
+            gl.bind_vertex_array(Some(vao));
             let vbo = gl.create_buffer().map_err(|e| anyhow!(e))?;
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
             // Fullscreen quad as triangle strip: BL, BR, TL, TR
@@ -147,6 +208,7 @@ impl GlRenderer {
                 dims: (width, height),
                 applied_video_dims: None,
             })],
+            api,
         })
     }
 
@@ -173,6 +235,10 @@ impl GlRenderer {
 
     pub fn egl_context(&self) -> usize {
         self.egl_context
+    }
+
+    pub fn gl_api(&self) -> GlApi {
+        self.api
     }
 
     pub fn surface_dims(&self, idx: usize) -> (u32, u32) {
@@ -427,9 +493,13 @@ impl GlRenderer {
         .context("Display::new")
     }
 
-    fn create_config(gl_display: &Display) -> anyhow::Result<Config> {
+    fn create_config(gl_display: &Display, api: GlApi) -> anyhow::Result<Config> {
+        let api = match api {
+            GlApi::OpenGl => glutin::config::Api::OPENGL,
+            GlApi::Gles => glutin::config::Api::GLES3,
+        };
         let template = ConfigTemplateBuilder::new()
-            .with_api(glutin::config::Api::GLES3)
+            .with_api(api)
             .with_alpha_size(8)
             .build();
 
@@ -464,10 +534,17 @@ impl GlRenderer {
         gl_display: &Display,
         gl_config: &Config,
         gl_surface: &Surface<WindowSurface>,
+        api: GlApi,
     ) -> anyhow::Result<PossiblyCurrentContext> {
-        let gl_context_attrs = ContextAttributesBuilder::new()
-            .with_context_api(ContextApi::Gles(Some(Version::new(3, 0))))
-            .build(None);
+        let gl_context_attrs = match api {
+            GlApi::OpenGl => ContextAttributesBuilder::new()
+                .with_context_api(ContextApi::OpenGl(Some(Version::new(3, 3))))
+                .with_profile(GlProfile::Core)
+                .build(None),
+            GlApi::Gles => ContextAttributesBuilder::new()
+                .with_context_api(ContextApi::Gles(Some(Version::new(3, 0))))
+                .build(None),
+        };
 
         unsafe { gl_display.create_context(gl_config, &gl_context_attrs) }
             .context("create_context")?
