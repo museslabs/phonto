@@ -198,6 +198,26 @@ The first column is the native ID for the current OS. You can pass that string
 straight into `--display`, or wire it into an `[[alias]]` block ([see below](#cross-platform-aliases)) to
 share one config across machines.
 
+On macOS the ID is the display's name. The description starts with the
+display's UUID, which works as an ID too. After it comes the display's top-left
+corner in the arrangement from System Settings. That tells you which row is
+which monitor.
+
+### Two monitors of the same model on macOS
+
+macOS numbers their names, like `DELL U2723QE (1)` and `DELL U2723QE (2)`, but
+only while both are connected. Unplug one and the other is `DELL U2723QE`
+again. A name copied with both connected matches nothing when phonto starts
+with one, and the other way around. Pin each monitor by its UUID instead. It
+stays with the monitor when macOS renames it.
+
+Monitors that report the same serial number, or none, may still swap UUIDs.
+`system_profiler -json SPDisplaysDataType` lists each monitor's serial as
+`_spdisplays_display-serial-number`.
+
+If a monitor matches two entries, one by UUID and one by name, the UUID's video
+plays.
+
 ### Pinning videos per display from the CLI
 
 Repeat `--display ID PATH` for each display you want to set. Every display must
@@ -270,7 +290,7 @@ id = "laptop"
 random = true
 ```
 
-Run `phonto displays` on each OS once to copy the right native name into the
+Run `phonto displays` on each OS once to copy the right native ID into the
 alias. The same dotfile then works on both. Either field is optional, so a
 laptop-only alias can leave the other one out.
 
