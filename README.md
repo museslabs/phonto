@@ -280,12 +280,13 @@ so most Shadertoy shaders work after a copy and paste. A shader can react to
 the pointer. It can also keep state from one frame to the next, for
 simulations such as the Game of Life.
 
-Three examples are in [`examples/procedural`](examples/procedural):
+Examples are in [`examples/procedural`](examples/procedural):
 
 ```bash
 phonto examples/procedural/plasma.glsl   # one file
 phonto examples/procedural/life          # a pack: a buffer pass and an image pass
 phonto examples/procedural/koi           # a koi pond
+phonto examples/procedural/museslabs     # the Muses Labs lyre plays your system audio
 ```
 
 The koi pond shows all the features. If you click the water, food drops, and
@@ -294,6 +295,38 @@ the pointer. Moving the pointer without a click does nothing. The light
 follows your clock, from dawn to a night with a moon and fireflies. To preview
 a different hour, set `HOUR_OVERRIDE` at the top of
 `examples/procedural/koi/common.glsl`.
+
+The Muses Labs lyre uses the colors and the type of museslabs.org. Its three
+strings play the audio that your system plays. The left string follows the
+bass, the middle string the midrange, and the right string the treble. A
+pluck (a fast rise in the sound) makes a string vibrate and glow. It also
+writes the chord that plays on the staff, from the two or three strongest
+note names in `iChroma`.
+
+A note that comes soon after the last one is an eighth note, and a slower
+note is a quarter note. In a full mix, some chords are wrong, because the
+strongest note names do not always come from the melody. When the audio
+stops, the strings stop and the notes fade.
+
+The lyre follows your clock. It uses the paper colors of the site from
+06:00 and the dark colors of the site from 12:00. To change the hours, set
+`LIGHT_FROM` and `DARK_FROM` at the top of
+`examples/procedural/museslabs/common.glsl`. To keep one theme, set `THEME` to
+1 for paper or 2 for dark. To preview the lyre without audio, for example with
+`dump`, set `DEMO` to 1 in the same file.
+
+A pack that sets `audio = true` reads the monitor of your default output. A
+monitor is a copy of the sound that goes to your speakers. phonto reads it
+through the GStreamer PulseAudio plugin, which also works with PipeWire
+through `pipewire-pulse`. On Debian or Ubuntu, install
+`gstreamer1.0-pulseaudio`. Arch and Fedora include the plugin in their
+GStreamer good plugins package.
+
+phonto selects the default output when it starts. If you change outputs,
+restart phonto. If the monitor is not available, phonto logs a warning and
+draws the scene without audio. `dump` always draws without audio. While
+phonto reads the monitor, the sound server keeps your output device awake. A
+battery pause stops the reading.
 
 You can use a procedural wallpaper everywhere that you can use a video path:
 `--display ID PATH`, `[[display]].path`, the hyprlock recipe, `--shader`
@@ -334,6 +367,9 @@ Uniforms are the inputs that phonto sets before each frame:
 | `iDate` | `vec4` | Year, month (0 to 11), day (1 to 31), and seconds since local midnight. |
 | `iMouse` | `vec4` | The same as on Shadertoy. `xy` is the drag position and `zw` is the click position. `z` is positive while the left button is pressed. `w` is positive only on the frame of the click. |
 | `iPointer` | `vec4` | Only in phonto. `xy` is the pointer position. `z` is 1 while the pointer is over the wallpaper. `w` is 1 while the left button is pressed. Use it for hover effects. |
+| `iAudio` | `vec4` | Only in phonto. The smoothed bass, midrange, treble, and overall volume, each from 0 to 1. If the pack does not set `audio = true`, the values are zero. |
+| `iSpectrum[32]` | `float[32]` | Only in phonto. 32 smoothed frequency bands from 40 Hz to 11 kHz, with a logarithmic spacing. Each value is from 0 to 1. If the pack does not set `audio = true`, the values are zero. |
+| `iChroma[12]` | `float[12]` | Only in phonto. The strength of each note name, from C to B, over all octaves from 130 Hz to 5 kHz. Each value is from 0 to 1, and the strongest note name is near 1 while sound plays. If the pack does not set `audio = true`, the values are zero. |
 | `iChannel0` to `iChannel7` | `sampler2D` | The channels of the pass (see Packs). A channel without an input is black. Shadertoy has four channels. Channels 4 to 7 are only in phonto. |
 | `iChannelResolution[8]` | `vec3` | The size of each channel in pixels. |
 
@@ -359,6 +395,7 @@ name = "Life"              # optional, the default is the directory name
 fps = 30                   # frame-rate cap, 0 = refresh rate of the display (default 60)
 render_scale = 0.25        # draw at a fraction of the output size, 0 < scale <= 1 (default 1)
 common = "common.glsl"     # optional, added before the code of every pass
+audio = false              # true = read the audio that the system plays (default false)
 
 [[buffer]]                 # 0 to 8, drawn in this order every frame
 name = "cells"
