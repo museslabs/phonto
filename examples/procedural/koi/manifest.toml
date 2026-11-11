@@ -1,8 +1,10 @@
 # A koi pond. Click the water to drop food, and the koi swim to it. Hold the
-# button and drag to pull a wake through the water. The light follows your
-# clock, from dawn to a night with a moon.
+# button and drag to pull a wake through the water. The light follows the
+# sun at your [location], from dawn to a night with a moon. The pond can also
+# cover all your displays as one.
 #
 #   phonto examples/procedural/koi
+#   phonto --span examples/procedural/koi
 
 name = "Koi Pond"
 fps = 30

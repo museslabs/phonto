@@ -451,7 +451,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     if (L.night > 0.01) {
         // The moon shows in the water, broken by the ripples.
-        vec2 m = (p + n.xy * 0.25 - vec2(0.76, 0.78) * pond) * vec2(1.0, 0.6);
+        vec4 sky = rightDisplay();
+        vec2 m = (p + n.xy * 0.25 - (sky.xy + sky.zw * vec2(0.76, 0.78)) / iResolution.y)
+            * vec2(1.0, 0.6);
         float moon = exp(-dot(m, m) / 0.0015) * 0.35 + exp(-dot(m, m) / 0.00015) * 0.6;
         col += vec3(0.8, 0.88, 1.0) * moon * L.night;
     }
@@ -465,7 +467,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     }
 
     // Vignette, and a little noise against bands.
-    col *= 1.0 - 0.25 * pow(length((uv - 0.5) * vec2(1.1, 1.0)), 2.2);
+    // Each display gets its own vignette, also when the pond spans them.
+    vec4 display = displayAt(fragCoord);
+    vec2 inDisplay = (fragCoord - display.xy) / display.zw;
+    col *= 1.0 - 0.25 * pow(length((inDisplay - 0.5) * vec2(1.1, 1.0)), 2.2);
     col += (hashI(ivec2(fragCoord)) - 0.5) / 255.0;
     fragColor = vec4(col, 1.0);
 }
