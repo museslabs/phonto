@@ -184,7 +184,9 @@ When phonto detects a YouTube URL it calls `yt-dlp -f <format> -g [--cookies-fro
 
 By default phonto mirrors a single video across every connected display. New
 monitors plugged in mid-session attach automatically, and unplugging then
-re-plugging a monitor brings the wallpaper back without restart.
+re-plugging a monitor brings the wallpaper back without restart. A procedural
+wallpaper can also cover all displays as one scene (see
+[One scene across all displays](#one-scene-across-all-displays)).
 
 ### Listing displays
 
@@ -285,16 +287,34 @@ Examples are in [`examples/procedural`](examples/procedural):
 ```bash
 phonto examples/procedural/plasma.glsl   # one file
 phonto examples/procedural/life          # a pack: a buffer pass and an image pass
-phonto examples/procedural/koi           # a koi pond
+phonto examples/procedural/koi           # a koi pond in the light of the real sun
 phonto examples/procedural/museslabs     # the Muses Labs lyre plays your system audio
+phonto examples/procedural/battery       # your battery as the tide in a glass
+phonto examples/procedural/system        # the load of your computer, from input commands
+phonto examples/procedural/album         # the cover of the music that plays, as a live image
+phonto --span examples/procedural/koi    # one pond across all your displays
 ```
 
-The koi pond shows all the features. If you click the water, food drops, and
+Each example shows some of the features:
+
+| Example | Features |
+|---|---|
+| plasma | a single file, the pointer |
+| life | buffers, a buffer that reads itself |
+| koi | buffers, the pointer, `iLocation` and the sun, `--span` |
+| museslabs | audio and chroma, textures, the dark mode setting, `--span` |
+| battery | `iBattery`, the dark mode setting, a text atlas |
+| system | input commands, buffers, the dark mode setting |
+| album | a live image, an input command, audio |
+
+The koi pond shows the most features. If you click the water, food drops, and
 the koi swim to it and feed. If you hold the button and drag, a wake follows
 the pointer. Moving the pointer without a click does nothing. The light
-follows your clock, from dawn to a night with a moon and fireflies. To preview
-a different hour, set `HOUR_OVERRIDE` at the top of
-`examples/procedural/koi/common.glsl`.
+follows the sun, from dawn to a night with a moon and fireflies. Dawn comes at
+the sunrise of your `[location]`, and dusk at its sunset, so the light changes
+with the seasons. To preview a different hour, set `HOUR_OVERRIDE` at the top
+of `examples/procedural/koi/common.glsl`. With `--span`, the koi swim from one
+display to the next, and the moon shows on the display at the right.
 
 The Muses Labs lyre uses the colors and the type of museslabs.org. Its three
 strings play the audio that your system plays. The left string follows the
@@ -309,11 +329,43 @@ strongest note names do not always come from the melody. When the audio
 stops, the strings stop and the notes fade.
 
 The lyre follows your clock. It uses the paper colors of the site from
-06:00 and the dark colors of the site from 12:00. To change the hours, set
-`LIGHT_FROM` and `DARK_FROM` at the top of
-`examples/procedural/museslabs/common.glsl`. To keep one theme, set `THEME` to
-1 for paper or 2 for dark. To preview the lyre without audio, for example with
-`dump`, set `DEMO` to 1 in the same file.
+06:00 and the dark colors of the site from 12:00.
+
+To change the hours, set `LIGHT_FROM` and `DARK_FROM` at the top of
+`examples/procedural/museslabs/common.glsl`. `THEME` in the same file changes
+the rule. 1 is always paper, 2 is always dark, 3 follows the dark mode of your
+desktop, and 4 follows the sun. To preview the lyre without audio, for example
+with `dump`, set `DEMO` to 1 in the same file. With `--span`, the lyre stands
+on the display nearest the middle of the desktop, and the staff crosses all
+the displays. `LYRE_DISPLAY` chooses another display.
+
+The battery is the tide in a glass. The water level is the charge, bubbles
+rise while the battery charges, and the water turns terracotta below 20%. A
+system without a battery shows a full glass. The colors follow the dark mode
+of your desktop. `DEMO` at the top of `examples/procedural/battery/image.glsl`
+shows each state in turn.
+
+The system example shows the load of your computer as an orrery. Three
+planets go around faster when the load of the last 1, 5, and 15 minutes is
+higher for each core, and the outer ring shows how full the disk is. The
+values come from input commands that work on Linux and on macOS. Add them to
+your configuration first:
+
+```bash
+cat examples/procedural/system/inputs.toml >> ~/.config/phonto/config.toml
+```
+
+The album example shows the cover of the music that plays, on a background of
+its own colors. A line under the cover shows how far the track is. It needs
+`playerctl`, which reads every player that supports MPRIS, such as Spotify,
+Firefox, mpv, and VLC. Its input command is a script. It prints whether music
+plays and how far the track is, and it keeps the cover in
+`~/.cache/phonto/cover`, which the pack watches. Set it up first:
+
+```bash
+cp examples/procedural/album/now-playing.sh ~/.config/phonto/
+cat examples/procedural/album/inputs.toml >> ~/.config/phonto/config.toml
+```
 
 A pack that sets `audio = true` reads the monitor of your default output. A
 monitor is a copy of the sound that goes to your speakers. phonto reads it
@@ -334,6 +386,31 @@ post-processing, and `dump`. `--rand` also picks pack directories, and `.glsl`
 files that have a `mainImage` function. A procedural wallpaper always fills the
 screen, so `--scale` has no effect. macOS support is planned, with the same
 format.
+
+### One scene across all displays
+
+`--span` draws a procedural wallpaper once for the whole desktop. Each display
+then shows its own part of the scene:
+
+```bash
+phonto --span examples/procedural/koi
+```
+
+phonto gets the place of each display from the compositor, through the
+xdg-output protocol. `iResolution`, `fragCoord`, `iMouse`, and `iPointer` then
+use the pixels of the whole desktop, so most shaders span without changes. The
+buffers also cover the whole desktop, so a simulation such as the Game of Life
+continues from one display to the next. The cost is the same as one copy on
+each display, plus any gaps between the displays.
+
+A centered scene falls on the edge between two displays. `iDisplays` gives
+the place of each display in the scene, so a pack can put its main subject
+inside one display, as the lyre and the battery do. It can also give each
+display its own vignette, as the koi pond does.
+
+`--span` does not work with `--display`, or with the `[[display]]` entries of
+the configuration, because they give each display its own wallpaper. A video
+still plays on each display.
 
 ### Single-file wallpapers
 
@@ -370,6 +447,12 @@ Uniforms are the inputs that phonto sets before each frame:
 | `iAudio` | `vec4` | Only in phonto. The smoothed bass, midrange, treble, and overall volume, each from 0 to 1. If the pack does not set `audio = true`, the values are zero. |
 | `iSpectrum[32]` | `float[32]` | Only in phonto. 32 smoothed frequency bands from 40 Hz to 11 kHz, with a logarithmic spacing. Each value is from 0 to 1. If the pack does not set `audio = true`, the values are zero. |
 | `iChroma[12]` | `float[12]` | Only in phonto. The strength of each note name, from C to B, over all octaves from 130 Hz to 5 kHz. Each value is from 0 to 1, and the strongest note name is near 1 while sound plays. If the pack does not set `audio = true`, the values are zero. |
+| `iColorScheme` | `float` | Only in phonto. 1 if your desktop prefers dark colors. 0 if it prefers light colors or has no preference. A change shows at once. |
+| `iBattery` | `vec4` | Only in phonto. `x` is the charge from 0 to 1. `y` is 1 while the battery charges. `z` is 1 on AC power. `w` is 1 if the system has a battery. Without a battery, `x` is 1. phonto reads the battery every 10 seconds. |
+| `iLocation` | `vec4` | Only in phonto. `x` is the latitude and `y` is the longitude, in degrees. `z` is the offset of your local time from UTC, in hours. `w` is 1 if you set a `[location]` in the configuration. |
+| `iDisplays[8]` | `vec4` | Only in phonto. The place of each display in the image: `x`, `y`, `width`, and `height`, in the pixels of the image pass, from the bottom left. Without `--span`, there is one display, the whole image. |
+| `iDisplayCount` | `int` | Only in phonto. The number of displays in `iDisplays`. |
+| `iInput` | struct | Only in phonto. The inputs that the pack names in `[inputs]`, as `iInput.<name>` (see [Your own inputs](#your-own-inputs)). |
 | `iChannel0` to `iChannel7` | `sampler2D` | The channels of the pass (see Packs). A channel without an input is black. Shadertoy has four channels. Channels 4 to 7 are only in phonto. |
 | `iChannelResolution[8]` | `vec3` | The size of each channel in pixels. |
 
@@ -377,6 +460,17 @@ Uniforms are the inputs that phonto sets before each frame:
 as on Shadertoy. `iMouse` and `iPointer` are always in the pixels of the image
 pass. In a buffer with its own size, multiply them by
 `iResolution.xy / iImageResolution.xy`.
+
+phonto reads the dark mode setting through the XDG desktop portal. GNOME,
+KDE, and the GTK portal that other desktops use all give it. If no portal
+gives it, `iColorScheme` is 0.
+
+With `iLocation` and `iDate`, a shader can compute the sun. The function
+`sun()` in `examples/procedural/museslabs/common.glsl` gives the height and
+the direction of the sun, and the times of sunrise and sunset. Copy it into
+your pack. Without a `[location]`, `iLocation` is the equator at the middle
+of your time zone, so the sun rises near 06:00 and sets near 18:00. `dump`
+uses the system inputs of the moment that it runs, as it does for `iDate`.
 
 The wallpaper gets the pointer only where no window covers it, because
 Wayland does not tell other clients where the pointer is. phonto does not use
@@ -396,6 +490,10 @@ fps = 30                   # frame-rate cap, 0 = refresh rate of the display (de
 render_scale = 0.25        # draw at a fraction of the output size, 0 < scale <= 1 (default 1)
 common = "common.glsl"     # optional, added before the code of every pass
 audio = false              # true = read the audio that the system plays (default false)
+
+[inputs]                   # optional, values from your [[input]] commands, with defaults
+workspace = 1.0            # a float
+wind = [0.0, 0.0]          # a vec2. Lists of 2 to 4 numbers are vec2 to vec4
 
 [[buffer]]                 # 0 to 8, drawn in this order every frame
 name = "cells"
@@ -426,6 +524,7 @@ in the pack. A table has exactly one of `buffer = "name"` or
 |---|---|---|
 | `filter` | `nearest`, `linear`, `mipmap` (only for textures) | `linear` for buffers, `mipmap` for textures |
 | `wrap` | `clamp`, `repeat`, `mirror` | `clamp` for buffers, `repeat` for textures |
+| `watch` | `true` loads the image again when its file changes (see [Live images](#live-images)) | `false` |
 
 If a buffer already drew in this frame, a pass that reads it gets the output
 of this frame. If a pass reads itself, or a buffer that draws later, it gets
@@ -435,9 +534,70 @@ buffer stores 16-bit floats, so it can hold values outside 0 to 1. Images
 `uv = (0, 0)` at their bottom-left corner.
 
 Each display gets its own buffers at its own size, so the state of a wallpaper
-is different on each display. A shader compile error gives the file and the
+is different on each display. With `--span`, all displays share one set of
+buffers. A shader compile error gives the file and the
 line. For example, `0:12` is line 12 of the shader of the pass, and `1:12` is
 line 12 of the common file.
+
+### Your own inputs
+
+A pack can read values that your own commands give. Examples are the
+weather, the CPU load, the count of unread mail, and the workspace. You write
+the commands in your configuration. phonto runs each one with `sh` at its
+interval, and reads the one to four numbers that it prints. Commands come
+only from your configuration, never from a pack, because packs can come from
+the internet.
+
+```toml
+# ~/.config/phonto/config.toml
+[[input]]
+name = "workspace"
+command = "hyprctl activeworkspace -j | jq .id"
+every = 1                  # seconds between two runs
+
+[[input]]
+name = "wind"
+command = "curl -s 'https://api.open-meteo.com/v1/forecast?latitude=37.98&longitude=23.73&current=wind_speed_10m,wind_direction_10m' | jq '.current.wind_speed_10m, .current.wind_direction_10m'"
+every = 900
+```
+
+The pack names the inputs that it reads in `[inputs]`, with a default for
+each. The shader then reads `iInput.workspace` and `iInput.wind`:
+
+```glsl
+float calm = 1.0 - clamp(iInput.wind.x / 40.0, 0.0, 1.0);
+```
+
+Spaces, commas, and brackets separate the numbers, so a JSON list also works.
+`true` and `false` count as 1 and 0. phonto runs only the commands for the
+inputs of the wallpaper that plays. A battery pause also pauses the commands.
+If a command fails or prints no number, the input keeps its last value, and
+phonto writes one warning. A command that runs longer than its interval
+stops, with all the programs that it started. This limit is at least 1 second
+and at most 10 seconds. An input without a command keeps its default. `dump` runs each command once.
+
+### Live images
+
+A texture channel with `watch = true` loads its image again when the file
+changes. A script can then put album art, a weather icon, or text into the
+scene. The path can be absolute, or it can start with `~/`:
+
+```toml
+[image]
+shader = "image.glsl"
+channels = [{ texture = "~/.cache/phonto/cover.jpg", watch = true }]
+```
+
+phonto checks the file each second. Write a new file and rename it into
+place, so that phonto never reads half of an image. If the file does not
+exist yet, the channel is empty until it appears. If the new image does not
+load, the channel keeps the last image, and phonto writes a warning. To show
+text, render it to an image, for example with ImageMagick:
+
+```bash
+magick -background none -fill white -pointsize 64 label:"3 unread" /tmp/mail.png &&
+  mv /tmp/mail.png ~/.cache/phonto/mail.png
+```
 
 ### Performance
 
@@ -515,6 +675,25 @@ depth = 2
 ```
 
 `depth = 0` scans only the top-level directory. `depth = 1` includes one level of subdirectories, and so on.
+
+### `location`
+
+Your place on Earth, in degrees, with north and east positive. Procedural
+wallpapers get it in `iLocation`, so that they can compute the sun. phonto
+does not send your location anywhere.
+
+```toml
+[location]
+latitude = 37.98
+longitude = 23.73
+```
+
+### `input`
+
+Commands that give procedural wallpapers values, as `iInput.<name>`. Each
+entry has a `name`, a shell `command` that prints one to four numbers, and
+`every`, the seconds between two runs. See
+[Your own inputs](#your-own-inputs).
 
 ### Path expansion
 
