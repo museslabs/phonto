@@ -1,0 +1,28 @@
+# The Muses Labs lyre on the paper of museslabs.org. The strings vibrate
+# with the audio that your system plays, and each pluck writes the chord
+# that plays on the staff. The colors follow your clock. The settings at the
+# top of common.glsl change the hours, the theme, and the audio source.
+#
+#   phonto examples/procedural/museslabs
+
+name = "Muses Labs Lyre"
+fps = 60
+audio = true
+common = "common.glsl"
+
+# The strings and their notes (see strings.glsl). The width is NOTES.
+[[buffer]]
+name = "strings"
+shader = "strings.glsl"
+size = [16, 2]
+format = "rgba32f"
+channels = [{ buffer = "strings", filter = "nearest" }]
+
+[image]
+shader = "image.glsl"
+channels = [
+    { texture = "lyre.png", filter = "mipmap", wrap = "clamp" },
+    { buffer = "strings", filter = "nearest" },
+    { texture = "wordmark.png", filter = "mipmap", wrap = "clamp" },
+    { texture = "clef.png", filter = "mipmap", wrap = "clamp" },
+]
