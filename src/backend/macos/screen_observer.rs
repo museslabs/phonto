@@ -6,7 +6,7 @@ use objc2_foundation::{MainThreadMarker, NSNotification};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use super::displays::display_id;
+use super::displays::{assigned, display_id};
 use crate::scale::ScaleMode;
 
 pub struct MirrorSurface {
@@ -22,8 +22,8 @@ pub enum AttachPolicy {
     /// Every screen, including ones that appear later, gets a surface sharing
     /// this player.
     Mirror(Retained<AVPlayer>),
-    /// Only screens whose localizedName matches a key in the map get a surface,
-    /// attached to that key's player. Unmatched screens are left alone.
+    /// Only screens that a key in the map names, by UUID or by name, get a
+    /// surface, attached to that key's player. Unmatched screens are left alone.
     PerDisplay(HashMap<String, Retained<AVPlayer>>),
 }
 
@@ -91,7 +91,7 @@ impl ScreenObserver {
                 // Play what the screen is now assigned, as a restart would.
                 // With no assignment it keeps its video.
                 if let AttachPolicy::PerDisplay(map) = &self.ivars().policy
-                    && let Some(player) = map.get(&surface.name)
+                    && let Some(player) = assigned(screen, map)
                     && unsafe { surface.layer.player(mtm) }.as_ref() != Some(player)
                 {
                     unsafe { surface.layer.setPlayer(Some(&**player)) };
@@ -133,7 +133,7 @@ impl ScreenObserver {
             let name = screen.localizedName().to_string();
             let player = match &self.ivars().policy {
                 AttachPolicy::Mirror(p) => p,
-                AttachPolicy::PerDisplay(map) => match map.get(&name) {
+                AttachPolicy::PerDisplay(map) => match assigned(&screen, map) {
                     Some(p) => p,
                     None => continue,
                 },
