@@ -4,14 +4,22 @@
 // x goes right, and y goes down. The three strings are drawn in code, so
 // that they can vibrate. lyre.png has the rest of the logo.
 
-// 0 = follow the clock, as LIGHT_FROM and DARK_FROM set. 1 = always the
-// paper colors of museslabs.org. 2 = always the dark colors of the site.
+// The colors: the paper colors of museslabs.org, or the dark colors of the
+// site.
+// 0 = follow the clock, as LIGHT_FROM and DARK_FROM set.
+// 1 = always paper. 2 = always dark.
+// 3 = follow the light or dark setting of the desktop, as the site does.
+// 4 = follow the sun: paper from sunrise to sunset. Set your location in
+//     the phonto configuration.
 #define THEME 0
 
 // The local hours when the paper colors and the dark colors start.
-// LIGHT_FROM must come before DARK_FROM.
 const float LIGHT_FROM = 6.0;
 const float DARK_FROM = 12.0;
+
+// The display that shows the lyre when the wallpaper spans several displays,
+// from 0. -1 = the display nearest the middle of the desktop.
+const int LYRE_DISPLAY = -1;
 
 // 1 = play a built-in chord pattern instead of the system audio. Use it to
 // preview the wallpaper with `phonto dump`, which has no audio.
@@ -68,6 +76,55 @@ void unpackChord(float code, out int names[3], out bool eighth) {
     eighth = c >= 2197;
     c %= 2197;
     names = int[3](c % 13, (c / 13) % 13, c / 169);
+}
+
+// The sun at this moment, from iDate and iLocation. x is its elevation
+// above the horizon, and y is its azimuth from north to the east, in degrees.
+// z is the sunrise and w is the sunset, in seconds since local midnight. In a
+// polar night, z and w are -1. In a polar day, z is 0 and w is 86400. The
+// formulas are the NOAA approximations, accurate to about a minute. Copy
+// this function into your own packs.
+vec4 sun() {
+    const int DAYS_BEFORE[12] = int[12](0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334);
+    int year = int(iDate.x);
+    int month = int(iDate.y);
+    bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    float day = float(DAYS_BEFORE[month] + int(iDate.z) - 1 + (leap && month > 1 ? 1 : 0));
+    float lat = radians(iLocation.x);
+    float lon = iLocation.y;
+    float zone = iLocation.z * 60.0;   // minutes ahead of UTC
+
+    // The fraction of the year, in radians.
+    float g = 2.0 * PI / 365.0 * (day + (iDate.w / 3600.0 - 12.0) / 24.0);
+    // How far the solar time is ahead of the clock, in minutes.
+    float equation = 229.18 * (0.000075 + 0.001868 * cos(g) - 0.032077 * sin(g)
+        - 0.014615 * cos(2.0 * g) - 0.040849 * sin(2.0 * g));
+    // The latitude where the sun is overhead, in radians.
+    float declination = 0.006918 - 0.399912 * cos(g) + 0.070257 * sin(g)
+        - 0.006758 * cos(2.0 * g) + 0.000907 * sin(2.0 * g)
+        - 0.002697 * cos(3.0 * g) + 0.00148 * sin(3.0 * g);
+
+    float solar = iDate.w / 60.0 + equation + 4.0 * lon - zone;
+    float hourAngle = radians(solar / 4.0 - 180.0);
+    float cosZenith = clamp(sin(lat) * sin(declination)
+        + cos(lat) * cos(declination) * cos(hourAngle), -1.0, 1.0);
+    float elevation = 90.0 - degrees(acos(cosZenith));
+    float azimuth = degrees(atan(sin(hourAngle),
+        cos(hourAngle) * sin(lat) - tan(declination) * cos(lat))) + 180.0;
+
+    // The sun is up when its center is 0.833 degrees below the horizon,
+    // because the air bends its light and the disk has a size.
+    float cosRise = cos(radians(90.833)) / (cos(lat) * cos(declination))
+        - tan(lat) * tan(declination);
+    vec2 times = vec2(-1.0);
+    if (cosRise <= -1.0) {
+        times = vec2(0.0, 86400.0);
+    } else if (cosRise < 1.0) {
+        float halfDay = degrees(acos(cosRise)) * 4.0;
+        float noon = 720.0 - 4.0 * lon - equation + zone;
+        times = mod(vec2(noon - halfDay, noon + halfDay) * 60.0, 86400.0);
+    }
+    return vec4(elevation, azimuth, times);
 }
 
 float hash(vec2 p) {

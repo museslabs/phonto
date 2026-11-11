@@ -30,19 +30,35 @@ vec3 ink;
 vec3 inkSoft;
 vec3 tint;
 
-// 0 for the paper colors and 1 for the dark colors. A change takes 3
-// seconds. A slow fade loses the logo, because the paper and the ink swap,
-// so halfway they are the same gray.
+// A change of colors takes this many seconds. A slow fade loses the logo,
+// because the paper and the ink swap, so halfway they are the same gray.
+const float FADE = 3.0;
+
+// 1 between the times `from` and `to`, in seconds since midnight, and 0
+// outside. The time between them can pass midnight.
+float between(float from, float to) {
+    float start = smoothstep(from, from + FADE, iDate.w);
+    float end = smoothstep(to, to + FADE, iDate.w);
+    return from <= to ? start * (1.0 - end) : max(start, 1.0 - end);
+}
+
+// 0 for the paper colors and 1 for the dark colors.
 float darkness() {
 #if THEME == 1
     return 0.0;
 #elif THEME == 2
     return 1.0;
+#elif THEME == 3
+    return iColorScheme;
+#elif THEME == 4
+    vec4 s = sun();
+    // In a polar day, the sun does not set.
+    if (s.w - s.z >= 86400.0) {
+        return 0.0;
+    }
+    return 1.0 - between(s.z, s.w);
 #else
-    const float FADE = 3.0;   // seconds
-    float light = smoothstep(LIGHT_FROM * 3600.0, LIGHT_FROM * 3600.0 + FADE, iDate.w)
-        * (1.0 - smoothstep(DARK_FROM * 3600.0, DARK_FROM * 3600.0 + FADE, iDate.w));
-    return 1.0 - light;
+    return 1.0 - between(LIGHT_FROM * 3600.0, DARK_FROM * 3600.0);
 #endif
 }
 // The site draws its rules in ink at 24% opacity.
@@ -253,10 +269,45 @@ vec3 drawStrings(vec3 col, vec2 q, float px) {
     return col;
 }
 
+// The display that shows `coord`, in pixels of the image.
+vec4 displayAt(vec2 coord) {
+    for (int i = 0; i < 8; i++) {
+        vec4 d = iDisplays[i];
+        if (i < iDisplayCount && all(greaterThanEqual(coord, d.xy))
+            && all(lessThan(coord, d.xy + d.zw))) {
+            return d;
+        }
+    }
+    return iDisplays[0];
+}
+
+// The display that shows the lyre: LYRE_DISPLAY, or the one nearest the
+// middle of the image.
+vec4 lyreDisplay() {
+    if (LYRE_DISPLAY >= 0 && LYRE_DISPLAY < iDisplayCount) {
+        return iDisplays[max(LYRE_DISPLAY, 0)];
+    }
+    vec4 best = iDisplays[0];
+    float nearest = 1e9;
+    for (int i = 0; i < 8; i++) {
+        vec4 d = iDisplays[i];
+        float distance = length(d.xy + 0.5 * d.zw - 0.5 * iResolution.xy);
+        if (i < iDisplayCount && distance < nearest - 1.0) {
+            best = d;
+            nearest = distance;
+        }
+    }
+    return best;
+}
+
 void mainImage(out vec4 color, in vec2 coord) {
-    // Fit the scene to the height, or to the width on a portrait screen.
-    float scale = min(iResolution.y, iResolution.x) * LOGO_SIZE / 400.0;
-    vec2 q = FOCUS + (coord - 0.5 * iResolution.xy) * vec2(1.0, -1.0) / scale;
+    // The lyre stands in the middle of one display. It fits the height of
+    // the display, or its width on a portrait screen. When the wallpaper
+    // spans several displays, the staff crosses all of them.
+    vec4 stage = lyreDisplay();
+    float scale = min(stage.z, stage.w) * LOGO_SIZE / 400.0;
+    vec2 centre = stage.xy + 0.5 * stage.zw;
+    vec2 q = FOCUS + (coord - centre) * vec2(1.0, -1.0) / scale;
     float px = 1.0 / scale;
     float dark = darkness();
     paper = mix(LIGHT_PAPER, DARK_PAPER, dark);
@@ -264,12 +315,13 @@ void mainImage(out vec4 color, in vec2 coord) {
     ink = mix(LIGHT_INK, DARK_INK, dark);
     inkSoft = mix(LIGHT_INK_SOFT, DARK_INK_SOFT, dark);
     tint = mix(LIGHT_TINT, DARK_TINT, dark);
-    float halfWidth = 0.5 * iResolution.x / scale;
-    float left = 200.0 - halfWidth + STAFF_MARGIN;
-    float right = 200.0 + halfWidth - STAFF_MARGIN;
+    float left = FOCUS.x - centre.x / scale + STAFF_MARGIN;
+    float right = FOCUS.x + (iResolution.x - centre.x) / scale - STAFF_MARGIN;
 
-    // The paper is a little darker at the edges and has a fine grain.
-    vec2 uv = coord / iResolution.xy;
+    // The paper is a little darker at the edges of each display, and has a
+    // fine grain.
+    vec4 display = displayAt(coord);
+    vec2 uv = (coord - display.xy) / display.zw;
     float edge = smoothstep(0.3, 1.2, length((uv - 0.5) * vec2(1.6, 1.2)));
     vec3 col = mix(paper, paperEdge, edge);
     col += (hash(floor(coord)) - 0.5) * 0.012;

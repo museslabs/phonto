@@ -8,7 +8,8 @@
 // Positions are in pond units: the screen is 1 unit tall, and its width is
 // its aspect ratio. The pond looks the same at all resolutions.
 
-// Set an hour (0 to 24) to preview its light. -1 follows the clock.
+// Set an hour (0 to 24) to preview its light. -1 follows the sun: dawn
+// comes at the sunrise of your [location], and dusk at its sunset.
 #define HOUR_OVERRIDE -1.0
 
 const float PI = 3.14159265;
@@ -187,8 +188,99 @@ vec2 fireflyPos(int k, vec2 pond, float t) {
 
 // ---- lighting -----------------------------------------------------------------
 
+// The sun at this moment, from iDate and iLocation. x is its elevation
+// above the horizon, and y is its azimuth from north to the east, in degrees.
+// z is the sunrise and w is the sunset, in seconds since local midnight. In a
+// polar night, z and w are -1. In a polar day, z is 0 and w is 86400. The
+// formulas are the NOAA approximations, accurate to about a minute. It is
+// the same as in examples/procedural/museslabs/common.glsl.
+vec4 sun() {
+    const int DAYS_BEFORE[12] = int[12](0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334);
+    int year = int(iDate.x);
+    int month = int(iDate.y);
+    bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    float day = float(DAYS_BEFORE[month] + int(iDate.z) - 1 + (leap && month > 1 ? 1 : 0));
+    float lat = radians(iLocation.x);
+    float lon = iLocation.y;
+    float zone = iLocation.z * 60.0;   // minutes ahead of UTC
+
+    // The fraction of the year, in radians.
+    float g = 2.0 * PI / 365.0 * (day + (iDate.w / 3600.0 - 12.0) / 24.0);
+    // How far the solar time is ahead of the clock, in minutes.
+    float equation = 229.18 * (0.000075 + 0.001868 * cos(g) - 0.032077 * sin(g)
+        - 0.014615 * cos(2.0 * g) - 0.040849 * sin(2.0 * g));
+    // The latitude where the sun is overhead, in radians.
+    float declination = 0.006918 - 0.399912 * cos(g) + 0.070257 * sin(g)
+        - 0.006758 * cos(2.0 * g) + 0.000907 * sin(2.0 * g)
+        - 0.002697 * cos(3.0 * g) + 0.00148 * sin(3.0 * g);
+
+    float solar = iDate.w / 60.0 + equation + 4.0 * lon - zone;
+    float hourAngle = radians(solar / 4.0 - 180.0);
+    float cosZenith = clamp(sin(lat) * sin(declination)
+        + cos(lat) * cos(declination) * cos(hourAngle), -1.0, 1.0);
+    float elevation = 90.0 - degrees(acos(cosZenith));
+    float azimuth = degrees(atan(sin(hourAngle),
+        cos(hourAngle) * sin(lat) - tan(declination) * cos(lat))) + 180.0;
+
+    // The sun is up when its center is 0.833 degrees below the horizon,
+    // because the air bends its light and the disk has a size.
+    float cosRise = cos(radians(90.833)) / (cos(lat) * cos(declination))
+        - tan(lat) * tan(declination);
+    vec2 times = vec2(-1.0);
+    if (cosRise <= -1.0) {
+        times = vec2(0.0, 86400.0);
+    } else if (cosRise < 1.0) {
+        float halfDay = degrees(acos(cosRise)) * 4.0;
+        float noon = 720.0 - 4.0 * lon - equation + zone;
+        times = mod(vec2(noon - halfDay, noon + halfDay) * 60.0, 86400.0);
+    }
+    return vec4(elevation, azimuth, times);
+}
+
+// The hour of the light. The key hours above put dawn at 6.2 and dusk at
+// 19.3. The real sunrise and sunset move them, so the light follows the
+// seasons and your place.
 float hourOfDay() {
-    return mod(HOUR_OVERRIDE >= 0.0 ? HOUR_OVERRIDE : iDate.w / 3600.0, 24.0);
+    if (HOUR_OVERRIDE >= 0.0) {
+        return mod(HOUR_OVERRIDE, 24.0);
+    }
+    const float DAWN = 6.2;
+    const float DUSK = 19.3;
+    vec4 s = sun();
+    if (s.z < 0.0) {
+        return 0.0;   // a polar night
+    }
+    float day = s.w > s.z ? s.w - s.z : s.w + 86400.0 - s.z;
+    float since = mod(iDate.w - s.z, 86400.0);
+    if (since < day) {
+        return mix(DAWN, DUSK, since / day);
+    }
+    return mod(DUSK + (DAWN + 24.0 - DUSK) * (since - day) / (86400.0 - day), 24.0);
+}
+
+// The display that shows `fragCoord`, in pixels of the image pass. A spanned
+// pond has one for each screen.
+vec4 displayAt(vec2 fragCoord) {
+    for (int i = 0; i < 8; i++) {
+        vec4 d = iDisplays[i];
+        if (i < iDisplayCount && all(greaterThanEqual(fragCoord, d.xy))
+            && all(lessThan(fragCoord, d.xy + d.zw))) {
+            return d;
+        }
+    }
+    return iDisplays[0];
+}
+
+// The display at the right, which shows the moon.
+vec4 rightDisplay() {
+    vec4 right = iDisplays[0];
+    for (int i = 1; i < 8; i++) {
+        vec4 d = iDisplays[i];
+        if (i < iDisplayCount && d.x + d.z > right.x + right.z) {
+            right = d;
+        }
+    }
+    return right;
 }
 
 // Shadows fall away from the light, and are longer when the light is low.
