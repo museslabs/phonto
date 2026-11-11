@@ -6,26 +6,31 @@
 //! `mainImage`, `iTime`, `iMouse`, `iChannel0`.
 //!
 //! This module does not depend on the platform. It loads packs, builds the
-//! shader source, keeps the clock and the pointer state, and turns audio
-//! samples into levels. Each backend does the drawing and the audio capture.
+//! shader source, keeps the clock and the pointer state, turns audio samples
+//! into levels, runs the input commands, and watches image files. Each
+//! backend does the drawing and reads the system.
 
 // Only the Wayland backend draws procedural wallpapers at this time. The
 // macOS backend only uses `is_procedural`, to reject them.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 mod audio;
+mod commands;
 mod glsl;
 mod inputs;
 mod pack;
+mod watch;
 
 use std::path::Path;
 
 pub use audio::{Analyzer, AudioFrame, SAMPLE_RATE};
+pub use commands::{CommandInputs, read_once as read_inputs_once};
 pub use glsl::{PassKind, fragment_shader, source_ids_help};
-pub use inputs::{Clock, FrameInputs, FrameLimiter, Pointer, local_date};
+pub use inputs::{Clock, FrameInputs, FrameLimiter, MAX_DISPLAYS, Pointer, local_date, location};
 pub use pack::{
     BufferFormat, BufferSize, Filter, Input, MANIFEST, MAX_CHANNELS, Pack, Pass, Texture, Wrap,
 };
+pub use watch::TextureWatcher;
 
 /// True if the backend of this platform can draw procedural wallpapers.
 pub const SUPPORTED: bool = cfg!(target_os = "linux");

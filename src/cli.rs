@@ -130,6 +130,12 @@ pub struct RenderArgs {
     #[arg(long, value_enum, default_value_t = crate::backend::wayland::LayerMode::Background)]
     pub layer: crate::backend::wayland::LayerMode,
 
+    /// Draw a procedural wallpaper across all displays as one scene, instead
+    /// of one copy on each display (Linux/Wayland only).
+    #[cfg(target_os = "linux")]
+    #[arg(long, conflicts_with_all = ["display", "display_rand"])]
+    pub span: bool,
+
     /// Path to a GLSL fragment shader file to apply. The shader receives
     /// `u_tex` (sampler2D), `v_uv` (vec2), and optionally `u_resolution`
     /// (vec2, surface size in pixels).

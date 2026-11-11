@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, bail};
 use serde::Deserialize;
@@ -11,6 +12,8 @@ use serde::Deserialize;
 pub const MANIFEST: &str = "manifest.toml";
 pub const MAX_BUFFERS: usize = 8;
 pub const MAX_CHANNELS: usize = 8;
+/// The most `[inputs]` that a pack can read.
+pub const MAX_INPUTS: usize = 16;
 /// The largest `size` or `height` of a buffer.
 pub const MAX_BUFFER_SIZE: u32 = 8192;
 const DEFAULT_FPS: f32 = 60.0;
@@ -35,6 +38,18 @@ pub struct Pack {
     pub image: Pass,
     /// Images that channels use. Each image loads once.
     pub textures: Vec<Texture>,
+    /// The values that the pack reads from the `[[input]]` commands of the
+    /// configuration, as `iInput.<name>`.
+    pub inputs: Vec<NamedInput>,
+}
+
+/// An input that a pack reads, with its value when no command gives one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedInput {
+    pub name: String,
+    /// 1 for a `float`, and 2 to 4 for a `vec2` to a `vec4`.
+    pub size: usize,
+    pub default: [f32; 4],
 }
 
 #[derive(Debug)]
@@ -137,6 +152,11 @@ pub enum Wrap {
 /// the bottom-left corner. `fragCoord` has the same origin.
 pub struct Texture {
     pub path: PathBuf,
+    /// If true, phonto loads the image again when the file changes.
+    pub watch: bool,
+    /// The modification time of the file that this image came from. `None`
+    /// for the empty image of a watched file that does not exist yet.
+    pub modified: Option<SystemTime>,
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
@@ -146,6 +166,7 @@ impl fmt::Debug for Texture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Texture")
             .field("path", &self.path)
+            .field("watch", &self.watch)
             .field("width", &self.width)
             .field("height", &self.height)
             .finish_non_exhaustive()
@@ -164,6 +185,8 @@ struct Manifest {
     #[serde(default, rename = "buffer")]
     buffers: Vec<BufferManifest>,
     image: ImageManifest,
+    #[serde(default)]
+    inputs: toml::Table,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +227,8 @@ struct ChannelTable {
     texture: Option<String>,
     filter: Option<String>,
     wrap: Option<String>,
+    #[serde(default)]
+    watch: bool,
 }
 
 impl Pack {
@@ -217,6 +242,18 @@ impl Pack {
             return Self::from_manifest(path);
         }
         Self::from_shader_file(path)
+    }
+
+    /// Loads the watched images again, for a reader that does not watch
+    /// them, such as `dump`. An image that does not load keeps its last
+    /// version.
+    pub fn reload_watched(&mut self) {
+        for texture in self.textures.iter_mut().filter(|t| t.watch) {
+            match decode_texture(&texture.path) {
+                Ok(new) => *texture = Texture { watch: true, ..new },
+                Err(err) => log::info!("{err:#}"),
+            }
+        }
     }
 
     fn from_shader_file(path: &Path) -> anyhow::Result<Self> {
@@ -242,6 +279,7 @@ impl Pack {
                 channels: Vec::new(),
             },
             textures: Vec::new(),
+            inputs: Vec::new(),
         })
     }
 
@@ -316,6 +354,7 @@ impl Pack {
             buffers,
             image,
             textures: textures.list,
+            inputs: parse_inputs(&m.inputs).context("[inputs]")?,
         })
     }
 }
@@ -390,20 +429,22 @@ fn resolve_channel(
     buffer_index: &HashMap<&str, usize>,
     textures: &mut TextureSet,
 ) -> anyhow::Result<Channel> {
-    let (buffer, texture, filter, wrap) = match c {
+    let (buffer, texture, filter, wrap, watch) = match c {
         ChannelManifest::Short(s) if buffer_index.contains_key(s.as_str()) => {
-            (Some(s.as_str()), None, None, None)
+            (Some(s.as_str()), None, None, None, false)
         }
-        ChannelManifest::Short(s) => (None, Some(s.as_str()), None, None),
+        ChannelManifest::Short(s) => (None, Some(s.as_str()), None, None, false),
         ChannelManifest::Full(t) => (
             t.buffer.as_deref(),
             t.texture.as_deref(),
             t.filter.as_deref(),
             t.wrap.as_deref(),
+            t.watch,
         ),
     };
 
     let (input, default_filter, default_wrap) = match (buffer, texture) {
+        (Some(_), None) if watch => bail!("`watch` is only for textures"),
         (Some(name), None) => {
             let Some(&i) = buffer_index.get(name) else {
                 bail!("no [[buffer]] is named `{name}`");
@@ -411,7 +452,7 @@ fn resolve_channel(
             (Input::Buffer(i), Filter::Linear, Wrap::Clamp)
         }
         (None, Some(path)) => {
-            let i = textures.load(&dir.join(path))?;
+            let i = textures.load(&dir.join(crate::config::expand_tilde(path)), watch)?;
             (Input::Texture(i), Filter::Mipmap, Wrap::Repeat)
         }
         _ => bail!("set exactly one of `buffer` or `texture`"),
@@ -430,6 +471,54 @@ fn resolve_channel(
         filter,
         wrap,
     })
+}
+
+fn parse_inputs(table: &toml::Table) -> anyhow::Result<Vec<NamedInput>> {
+    if table.len() > MAX_INPUTS {
+        bail!(
+            "at most {MAX_INPUTS} inputs are supported (got {})",
+            table.len()
+        );
+    }
+    table
+        .iter()
+        .map(|(name, value)| {
+            if !is_glsl_name(name) {
+                bail!(
+                    "`{name}` is not a GLSL name. Use letters, digits, and _, and start with a letter"
+                );
+            }
+            let number = |v: &toml::Value| match v {
+                toml::Value::Integer(i) => Some(*i as f32),
+                toml::Value::Float(f) => Some(*f as f32),
+                _ => None,
+            };
+            let numbers: Vec<f32> = match value {
+                toml::Value::Array(items) => items.iter().map(number).collect::<Option<_>>(),
+                v => number(v).map(|n| vec![n]),
+            }
+            .with_context(|| format!("`{name}` must be a number or a list of numbers"))?;
+            if !(1..=4).contains(&numbers.len()) {
+                bail!("`{name}` has {} numbers. Use 1 to 4", numbers.len());
+            }
+            let mut default = [0.0; 4];
+            default[..numbers.len()].copy_from_slice(&numbers);
+            Ok(NamedInput {
+                name: name.clone(),
+                size: numbers.len(),
+                default,
+            })
+        })
+        .collect()
+}
+
+/// True for a name that GLSL accepts and does not reserve.
+fn is_glsl_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !name.starts_with("gl_")
+        && !name.contains("__")
 }
 
 fn parse_filter(s: &str) -> anyhow::Result<Filter> {
@@ -458,25 +547,56 @@ struct TextureSet {
 }
 
 impl TextureSet {
-    fn load(&mut self, path: &Path) -> anyhow::Result<usize> {
+    /// Loads the image at `path`. A watched image that does not load yet is
+    /// empty until its file changes.
+    fn load(&mut self, path: &Path, watch: bool) -> anyhow::Result<usize> {
         if let Some(&i) = self.by_path.get(path) {
+            self.list[i].watch |= watch;
             return Ok(i);
         }
-        let mut img = image::open(path)
-            .with_context(|| format!("load texture {}", path.display()))?
-            .into_rgba8();
-        image::imageops::flip_vertical_in_place(&mut img);
-        let (width, height) = img.dimensions();
+        let texture = match decode_texture(path) {
+            Ok(texture) => texture,
+            Err(err) if watch => {
+                log::info!("{err:#}. The channel stays empty until the file changes");
+                Texture {
+                    path: path.to_path_buf(),
+                    watch,
+                    modified: None,
+                    width: 1,
+                    height: 1,
+                    rgba: vec![0; 4],
+                }
+            }
+            Err(err) => return Err(err),
+        };
         let i = self.list.len();
-        self.list.push(Texture {
-            path: path.to_path_buf(),
-            width,
-            height,
-            rgba: img.into_raw(),
-        });
+        self.list.push(Texture { watch, ..texture });
         self.by_path.insert(path.to_path_buf(), i);
         Ok(i)
     }
+}
+
+/// Decodes the image at `path`, with its rows from bottom to top.
+pub(super) fn decode_texture(path: &Path) -> anyhow::Result<Texture> {
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    // The content sets the format, so a script can name a file `cover` and
+    // write a JPEG or a PNG into it.
+    let mut img = image::ImageReader::open(path)
+        .and_then(|r| r.with_guessed_format())
+        .map_err(image::ImageError::IoError)
+        .and_then(|r| r.decode())
+        .with_context(|| format!("load texture {}", path.display()))?
+        .into_rgba8();
+    image::imageops::flip_vertical_in_place(&mut img);
+    let (width, height) = img.dimensions();
+    Ok(Texture {
+        path: path.to_path_buf(),
+        watch: false,
+        modified,
+        width,
+        height,
+        rgba: img.into_raw(),
+    })
 }
 
 fn read_source(path: &Path) -> anyhow::Result<Source> {
@@ -676,6 +796,57 @@ mod tests {
     }
 
     #[test]
+    fn inputs_and_watched_textures() {
+        let dir = TempDir::new("inputs");
+        dir.write("i.glsl", SHADER);
+        dir.write(
+            MANIFEST,
+            r#"
+            [image]
+            shader = "i.glsl"
+            channels = [{ texture = "cover.png", watch = true }]
+
+            [inputs]
+            rain = 0.5
+            wind = [1, 2]
+            "#,
+        );
+        let pack = Pack::load(&dir.0).unwrap();
+        let named = |name: &str, size: usize, default: [f32; 4]| NamedInput {
+            name: name.into(),
+            size,
+            default,
+        };
+        assert_eq!(
+            pack.inputs,
+            [
+                named("rain", 1, [0.5, 0.0, 0.0, 0.0]),
+                named("wind", 2, [1.0, 2.0, 0.0, 0.0]),
+            ]
+        );
+        // The file does not exist yet, so the channel starts empty.
+        let cover = &pack.textures[0];
+        assert!(cover.watch && cover.modified.is_none());
+        assert_eq!((cover.width, cover.height), (1, 1));
+
+        // When a command writes the file, a reload finds it.
+        let rgba = vec![255; 3 * 2 * 4];
+        image::save_buffer(
+            dir.0.join("cover.png"),
+            &rgba,
+            3,
+            2,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+        let mut pack = pack;
+        pack.reload_watched();
+        let cover = &pack.textures[0];
+        assert!(cover.watch && cover.modified.is_some());
+        assert_eq!((cover.width, cover.height), (3, 2));
+    }
+
+    #[test]
     fn rejects_invalid_manifests() {
         let cases = [
             ("fps = -1\n[image]\nshader = \"i.glsl\"", "fps"),
@@ -714,6 +885,26 @@ mod tests {
             (
                 "[[buffer]]\nname = \"a\"\nshader = \"i.glsl\"\nformat = \"rgb565\"\n[image]\nshader = \"i.glsl\"",
                 "unknown format",
+            ),
+            (
+                "[[buffer]]\nname = \"a\"\nshader = \"i.glsl\"\n[image]\nshader = \"i.glsl\"\nchannels = [{ buffer = \"a\", watch = true }]",
+                "only for textures",
+            ),
+            (
+                "[image]\nshader = \"i.glsl\"\n[inputs]\n2d = 1.0",
+                "not a GLSL name",
+            ),
+            (
+                "[image]\nshader = \"i.glsl\"\n[inputs]\ngl_rain = 1.0",
+                "not a GLSL name",
+            ),
+            (
+                "[image]\nshader = \"i.glsl\"\n[inputs]\nrain = \"heavy\"",
+                "a number or a list",
+            ),
+            (
+                "[image]\nshader = \"i.glsl\"\n[inputs]\nrain = [1, 2, 3, 4, 5]",
+                "Use 1 to 4",
             ),
         ];
         for (i, (manifest, expected)) in cases.iter().enumerate() {

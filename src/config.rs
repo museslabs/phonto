@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use serde::Deserialize;
 
 const DEFAULT_CONFIG: &str = "\
@@ -33,6 +33,23 @@ const DEFAULT_CONFIG: &str = "\
 # [[display]]
 # id = \"laptop\"
 # random = true
+#
+# location: where you are, for the sunrise and sunset that procedural
+# wallpapers get in iSun. Degrees, with north and east positive. phonto does
+# not send it anywhere.
+#
+# [location]
+# latitude = 37.98
+# longitude = 23.73
+#
+# input: a command that gives procedural wallpapers a value. phonto runs it
+# with sh every `every` seconds, while a wallpaper that reads the input plays.
+# The command prints one to four numbers. The wallpaper reads iInput.<name>.
+#
+# [[input]]
+# name = \"workspace\"
+# command = \"hyprctl activeworkspace -j | jq .id\"
+# every = 1
 ";
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +78,25 @@ pub struct Display {
     pub random: bool,
 }
 
+/// A place on Earth, in degrees. North and east are positive.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Location {
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+/// A command that gives procedural wallpapers the value of an input.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputCommand {
+    pub name: String,
+    /// A shell command that prints one to four numbers.
+    pub command: String,
+    /// Seconds between two runs.
+    pub every: f64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -69,6 +105,10 @@ pub struct Config {
     pub alias: Vec<Alias>,
     #[serde(default)]
     pub display: Vec<Display>,
+    #[serde(default)]
+    pub location: Option<Location>,
+    #[serde(default, rename = "input")]
+    pub inputs: Vec<InputCommand>,
 }
 
 fn config_path() -> PathBuf {
@@ -147,5 +187,38 @@ pub fn load() -> anyhow::Result<Config> {
     }
     let contents = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read config from {}", path.display()))?;
-    toml::from_str(&contents).with_context(|| "failed to parse config")
+    parse(&contents)
+}
+
+fn parse(contents: &str) -> anyhow::Result<Config> {
+    let config: Config = toml::from_str(contents).with_context(|| "failed to parse config")?;
+    for input in &config.inputs {
+        if !(input.every.is_finite() && input.every > 0.0) {
+            bail!(
+                "[[input]] `{}`: `every` must be a number of seconds above 0 (got {})",
+                input.name,
+                input.every
+            );
+        }
+    }
+    Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_intervals_must_be_finite_and_positive() {
+        let config = |every: &str| {
+            parse(&format!(
+                "[[input]]\nname = \"cpu\"\ncommand = \"echo 1\"\nevery = {every}\n"
+            ))
+        };
+        assert_eq!(config("2.5").unwrap().inputs[0].every, 2.5);
+        for bad in ["inf", "nan", "0", "-1"] {
+            let err = format!("{:#}", config(bad).unwrap_err());
+            assert!(err.contains("`every` must be"), "{bad}: {err}");
+        }
+    }
 }

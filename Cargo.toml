@@ -29,6 +29,7 @@ gstreamer-app = "0.24"
 gstreamer-video = "0.24"
 gstreamer-gl = "0.24"
 gstreamer-gl-egl = "0.24"
+gio = "0.21"
 wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols-wlr = { version = "0.2", features = ["client"] }
 # cursor-shape-v1 is a staging protocol, gated on both features.

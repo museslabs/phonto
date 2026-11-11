@@ -1,10 +1,12 @@
 //! The inputs of each frame, for every backend: the playback clock, the
-//! frame-rate cap, the date, and the pointer. `super::audio` makes the audio
-//! levels.
+//! frame-rate cap, the date, the location, and the pointer. `super::audio`
+//! makes the audio levels.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::audio::AudioFrame;
+use super::pack::MAX_INPUTS;
+use crate::config::Location;
 
 /// The largest step of `iTime` in one frame. A longer gap is a pause, for
 /// example a battery pause or a hidden wallpaper. Time stops for a pause and
@@ -16,6 +18,9 @@ const MAX_TIME_DELTA: f64 = 0.25;
 /// holds a week of seconds has a resolution of only 1/16 s, and animation
 /// then stutters.
 const TIME_WRAP: f64 = 24.0 * 60.0 * 60.0;
+
+/// The most displays that `iDisplays` describes.
+pub const MAX_DISPLAYS: usize = 8;
 
 /// The Linux evdev code of the left mouse button, as `wl_pointer` reports it.
 /// Other backends use this code for their left button.
@@ -31,6 +36,20 @@ pub struct FrameInputs {
     pub mouse: [f32; 4],
     pub pointer: [f32; 4],
     pub audio: AudioFrame,
+    /// 0 if the system prefers light colors, 1 if it prefers dark colors.
+    pub color_scheme: f32,
+    /// The charge from 0 to 1, 1 while charging, 1 on AC power, and 1 if the
+    /// system has a battery.
+    pub battery: [f32; 4],
+    /// See `location`.
+    pub location: [f32; 4],
+    /// The values of `Pack::inputs`, in the same order.
+    pub inputs: [[f32; 4]; MAX_INPUTS],
+    /// The place of each display in the image: x, y, width, and height, in
+    /// the pixels of the image pass, from the bottom left. A wallpaper that
+    /// does not span has one display, the whole image.
+    pub displays: [[f32; 4]; MAX_DISPLAYS],
+    pub display_count: i32,
 }
 
 /// Playback time. It advances only while frames are drawn.
@@ -124,25 +143,45 @@ impl FrameLimiter {
 /// `iDate` as on Shadertoy: year, month (0-11), day of the month (1-31), and
 /// seconds since local midnight.
 pub fn local_date(now: SystemTime) -> [f32; 4] {
-    let since_epoch = now.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let Ok(secs) = libc::time_t::try_from(since_epoch.as_secs()) else {
+    let Some((tm, nanos)) = local_time(now) else {
         return [0.0; 4];
     };
+    let day_secs = tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec;
+    [
+        (tm.tm_year + 1900) as f32,
+        tm.tm_mon as f32,
+        tm.tm_mday as f32,
+        day_secs as f32 + nanos as f32 / 1e9,
+    ]
+}
+
+/// `iLocation`. x and y are the latitude and the longitude, in degrees. z is
+/// the offset of the local time from UTC, in hours. w is 1 if the user set a
+/// location. With the date and the time, a shader can compute the sun.
+///
+/// Without a location, it is the equator at the middle of the local time
+/// zone. The sun there rises near 06:00 and sets near 18:00.
+pub fn location(now: SystemTime, place: Option<Location>) -> [f32; 4] {
+    let offset = local_time(now).map_or(0.0, |(tm, _)| tm.tm_gmtoff as f64 / 3600.0);
+    match place {
+        Some(p) => [p.latitude as f32, p.longitude as f32, offset as f32, 1.0],
+        None => [0.0, (offset * 15.0) as f32, offset as f32, 0.0],
+    }
+}
+
+/// The local calendar time of `now`, and the nanoseconds of its second.
+fn local_time(now: SystemTime) -> Option<(libc::tm, u32)> {
+    let since_epoch = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = libc::time_t::try_from(since_epoch.as_secs()).ok()?;
     // SAFETY: `tm` is plain data, so a zeroed value is valid. We read it only
     // after localtime_r succeeds.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     // SAFETY: Both pointers are valid during the call. localtime_r does not
     // use shared static state, unlike localtime.
     if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
-        return [0.0; 4];
+        return None;
     }
-    let day_secs = tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec;
-    [
-        (tm.tm_year + 1900) as f32,
-        tm.tm_mon as f32,
-        tm.tm_mday as f32,
-        day_secs as f32 + since_epoch.subsec_nanos() as f32 / 1e9,
-    ]
+    Some((tm, since_epoch.subsec_nanos()))
 }
 
 /// The pointer state of one output, in surface coordinates with the origin
@@ -194,18 +233,20 @@ impl Pointer {
         }
     }
 
-    /// `(iMouse, iPointer)` for the next frame, scaled from the size of the
-    /// surface to the size of the render target.
+    /// `(iMouse, iPointer)` for the next frame. `area` is the part of the
+    /// surface coordinates that the render target shows: x, y, width, and
+    /// height. A spanned wallpaper shows the whole desktop.
     ///
     /// `iMouse` is the same as on Shadertoy. `xy` is the drag position and
     /// `zw` is the click position. `z` is positive while the button is held.
     /// `w` is positive only on the first frame after a press. `iPointer` is
     /// `(x, y, 1 over the wallpaper, 1 while pressed)`.
-    pub fn uniforms(&mut self, surface: (u32, u32), target: (u32, u32)) -> ([f32; 4], [f32; 4]) {
-        let sx = f64::from(target.0) / f64::from(surface.0.max(1));
-        let sy = f64::from(target.1) / f64::from(surface.1.max(1));
+    pub fn uniforms(&mut self, area: [f64; 4], target: (u32, u32)) -> ([f32; 4], [f32; 4]) {
+        let [left, top, width, height] = area;
+        let sx = f64::from(target.0) / width.max(1.0);
+        let sy = f64::from(target.1) / height.max(1.0);
         let to_target =
-            |[x, y]: [f64; 2]| [(x * sx) as f32, ((f64::from(surface.1) - y) * sy) as f32];
+            |[x, y]: [f64; 2]| [((x - left) * sx) as f32, ((top + height - y) * sy) as f32];
 
         let mouse = if self.ever_clicked {
             let [dx, dy] = to_target(self.drag);
@@ -297,46 +338,61 @@ mod tests {
         assert_eq!(uncapped.next_frame(), None);
     }
 
+    /// The area of a whole surface of `w` x `h`.
+    fn whole((w, h): (u32, u32)) -> [f64; 4] {
+        [0.0, 0.0, f64::from(w), f64::from(h)]
+    }
+
     #[test]
     fn mouse_follows_shadertoy_semantics() {
         let surface = (100, 50);
         let mut p = Pointer::default();
         p.enter(10.0, 5.0);
-        let (mouse, pointer) = p.uniforms(surface, surface);
+        let (mouse, pointer) = p.uniforms(whole(surface), surface);
         assert_eq!(mouse, [0.0; 4], "no click yet");
         assert_eq!(pointer, [10.0, 45.0, 1.0, 0.0]);
 
         p.button(BTN_LEFT, true);
         p.motion(20.0, 10.0);
-        let (mouse, _) = p.uniforms(surface, surface);
+        let (mouse, _) = p.uniforms(whole(surface), surface);
         assert_eq!(mouse, [20.0, 40.0, 10.0, 45.0], "first frame: z, w > 0");
-        let (mouse, pointer) = p.uniforms(surface, surface);
+        let (mouse, pointer) = p.uniforms(whole(surface), surface);
         assert_eq!(mouse, [20.0, 40.0, 10.0, -45.0], "held: z > 0, w < 0");
         assert_eq!(pointer[3], 1.0);
 
         p.button(BTN_LEFT, false);
         p.motion(30.0, 10.0);
-        let (mouse, pointer) = p.uniforms(surface, surface);
+        let (mouse, pointer) = p.uniforms(whole(surface), surface);
         assert_eq!(mouse, [20.0, 40.0, -10.0, -45.0], "released: drag stays");
         assert_eq!(pointer, [30.0, 40.0, 1.0, 0.0]);
 
         p.leave();
-        assert_eq!(p.uniforms(surface, surface).1[2], 0.0);
+        assert_eq!(p.uniforms(whole(surface), surface).1[2], 0.0);
     }
 
     #[test]
     fn pointer_scales_to_render_target() {
         let mut p = Pointer::default();
         p.enter(50.0, 0.0);
-        let (_, pointer) = p.uniforms((100, 50), (50, 25));
+        let (_, pointer) = p.uniforms(whole((100, 50)), (50, 25));
         assert_eq!(&pointer[..2], &[25.0, 25.0]);
+    }
+
+    #[test]
+    fn pointer_maps_into_a_desktop_area() {
+        // The desktop starts at x = -100 and is 300 x 100. A target of half
+        // that size shows it.
+        let mut p = Pointer::default();
+        p.enter(50.0, 20.0);
+        let (_, pointer) = p.uniforms([-100.0, 0.0, 300.0, 100.0], (150, 50));
+        assert_eq!(&pointer[..2], &[75.0, 40.0]);
     }
 
     #[test]
     fn other_buttons_are_ignored() {
         let mut p = Pointer::default();
         p.button(0x111, true);
-        assert_eq!(p.uniforms((10, 10), (10, 10)).0, [0.0; 4]);
+        assert_eq!(p.uniforms(whole((10, 10)), (10, 10)).0, [0.0; 4]);
     }
 
     #[test]
@@ -346,5 +402,20 @@ mod tests {
         assert!((0.0..12.0).contains(&month));
         assert!((1.0..=31.0).contains(&day));
         assert!((0.0..86_401.0).contains(&secs));
+    }
+
+    #[test]
+    fn location_has_the_time_zone() {
+        let now = SystemTime::now();
+        let athens = Location {
+            latitude: 37.98,
+            longitude: 23.73,
+        };
+        let [lat, lon, offset, set] = location(now, Some(athens));
+        assert_eq!([lat, lon, set], [37.98, 23.73, 1.0]);
+        assert!((-12.0..=14.0).contains(&offset));
+        // Without a location, the place is on the equator, at the middle of
+        // the time zone.
+        assert_eq!(location(now, None), [0.0, offset * 15.0, offset, 0.0]);
     }
 }

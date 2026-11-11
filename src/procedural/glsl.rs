@@ -6,9 +6,11 @@
 
 use std::fmt::Write;
 
+use super::pack::NamedInput;
+
 /// The declarations that each pass gets. The names and meanings are the same
-/// as on Shadertoy. phonto adds `iImageResolution`, `iPointer`, `iAudio`,
-/// `iSpectrum`, `iChroma`, and `iChannel4` to `iChannel7`.
+/// as on Shadertoy. phonto adds `iImageResolution`, `iPointer`, the audio
+/// inputs, the system inputs, and `iChannel4` to `iChannel7`.
 const HEADER: &str = "#version 300 es
 precision highp float;
 precision highp int;
@@ -37,6 +39,11 @@ uniform vec4 iPointer;              // xy = position, z = 1 over the wallpaper, 
 uniform vec4 iAudio;                // bass, midrange, treble, overall volume, all in 0..1
 uniform float iSpectrum[32];        // logarithmic bands from 40 Hz to 11 kHz, in 0..1
 uniform float iChroma[12];          // strength of each note name, C to B, in 0..1
+uniform float iColorScheme;         // 0 = the system prefers light colors, 1 = dark
+uniform vec4 iBattery;              // charge 0..1, 1 charging, 1 on AC power, 1 with a battery
+uniform vec4 iLocation;             // latitude, longitude, UTC offset in hours, 1 if set
+uniform vec4 iDisplays[8];          // x, y, width, height of each display, in pixels of the image pass
+uniform int iDisplayCount;          // 1 unless the wallpaper spans several displays
 
 out vec4 phonto_FragColor;
 ";
@@ -55,9 +62,24 @@ pub enum PassKind {
     Image,
 }
 
-pub fn fragment_shader(common: Option<&str>, code: &str, kind: PassKind) -> String {
+pub fn fragment_shader(
+    common: Option<&str>,
+    code: &str,
+    kind: PassKind,
+    inputs: &[NamedInput],
+) -> String {
     let mut s = String::with_capacity(HEADER.len() + common.map_or(0, str::len) + code.len() + 256);
     s.push_str(HEADER);
+    // The inputs of the pack are the fields of one uniform, so their names
+    // do not collide with the names in the shader.
+    if !inputs.is_empty() {
+        s.push_str("struct phonto_Inputs {\n");
+        for input in inputs {
+            let kind = ["float", "vec2", "vec3", "vec4"][input.size - 1];
+            let _ = writeln!(s, "    {kind} {};", input.name);
+        }
+        s.push_str("};\nuniform phonto_Inputs iInput;\n");
+    }
     if let Some(common) = common {
         let _ = writeln!(s, "#line 1 {COMMON_SOURCE}");
         s.push_str(&strip_version(common));
@@ -113,6 +135,7 @@ mod tests {
             Some("float helper() { return 1.0; }"),
             "void mainImage(out vec4 c, in vec2 p) { c = vec4(helper()); }",
             PassKind::Buffer,
+            &[],
         );
         assert!(src.starts_with("#version 300 es\n"));
         let common = src.find("#line 1 1\nfloat helper").unwrap();
@@ -132,10 +155,43 @@ mod tests {
     }
 
     #[test]
-    fn header_declares_the_audio_arrays() {
+    fn inputs_are_fields_of_one_uniform() {
+        let inputs = [
+            NamedInput {
+                name: "rain".into(),
+                size: 1,
+                default: [0.0; 4],
+            },
+            NamedInput {
+                name: "wind".into(),
+                size: 2,
+                default: [0.0; 4],
+            },
+        ];
+        let src = fragment_shader(
+            None,
+            "void mainImage(out vec4 c, in vec2 p) {}",
+            PassKind::Image,
+            &inputs,
+        );
+        assert!(src.contains("struct phonto_Inputs {\n    float rain;\n    vec2 wind;\n};"));
+        assert!(src.contains("uniform phonto_Inputs iInput;"));
+        let plain = fragment_shader(
+            None,
+            "void mainImage(out vec4 c, in vec2 p) {}",
+            PassKind::Image,
+            &[],
+        );
+        assert!(!plain.contains("iInput"));
+    }
+
+    #[test]
+    fn header_declares_the_arrays_at_their_sizes() {
         use super::super::audio::{NOTE_NAMES, SPECTRUM_BANDS};
+        use super::super::inputs::MAX_DISPLAYS;
         assert!(HEADER.contains(&format!("uniform float iSpectrum[{SPECTRUM_BANDS}];")));
         assert!(HEADER.contains(&format!("uniform float iChroma[{NOTE_NAMES}];")));
+        assert!(HEADER.contains(&format!("uniform vec4 iDisplays[{MAX_DISPLAYS}];")));
     }
 
     #[test]
@@ -144,6 +200,7 @@ mod tests {
             None,
             "void mainImage(out vec4 c, in vec2 p) {}",
             PassKind::Image,
+            &[],
         );
         assert!(src.contains("phonto_FragColor.a = 1.0;"));
         assert!(!src.contains("#line 1 1"));
@@ -155,6 +212,7 @@ mod tests {
             None,
             "#version 300 es\nvoid mainImage(out vec4 c, in vec2 p) {}",
             PassKind::Image,
+            &[],
         );
         assert_eq!(src.matches("#version").count(), 1);
         assert!(src.contains("#line 1 0\n\nvoid mainImage"));
