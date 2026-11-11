@@ -88,6 +88,15 @@ impl ScreenObserver {
                 // it until it's ordered front again.
                 surface.window.makeKeyAndOrderFront(None);
                 surface.name = name;
+                // Play what the screen is now assigned, as a restart would.
+                // With no assignment it keeps its video.
+                if let AttachPolicy::PerDisplay(map) = &self.ivars().policy
+                    && let Some(player) = map.get(&surface.name)
+                    && unsafe { surface.layer.player(mtm) }.as_ref() != Some(player)
+                {
+                    unsafe { surface.layer.setPlayer(Some(&**player)) };
+                    log::info!("switched video on renamed display: {}", surface.name);
+                }
             }
             log::info!(
                 "display reconfigured: {} -> {}x{} @ {}x",
