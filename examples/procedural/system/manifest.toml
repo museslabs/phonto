@@ -1,0 +1,34 @@
+# The load of your computer as an orrery. Three planets go around faster when
+# the load of the last 1, 5, and 15 minutes is higher for each core. The outer
+# ring shows how full the disk is. The colors follow the light or dark mode
+# of your desktop.
+#
+# The values come from the commands in inputs.toml. Add them to your phonto
+# configuration first. They work on Linux and on macOS.
+#
+#   cat examples/procedural/system/inputs.toml >> ~/.config/phonto/config.toml
+#   phonto examples/procedural/system
+
+name = "System"
+fps = 30
+
+# The angle of each planet, and its smoothed load (see orbits.glsl).
+[[buffer]]
+name = "orbits"
+shader = "orbits.glsl"
+size = [3, 1]
+format = "rgba32f"
+channels = [{ buffer = "orbits", filter = "nearest" }]
+
+[image]
+shader = "image.glsl"
+channels = [
+    { texture = "labels.png", filter = "mipmap", wrap = "clamp" },
+    { buffer = "orbits", filter = "nearest" },
+]
+
+# The defaults show that no command gave a value yet.
+[inputs]
+load = [0.0, 0.0, 0.0]
+cores = 0.0
+disk = 0.0

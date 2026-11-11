@@ -1,0 +1,23 @@
+# The cover of the music that plays, on a background of its own colors. A
+# line under the cover shows how far the track is, and the cover breathes
+# with the bass. The pack shows how to use a live image and an input
+# command together.
+#
+# Set it up first. It needs playerctl, so it works on Linux:
+#
+#   cp examples/procedural/album/now-playing.sh ~/.config/phonto/
+#   cat examples/procedural/album/inputs.toml >> ~/.config/phonto/config.toml
+#   phonto examples/procedural/album
+
+name = "Album"
+fps = 30
+audio = true
+
+[image]
+shader = "image.glsl"
+# now-playing.sh writes the cover here. Mipmaps make the blurred background.
+channels = [{ texture = "~/.cache/phonto/cover", watch = true, wrap = "clamp" }]
+
+# 1 while music plays, and how far the track is, from 0 to 1.
+[inputs]
+track = [0.0, 0.0]

@@ -1,0 +1,14 @@
+# The command of examples/procedural/album. Copy the script, and add this
+# command to your phonto configuration:
+#
+#   cp examples/procedural/album/now-playing.sh ~/.config/phonto/
+#   cat examples/procedural/album/inputs.toml >> ~/.config/phonto/config.toml
+#
+# It needs playerctl, so it works on Linux.
+
+# 1 while music plays, and how far the track is. The script also keeps the
+# cover of the track in ~/.cache/phonto/cover.
+[[input]]
+name = "track"
+command = "sh ~/.config/phonto/now-playing.sh"
+every = 1
