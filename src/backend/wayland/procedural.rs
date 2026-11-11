@@ -64,6 +64,9 @@ struct Uniforms {
     channel_time: Option<glow::UniformLocation>,
     channel_resolution: Option<glow::UniformLocation>,
     pointer: Option<glow::UniformLocation>,
+    audio: Option<glow::UniformLocation>,
+    spectrum: Option<glow::UniformLocation>,
+    chroma: Option<glow::UniformLocation>,
 }
 
 struct UploadedTexture {
@@ -176,6 +179,9 @@ impl Program {
                 channel_time: loc("iChannelTime"),
                 channel_resolution: loc("iChannelResolution"),
                 pointer: loc("iPointer"),
+                audio: loc("iAudio"),
+                spectrum: loc("iSpectrum"),
+                chroma: loc("iChroma"),
             }
         };
 
@@ -369,6 +375,10 @@ impl Program {
             gl.uniform_4_f32(u.date.as_ref(), x, y, z, w);
             let [x, y, z, w] = inputs.pointer;
             gl.uniform_4_f32(u.pointer.as_ref(), x, y, z, w);
+            let [bass, mid, treble, volume] = inputs.audio.levels;
+            gl.uniform_4_f32(u.audio.as_ref(), bass, mid, treble, volume);
+            gl.uniform_1_f32_slice(u.spectrum.as_ref(), &inputs.audio.spectrum);
+            gl.uniform_1_f32_slice(u.chroma.as_ref(), &inputs.audio.chroma);
             gl.uniform_1_f32(u.sample_rate.as_ref(), 44_100.0);
             gl.uniform_1_f32_slice(u.channel_time.as_ref(), &[inputs.time; MAX_CHANNELS]);
 

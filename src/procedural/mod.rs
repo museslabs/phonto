@@ -6,19 +6,21 @@
 //! `mainImage`, `iTime`, `iMouse`, `iChannel0`.
 //!
 //! This module does not depend on the platform. It loads packs, builds the
-//! shader source, and keeps the clock and the pointer state. Each backend
-//! does the drawing.
+//! shader source, keeps the clock and the pointer state, and turns audio
+//! samples into levels. Each backend does the drawing and the audio capture.
 
 // Only the Wayland backend draws procedural wallpapers at this time. The
 // macOS backend only uses `is_procedural`, to reject them.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
+mod audio;
 mod glsl;
 mod inputs;
 mod pack;
 
 use std::path::Path;
 
+pub use audio::{Analyzer, AudioFrame, SAMPLE_RATE};
 pub use glsl::{PassKind, fragment_shader, source_ids_help};
 pub use inputs::{Clock, FrameInputs, FrameLimiter, Pointer, local_date};
 pub use pack::{

@@ -1,7 +1,10 @@
 //! The inputs of each frame, for every backend: the playback clock, the
-//! frame-rate cap, the date, and the pointer.
+//! frame-rate cap, the date, and the pointer. `super::audio` makes the audio
+//! levels.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use super::audio::AudioFrame;
 
 /// The largest step of `iTime` in one frame. A longer gap is a pause, for
 /// example a battery pause or a hidden wallpaper. Time stops for a pause and
@@ -27,6 +30,7 @@ pub struct FrameInputs {
     pub date: [f32; 4],
     pub mouse: [f32; 4],
     pub pointer: [f32; 4],
+    pub audio: AudioFrame,
 }
 
 /// Playback time. It advances only while frames are drawn.
