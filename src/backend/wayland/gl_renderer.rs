@@ -24,6 +24,9 @@ use crate::scale::ScaleMode;
 /// Every program binds `a_pos` here, so all programs share one quad.
 const POSITION_ATTRIB: u32 = 0;
 
+/// A crop that shows the whole texture.
+const WHOLE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
 pub struct GlRenderer {
     gl: glow::Context,
     egl_display: usize,
@@ -35,6 +38,8 @@ pub struct GlRenderer {
     scale_loc: glow::UniformLocation,
     /// `None` if a custom `--shader` does not read `v_uv`.
     flip_y_loc: Option<glow::UniformLocation>,
+    /// `None` if a custom `--shader` does not read `v_uv`.
+    crop_loc: Option<glow::UniformLocation>,
     resolution_loc: Option<glow::UniformLocation>,
     surfaces: Vec<Option<RenderSurface>>,
 }
@@ -72,11 +77,13 @@ impl GlRenderer {
     const VERTEX_SHADER: &str = r#"#version 300 es
         uniform vec2 u_scale;
         uniform float u_flip_y;
+        // The part of the texture to draw: x, y, width, height, from the top left.
+        uniform vec4 u_crop;
         layout(location = 0) in vec2 a_pos;
         out vec2 v_uv;
         void main() {
-            float v = 0.5 - a_pos.y * 0.5;
-            v_uv = vec2(a_pos.x * 0.5 + 0.5, mix(v, 1.0 - v, u_flip_y));
+            vec2 uv = u_crop.xy + vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5) * u_crop.zw;
+            v_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, u_flip_y));
             gl_Position = vec4(a_pos * u_scale, 0.0, 1.0);
         }
     "#;
@@ -122,7 +129,7 @@ impl GlRenderer {
 
         let frag_src = fragment_src.unwrap_or(Self::FRAGMENT_SHADER);
 
-        let (program, scale_loc, flip_y_loc, resolution_loc) = unsafe {
+        let (program, scale_loc, flip_y_loc, crop_loc, resolution_loc) = unsafe {
             let vertex = Self::compile_shader(&gl, glow::VERTEX_SHADER, Self::VERTEX_SHADER)?;
             let fragment = Self::compile_shader(&gl, glow::FRAGMENT_SHADER, frag_src)?;
             let program = Self::link_program(&gl, vertex, fragment)?;
@@ -143,6 +150,7 @@ impl GlRenderer {
             // It only changes v_uv. If a post-processing shader ignores v_uv,
             // the linker removes it.
             let flip_y_loc = gl.get_uniform_location(program, "u_flip_y");
+            let crop_loc = gl.get_uniform_location(program, "u_crop");
 
             let resolution_loc = gl.get_uniform_location(program, "u_resolution");
             if let Some(ref loc) = resolution_loc {
@@ -163,7 +171,7 @@ impl GlRenderer {
             // Black clear so letterbox bars stay black under Fit/Center.
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
 
-            (program, scale_loc, flip_y_loc, resolution_loc)
+            (program, scale_loc, flip_y_loc, crop_loc, resolution_loc)
         };
 
         Ok(Self {
@@ -176,6 +184,7 @@ impl GlRenderer {
             program,
             scale_loc,
             flip_y_loc,
+            crop_loc,
             resolution_loc,
             surfaces: vec![Some(RenderSurface {
                 surface: gl_surface,
@@ -254,15 +263,37 @@ impl GlRenderer {
     /// post-processing shader if there is one. Then swaps the buffers.
     pub fn present(&self, idx: usize, texture: TextureRef, mode: ScaleMode) -> anyhow::Result<()> {
         let s = self.surfaces[idx].as_ref().expect("live render surface");
+        let scale = Self::scale_for(mode, s.dims, (texture.width, texture.height));
+        self.draw_to_surface(idx, texture, scale, WHOLE)
+    }
+
+    /// Draws the part `crop` of `texture` to fill surface `idx`. `crop` is x,
+    /// y, width, and height, as fractions of the texture from the top left.
+    /// A wallpaper that spans the desktop shows one part on each output.
+    pub fn present_part(
+        &self,
+        idx: usize,
+        texture: TextureRef,
+        crop: [f32; 4],
+    ) -> anyhow::Result<()> {
+        self.draw_to_surface(idx, texture, (1.0, 1.0), crop)
+    }
+
+    fn draw_to_surface(
+        &self,
+        idx: usize,
+        texture: TextureRef,
+        scale: (f32, f32),
+        crop: [f32; 4],
+    ) -> anyhow::Result<()> {
+        let s = self.surfaces[idx].as_ref().expect("live render surface");
         self.context
             .make_current(&s.surface)
             .context("make-current glutin context")?;
-
-        let scale = Self::scale_for(mode, s.dims, (texture.width, texture.height));
         unsafe {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
-        self.draw_texture(texture, s.dims, scale);
+        self.draw_texture(texture, s.dims, scale, crop);
 
         s.surface
             .swap_buffers(&self.context)
@@ -347,7 +378,7 @@ impl GlRenderer {
                 }
             }
 
-            self.draw_texture(texture, (width, height), (1.0, 1.0));
+            self.draw_texture(texture, (width, height), (1.0, 1.0), WHOLE);
 
             let mut bottom_up = vec![0u8; width as usize * height as usize * 4];
             unsafe {
@@ -379,12 +410,19 @@ impl GlRenderer {
     /// Draws `texture` into the bound framebuffer. It binds all the state that
     /// it uses, because the procedural passes share the context and change
     /// that state.
-    fn draw_texture(&self, texture: TextureRef, (width, height): (u32, u32), scale: (f32, f32)) {
+    fn draw_texture(
+        &self,
+        texture: TextureRef,
+        (width, height): (u32, u32),
+        scale: (f32, f32),
+        [x, y, w, h]: [f32; 4],
+    ) {
         unsafe {
             self.gl.use_program(Some(self.program));
             self.gl.viewport(0, 0, width as i32, height as i32);
             self.gl
                 .uniform_2_f32(Some(&self.scale_loc), scale.0, scale.1);
+            self.gl.uniform_4_f32(self.crop_loc.as_ref(), x, y, w, h);
             self.gl.uniform_1_f32(
                 self.flip_y_loc.as_ref(),
                 if texture.flip_y { 1.0 } else { 0.0 },

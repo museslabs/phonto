@@ -67,6 +67,13 @@ struct Uniforms {
     audio: Option<glow::UniformLocation>,
     spectrum: Option<glow::UniformLocation>,
     chroma: Option<glow::UniformLocation>,
+    color_scheme: Option<glow::UniformLocation>,
+    battery: Option<glow::UniformLocation>,
+    location: Option<glow::UniformLocation>,
+    displays: Option<glow::UniformLocation>,
+    display_count: Option<glow::UniformLocation>,
+    /// `iInput.<name>` for each input of the pack, and its size.
+    inputs: Vec<(Option<glow::UniformLocation>, usize)>,
 }
 
 struct UploadedTexture {
@@ -145,8 +152,12 @@ impl Program {
         kind: PassKind,
     ) -> anyhow::Result<CompiledPass> {
         let common = pack.common.as_ref();
-        let source =
-            procedural::fragment_shader(common.map(|c| c.code.as_str()), &pass.source.code, kind);
+        let source = procedural::fragment_shader(
+            common.map(|c| c.code.as_str()),
+            &pass.source.code,
+            kind,
+            &pack.inputs,
+        );
         let program = link(gl, &source).with_context(|| {
             format!(
                 "compile pass `{}` ({})",
@@ -182,6 +193,16 @@ impl Program {
                 audio: loc("iAudio"),
                 spectrum: loc("iSpectrum"),
                 chroma: loc("iChroma"),
+                color_scheme: loc("iColorScheme"),
+                battery: loc("iBattery"),
+                location: loc("iLocation"),
+                displays: loc("iDisplays"),
+                display_count: loc("iDisplayCount"),
+                inputs: pack
+                    .inputs
+                    .iter()
+                    .map(|i| (loc(&format!("iInput.{}", i.name)), i.size))
+                    .collect(),
             }
         };
 
@@ -379,6 +400,21 @@ impl Program {
             gl.uniform_4_f32(u.audio.as_ref(), bass, mid, treble, volume);
             gl.uniform_1_f32_slice(u.spectrum.as_ref(), &inputs.audio.spectrum);
             gl.uniform_1_f32_slice(u.chroma.as_ref(), &inputs.audio.chroma);
+            gl.uniform_1_f32(u.color_scheme.as_ref(), inputs.color_scheme);
+            let [x, y, z, w] = inputs.battery;
+            gl.uniform_4_f32(u.battery.as_ref(), x, y, z, w);
+            let [x, y, z, w] = inputs.location;
+            gl.uniform_4_f32(u.location.as_ref(), x, y, z, w);
+            gl.uniform_4_f32_slice(u.displays.as_ref(), inputs.displays.as_flattened());
+            gl.uniform_1_i32(u.display_count.as_ref(), inputs.display_count);
+            for ((loc, size), [x, y, z, w]) in u.inputs.iter().zip(inputs.inputs) {
+                match size {
+                    1 => gl.uniform_1_f32(loc.as_ref(), x),
+                    2 => gl.uniform_2_f32(loc.as_ref(), x, y),
+                    3 => gl.uniform_3_f32(loc.as_ref(), x, y, z),
+                    _ => gl.uniform_4_f32(loc.as_ref(), x, y, z, w),
+                }
+            }
             gl.uniform_1_f32(u.sample_rate.as_ref(), 44_100.0);
             gl.uniform_1_f32_slice(u.channel_time.as_ref(), &[inputs.time; MAX_CHANNELS]);
 
@@ -409,6 +445,21 @@ impl Program {
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
+    }
+
+    /// Replaces texture `index` with a new image of a watched file. The
+    /// context must be current. If the upload fails, the old image stays.
+    pub fn replace_texture(
+        &mut self,
+        gl: &glow::Context,
+        index: usize,
+        texture: &Texture,
+    ) -> anyhow::Result<()> {
+        let max_size = unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) }.max(0) as u32;
+        let new = upload_texture(gl, texture, max_size)?;
+        let old = std::mem::replace(&mut self.textures[index], new);
+        unsafe { gl.delete_texture(old.texture) };
+        Ok(())
     }
 
     /// Frees the GL objects. The context must be current.

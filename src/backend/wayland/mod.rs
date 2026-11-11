@@ -1,5 +1,6 @@
 mod audio;
 mod battery_observer;
+mod color_scheme;
 mod decoder;
 mod gl_renderer;
 mod procedural;
@@ -7,7 +8,7 @@ mod procedural;
 use std::{
     collections::HashMap,
     path::Path,
-    sync::mpsc,
+    sync::{atomic::Ordering, mpsc},
     time::{Instant, SystemTime},
 };
 
@@ -24,13 +25,19 @@ use wayland_client::{
 use wayland_protocols::wp::cursor_shape::v1::client::{
     wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1,
 };
+use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
+use self::battery_observer::Battery;
 use self::gl_renderer::{GlRenderer, TextureRef};
 use super::{Backend, DumpRequest, PauseMode, RunOptions};
+use crate::config::InputCommand;
 use crate::displays::DisplayInfo;
 use crate::plan::Playback;
-use crate::procedural::{AudioFrame, Clock, FrameInputs, FrameLimiter, Pack, Pointer, local_date};
+use crate::procedural::{
+    AudioFrame, Clock, CommandInputs, FrameInputs, FrameLimiter, MAX_DISPLAYS, Pack, Pointer,
+    TextureWatcher, local_date, location, read_inputs_once,
+};
 use crate::scale::ScaleMode;
 use clap::ValueEnum;
 
@@ -80,7 +87,11 @@ const UNCAPPED_DUMP_FPS: f64 = 60.0;
 
 impl WaylandBackend {
     fn dump_procedural(self, request: DumpRequest) -> anyhow::Result<()> {
-        let pack = Pack::load(Path::new(&request.path))?;
+        let mut pack = Pack::load(Path::new(&request.path))?;
+        // An input command can write an image that the pack watches, so the
+        // commands run first. Then the watched images load again.
+        let user_inputs = read_inputs_once(&pack.inputs, &request.inputs);
+        pack.reload_watched();
         let compositor = self
             .state
             .compositor
@@ -94,10 +105,24 @@ impl WaylandBackend {
         let (width, height) = request.size.unwrap_or(DEFAULT_DUMP_SIZE);
 
         let result = (|| {
-            let mut target = program.create_target(gl, program.target_dims((width, height)))?;
+            let dims = program.target_dims((width, height));
+            let mut target = program.create_target(gl, dims)?;
+            let whole = [0, 0, width as i32, height as i32];
+            let (displays, display_count) = display_rects(whole, &[whole], dims);
             let fps = pack.fps.map_or(UNCAPPED_DUMP_FPS, f64::from);
             let frames = (request.at * fps).floor() as u64;
-            let date = local_date(SystemTime::now());
+            let wall = SystemTime::now();
+            // dump uses the system inputs of this moment, as it does for iDate.
+            let system = FrameInputs {
+                date: local_date(wall),
+                color_scheme: if color_scheme::read_once() { 1.0 } else { 0.0 },
+                battery: Battery::read().uniform(),
+                location: location(wall, request.location),
+                inputs: user_inputs,
+                displays,
+                display_count,
+                ..FrameInputs::default()
+            };
             let mut texture = None;
             let mut previous = 0.0;
             for i in 0..=frames {
@@ -110,8 +135,7 @@ impl WaylandBackend {
                     time: time as f32,
                     time_delta: (time - previous) as f32,
                     frame_rate: fps as f32,
-                    date,
-                    ..FrameInputs::default()
+                    ..system
                 };
                 previous = time;
                 texture = Some(program.render(gl, &mut target, &inputs));
@@ -233,6 +257,12 @@ impl Backend for WaylandBackend {
             // Only procedural wallpapers use the pointer. A session with only
             // videos does not bind it.
             self.state.enable_pointer(&self.qh);
+            if options.span && self.state.xdg_output_manager.is_none() {
+                bail!(
+                    "--span needs the place of each display, but this compositor does not \
+                     offer the xdg-output protocol"
+                );
+            }
         }
 
         let compositor = self
@@ -307,9 +337,9 @@ impl Backend for WaylandBackend {
         for spec in specs {
             sources.push(match spec {
                 SourceSpec::Video(path) => Source::Video(spawn_decoder(path, &renderer)?),
-                SourceSpec::Procedural(pack) => {
-                    Source::Procedural(ProceduralSource::new(renderer.gl(), &pack)?)
-                }
+                SourceSpec::Procedural(pack) => Source::Procedural(Box::new(
+                    ProceduralSource::new(renderer.gl(), &pack, &options.inputs)?,
+                )),
             });
         }
 
@@ -330,22 +360,32 @@ impl Backend for WaylandBackend {
             None
         };
 
-        let mut paused = battery_observer::should_pause(&options.pause);
+        // Procedural wallpapers follow the light or dark preference of the
+        // desktop.
+        let dark_scheme = sources
+            .iter()
+            .any(|s| matches!(s, Source::Procedural(_)))
+            .then(color_scheme::watch);
+        if options.span && sources.iter().any(|s| matches!(s, Source::Video(_))) {
+            log::warn!(
+                "--span only applies to procedural wallpapers. A video plays on each display."
+            );
+        }
+
+        let mut battery = Battery::read();
+        let mut paused = battery.should_pause(&options.pause);
         let mut last_battery_check = Instant::now();
         log_pause_state(paused, &options.pause);
-        if let Some(audio) = &audio {
-            audio.set_paused(paused);
-        }
+        pause_readers(paused, audio.as_ref(), &sources);
 
         loop {
             if last_battery_check.elapsed() >= BATTERY_POLL_INTERVAL {
-                let new_paused = battery_observer::should_pause(&options.pause);
+                battery = Battery::read();
+                let new_paused = battery.should_pause(&options.pause);
                 if new_paused != paused {
                     paused = new_paused;
                     log_pause_state(paused, &options.pause);
-                    if let Some(audio) = &audio {
-                        audio.set_paused(paused);
-                    }
+                    pause_readers(paused, audio.as_ref(), &sources);
                 }
                 last_battery_check = Instant::now();
             }
@@ -412,6 +452,12 @@ impl Backend for WaylandBackend {
                 let Some(source_idx) = o.source_idx else {
                     continue;
                 };
+                // A spanned output draws its part only after the compositor
+                // tells where it is, for example just after a hotplug.
+                let spanned = options.span && matches!(sources[source_idx], Source::Procedural(_));
+                if spanned && o.position.is_none() {
+                    continue;
+                }
                 groups.entry(source_idx).or_default().push(name);
             }
 
@@ -453,13 +499,91 @@ impl Backend for WaylandBackend {
             let audio_frame = audio
                 .as_mut()
                 .map_or_else(AudioFrame::default, |a| a.snapshot());
+            let color_scheme = match &dark_scheme {
+                Some(dark) if dark.load(Ordering::Relaxed) => 1.0,
+                _ => 0.0,
+            };
             for (source_idx, output_names) in groups {
                 let source = &mut sources[source_idx];
-                let tick = match source {
+                let first_surface = output_names
+                    .iter()
+                    .find_map(|n| self.state.outputs.get(n)?.surface_idx)
+                    .expect("a group has an output");
+                // Upload the new images of watched files.
+                if let Source::Procedural(p) = source
+                    && let Some(watcher) = &p.watcher
+                {
+                    let updates = watcher.take();
+                    if !updates.is_empty() {
+                        renderer.make_current(first_surface)?;
+                    }
+                    for (index, texture) in updates {
+                        if let Err(err) = p.program.replace_texture(renderer.gl(), index, &texture)
+                        {
+                            log::warn!("{err:#}");
+                        }
+                    }
+                }
+                // The inputs that all outputs of a procedural source share.
+                let shared = match source {
                     Source::Procedural(p) => {
-                        Some((p.clock.tick(now), local_date(SystemTime::now())))
+                        let tick = p.clock.tick(now);
+                        let wall = SystemTime::now();
+                        Some(FrameInputs {
+                            time: tick.time,
+                            time_delta: tick.delta,
+                            frame_rate: tick.frame_rate,
+                            date: local_date(wall),
+                            audio: if p.audio {
+                                audio_frame
+                            } else {
+                                AudioFrame::default()
+                            },
+                            color_scheme,
+                            battery: battery.uniform(),
+                            location: location(wall, options.location),
+                            inputs: p.commands.values(),
+                            ..FrameInputs::default()
+                        })
                     }
                     Source::Video(_) => None,
+                };
+                // A spanned wallpaper draws once for the whole desktop. Each
+                // output then shows its own part.
+                let spanned = match (&mut *source, shared) {
+                    (Source::Procedural(p), Some(shared)) if options.span => {
+                        let rects: Vec<[i32; 4]> = output_names
+                            .iter()
+                            .filter_map(|n| self.state.outputs.get(n)?.rect())
+                            .collect();
+                        let desktop = desktop_rect(rects.iter().copied());
+                        renderer.make_current(first_surface)?;
+                        let gl = renderer.gl();
+                        let dims = p
+                            .program
+                            .target_dims((desktop[2] as u32, desktop[3] as u32));
+                        if p.span_target.as_ref().map(procedural::Target::dims) != Some(dims) {
+                            if let Some(old) = p.span_target.take() {
+                                old.destroy(gl);
+                            }
+                            p.span_target = Some(p.program.create_target(gl, dims)?);
+                        }
+                        let (mouse, pointer) = self
+                            .state
+                            .desktop_pointer
+                            .uniforms(desktop.map(f64::from), dims);
+                        let (displays, display_count) = display_rects(desktop, &rects, dims);
+                        let inputs = FrameInputs {
+                            mouse,
+                            pointer,
+                            displays,
+                            display_count,
+                            ..shared
+                        };
+                        let target = p.span_target.as_mut().expect("target created above");
+                        Some((p.program.render(gl, target, &inputs), desktop))
+                    }
+                    _ => None,
                 };
                 for name in output_names {
                     let o = self.state.outputs.get_mut(&name).unwrap();
@@ -476,8 +600,13 @@ impl Backend for WaylandBackend {
                             let frame = frames.get(&source_idx).expect("frame fetched for group");
                             renderer.render(surface_idx, frame, options.scale)?;
                         }
+                        Source::Procedural(_) if spanned.is_some() => {
+                            let (texture, desktop) = spanned.expect("checked above");
+                            let rect = o.rect().expect("spanned outputs have a position");
+                            renderer.present_part(surface_idx, texture, crop(desktop, rect))?;
+                        }
                         Source::Procedural(p) => {
-                            let (tick, date) = tick.expect("procedural sources tick");
+                            let shared = shared.expect("procedural sources have inputs");
                             renderer.make_current(surface_idx)?;
                             let gl = renderer.gl();
                             let dims = p.program.target_dims(surface_dims);
@@ -487,19 +616,21 @@ impl Backend for WaylandBackend {
                                 }
                                 o.target = Some(p.program.create_target(gl, dims)?);
                             }
-                            let (mouse, pointer) = o.pointer.uniforms(surface_dims, dims);
+                            let area = [
+                                0.0,
+                                0.0,
+                                f64::from(surface_dims.0),
+                                f64::from(surface_dims.1),
+                            ];
+                            let (mouse, pointer) = o.pointer.uniforms(area, dims);
+                            let whole = [0, 0, surface_dims.0 as i32, surface_dims.1 as i32];
+                            let (displays, display_count) = display_rects(whole, &[whole], dims);
                             let inputs = FrameInputs {
-                                time: tick.time,
-                                time_delta: tick.delta,
-                                frame_rate: tick.frame_rate,
-                                date,
                                 mouse,
                                 pointer,
-                                audio: if p.audio {
-                                    audio_frame
-                                } else {
-                                    AudioFrame::default()
-                                },
+                                displays,
+                                display_count,
+                                ..shared
                             };
                             let target = o.target.as_mut().expect("target created above");
                             let texture = p.program.render(gl, target, &inputs);
@@ -552,7 +683,7 @@ impl SourceSpec {
 /// The source of the frames of an output.
 enum Source {
     Video(DecoderHandle),
-    Procedural(ProceduralSource),
+    Procedural(Box<ProceduralSource>),
 }
 
 impl Source {
@@ -572,15 +703,23 @@ struct ProceduralSource {
     /// in sync.
     clock: Clock,
     limiter: FrameLimiter,
+    /// The render targets for the whole desktop, with `--span`.
+    span_target: Option<procedural::Target>,
+    /// The values of the inputs that the pack reads.
+    commands: CommandInputs,
+    watcher: Option<TextureWatcher>,
 }
 
 impl ProceduralSource {
-    fn new(gl: &glow::Context, pack: &Pack) -> anyhow::Result<Self> {
+    fn new(gl: &glow::Context, pack: &Pack, commands: &[InputCommand]) -> anyhow::Result<Self> {
         Ok(Self {
             program: procedural::Program::compile(gl, pack)?,
             audio: pack.audio,
             clock: Clock::new(pack.fps),
             limiter: FrameLimiter::new(pack.fps),
+            span_target: None,
+            commands: CommandInputs::start(&pack.inputs, commands),
+            watcher: TextureWatcher::start(&pack.textures),
         })
     }
 }
@@ -616,6 +755,58 @@ fn spawn_decoder(path: String, renderer: &GlRenderer) -> anyhow::Result<DecoderH
     Ok(DecoderHandle { rx, gl_context })
 }
 
+/// The rectangle that covers `outputs`, in logical pixels: x, y, width, and
+/// height.
+fn desktop_rect(outputs: impl Iterator<Item = [i32; 4]>) -> [i32; 4] {
+    let mut bounds: Option<[i32; 4]> = None;
+    for [x, y, w, h] in outputs {
+        let [left, top, right, bottom] = bounds.get_or_insert([x, y, x + w, y + h]);
+        *left = (*left).min(x);
+        *top = (*top).min(y);
+        *right = (*right).max(x + w);
+        *bottom = (*bottom).max(y + h);
+    }
+    let [left, top, right, bottom] = bounds.unwrap_or([0, 0, 1, 1]);
+    [left, top, (right - left).max(1), (bottom - top).max(1)]
+}
+
+/// `iDisplays` and `iDisplayCount`: the place of each of `outputs` in an
+/// image of `dims` pixels that shows `desktop`, from the bottom left.
+fn display_rects(
+    desktop: [i32; 4],
+    outputs: &[[i32; 4]],
+    dims: (u32, u32),
+) -> ([[f32; 4]; MAX_DISPLAYS], i32) {
+    let [dx, dy, dw, dh] = desktop.map(|v| v as f32);
+    let (sx, sy) = (dims.0 as f32 / dw, dims.1 as f32 / dh);
+    let mut displays = [[0.0; 4]; MAX_DISPLAYS];
+    for (display, output) in displays.iter_mut().zip(outputs) {
+        let [x, y, w, h] = output.map(|v| v as f32);
+        *display = [(x - dx) * sx, (dy + dh - y - h) * sy, w * sx, h * sy];
+    }
+    (displays, outputs.len().min(MAX_DISPLAYS) as i32)
+}
+
+/// The part of `desktop` that `output` shows, as fractions from the top left.
+fn crop(desktop: [i32; 4], output: [i32; 4]) -> [f32; 4] {
+    let [dx, dy, dw, dh] = desktop.map(|v| v as f32);
+    let [x, y, w, h] = output.map(|v| v as f32);
+    [(x - dx) / dw, (y - dy) / dh, w / dw, h / dh]
+}
+
+/// Pauses or resumes the work beside the drawing: the audio capture and the
+/// input commands.
+fn pause_readers(paused: bool, audio: Option<&audio::AudioCapture>, sources: &[Source]) {
+    if let Some(audio) = audio {
+        audio.set_paused(paused);
+    }
+    for source in sources {
+        if let Source::Procedural(p) = source {
+            p.commands.set_paused(paused);
+        }
+    }
+}
+
 fn log_pause_state(paused: bool, mode: &PauseMode) {
     let on_batt = matches!(mode, PauseMode::Never).then_some(false);
     if paused {
@@ -633,6 +824,8 @@ struct State {
     compositor: Option<wl_compositor::WlCompositor>,
     layer_shell: Option<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
     cursor_shape: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
+    /// Gives the place of each output on the desktop, for `--span`.
+    xdg_output_manager: Option<zxdg_output_manager_v1::ZxdgOutputManagerV1>,
     outputs: HashMap<u32, OutputState>,
     seats: HashMap<u32, SeatState>,
     /// If true, bind the pointer of each seat that has one. It is false
@@ -640,6 +833,8 @@ struct State {
     pointer_enabled: bool,
     /// The registry name of the output under the pointer.
     pointer_focus: Option<u32>,
+    /// The pointer in desktop coordinates, for `--span`.
+    desktop_pointer: Pointer,
     detached_surface_idxs: Vec<usize>,
     detached_targets: Vec<procedural::Target>,
 }
@@ -653,6 +848,9 @@ struct SeatState {
 
 struct OutputState {
     wl_output: wl_output::WlOutput,
+    xdg_output: Option<zxdg_output_v1::ZxdgOutputV1>,
+    /// The top left of the output on the desktop, in logical pixels.
+    position: Option<(i32, i32)>,
     name: String,
     description: String,
     width: u32,
@@ -673,6 +871,8 @@ impl OutputState {
     fn new(wl_output: wl_output::WlOutput) -> Self {
         Self {
             wl_output,
+            xdg_output: None,
+            position: None,
             name: String::new(),
             description: String::new(),
             width: 1,
@@ -687,6 +887,14 @@ impl OutputState {
             target: None,
             pointer: Pointer::default(),
         }
+    }
+
+    /// The place of the output on the desktop, in logical pixels: x, y,
+    /// width, and height. Its size is the size of its layer surface. `None`
+    /// until the compositor gives its position.
+    fn rect(&self) -> Option<[i32; 4]> {
+        let (x, y) = self.position?;
+        Some([x, y, self.width.max(1) as i32, self.height.max(1) as i32])
     }
 
     fn create_layer_surface(
@@ -733,10 +941,12 @@ impl State {
             compositor: None,
             layer_shell: None,
             cursor_shape: None,
+            xdg_output_manager: None,
             outputs: HashMap::new(),
             seats: HashMap::new(),
             pointer_enabled: false,
             pointer_focus: None,
+            desktop_pointer: Pointer::default(),
             detached_surface_idxs: Vec::new(),
             detached_targets: Vec::new(),
         }
@@ -771,8 +981,20 @@ impl State {
         self.pointer_focus.and_then(|n| self.outputs.get_mut(&n))
     }
 
+    /// The desktop position of the output under the pointer.
+    fn focus_offset(&self) -> (f64, f64) {
+        let (x, y) = self
+            .pointer_focus
+            .and_then(|n| self.outputs.get(&n)?.position)
+            .unwrap_or_default();
+        (f64::from(x), f64::from(y))
+    }
+
     fn remove_output(&mut self, name: u32, reason: &str) {
         if let Some(removed) = self.outputs.remove(&name) {
+            if let Some(xdg_output) = &removed.xdg_output {
+                xdg_output.destroy();
+            }
             if let Some(idx) = removed.surface_idx {
                 self.detached_surface_idxs.push(idx);
             }
@@ -845,7 +1067,19 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 }
                 "wl_output" => {
                     let output: wl_output::WlOutput = registry.bind(name, version.min(4), qh, name);
-                    state.outputs.insert(name, OutputState::new(output));
+                    let mut o = OutputState::new(output);
+                    if let Some(manager) = &state.xdg_output_manager {
+                        o.xdg_output = Some(manager.get_xdg_output(&o.wl_output, qh, name));
+                    }
+                    state.outputs.insert(name, o);
+                }
+                "zxdg_output_manager_v1" => {
+                    let manager: zxdg_output_manager_v1::ZxdgOutputManagerV1 =
+                        registry.bind(name, version.min(3), qh, ());
+                    for (output_name, o) in &mut state.outputs {
+                        o.xdg_output = Some(manager.get_xdg_output(&o.wl_output, qh, *output_name));
+                    }
+                    state.xdg_output_manager = Some(manager);
                 }
                 "wl_seat" => {
                     let seat: wl_seat::WlSeat = registry.bind(name, version.min(5), qh, name);
@@ -917,6 +1151,23 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
                 o.output_done = true;
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<zxdg_output_v1::ZxdgOutputV1, u32> for State {
+    fn event(
+        state: &mut Self,
+        _: &zxdg_output_v1::ZxdgOutputV1,
+        event: zxdg_output_v1::Event,
+        registry_name: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zxdg_output_v1::Event::LogicalPosition { x, y } = event
+            && let Some(o) = state.outputs.get_mut(registry_name)
+        {
+            o.position = Some((x, y));
         }
     }
 }
@@ -1039,11 +1290,14 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 if let Some(o) = state.focused_output() {
                     o.pointer.enter(surface_x, surface_y);
                 }
+                let (x, y) = state.focus_offset();
+                state.desktop_pointer.enter(surface_x + x, surface_y + y);
             }
             wl_pointer::Event::Leave { .. } => {
                 if let Some(o) = state.focused_output() {
                     o.pointer.leave();
                 }
+                state.desktop_pointer.leave();
                 state.pointer_focus = None;
             }
             wl_pointer::Event::Motion {
@@ -1054,6 +1308,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 if let Some(o) = state.focused_output() {
                     o.pointer.motion(surface_x, surface_y);
                 }
+                let (x, y) = state.focus_offset();
+                state.desktop_pointer.motion(surface_x + x, surface_y + y);
             }
             wl_pointer::Event::Button {
                 button,
@@ -1065,6 +1321,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 if let Some(o) = state.focused_output() {
                     o.pointer.button(button, pressed);
                 }
+                state.desktop_pointer.button(button, pressed);
             }
             _ => {}
         }
@@ -1072,7 +1329,47 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
 }
 
 delegate_noop!(State: ignore wl_compositor::WlCompositor);
+delegate_noop!(State: ignore zxdg_output_manager_v1::ZxdgOutputManagerV1);
 delegate_noop!(State: ignore wp_cursor_shape_manager_v1::WpCursorShapeManagerV1);
 delegate_noop!(State: ignore wp_cursor_shape_device_v1::WpCursorShapeDeviceV1);
 delegate_noop!(State: ignore wl_surface::WlSurface);
 delegate_noop!(State: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_covers_all_outputs() {
+        // A laptop at the left, and a taller monitor above and to the right.
+        let laptop = [0, 300, 1280, 800];
+        let monitor = [1280, 0, 1920, 1080];
+        let desktop = desktop_rect([laptop, monitor].into_iter());
+        assert_eq!(desktop, [0, 0, 3200, 1100]);
+        assert_eq!(crop(desktop, monitor), [0.4, 0.0, 0.6, 1080.0 / 1100.0]);
+        assert_eq!(
+            crop(desktop, laptop),
+            [0.0, 300.0 / 1100.0, 0.4, 800.0 / 1100.0]
+        );
+    }
+
+    #[test]
+    fn displays_are_in_image_pixels_from_the_bottom_left() {
+        let laptop = [0, 300, 1280, 800];
+        let monitor = [1280, 0, 1920, 1080];
+        let desktop = desktop_rect([laptop, monitor].into_iter());
+        // The image is half the size of the desktop.
+        let (displays, count) = display_rects(desktop, &[laptop, monitor], (1600, 550));
+        assert_eq!(count, 2);
+        assert_eq!(displays[0], [0.0, 0.0, 640.0, 400.0]);
+        assert_eq!(displays[1], [640.0, 10.0, 960.0, 540.0]);
+    }
+
+    #[test]
+    fn one_output_shows_everything() {
+        let output = [-1920, 0, 1920, 1080];
+        let desktop = desktop_rect(std::iter::once(output));
+        assert_eq!(desktop, output);
+        assert_eq!(crop(desktop, output), [0.0, 0.0, 1.0, 1.0]);
+    }
+}

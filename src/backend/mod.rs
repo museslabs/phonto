@@ -3,16 +3,27 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use anyhow::Context;
 
+use crate::config::{InputCommand, Location};
 use crate::displays::DisplayInfo;
 use crate::plan::Playback;
 use crate::scale::ScaleMode;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RunOptions {
     pub pause: PauseMode,
     pub scale: ScaleMode,
     #[cfg(target_os = "linux")]
     pub layer: wayland::LayerMode,
+    /// Draw one procedural wallpaper across all outputs, as one desktop.
+    #[cfg(target_os = "linux")]
+    pub span: bool,
+    /// Where the user is, for the sun of procedural wallpapers. Only the
+    /// Wayland backend draws procedural wallpapers at this time.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub location: Option<Location>,
+    /// The `[[input]]` commands of the configuration.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub inputs: Vec<InputCommand>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -32,6 +43,12 @@ pub struct DumpRequest {
     pub out: PathBuf,
     /// The image size for procedural wallpapers. Videos keep their own size.
     pub size: Option<(u32, u32)>,
+    /// Where the user is, for the sun of procedural wallpapers.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub location: Option<Location>,
+    /// The `[[input]]` commands of the configuration.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub inputs: Vec<InputCommand>,
 }
 
 pub trait Backend {
