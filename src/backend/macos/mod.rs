@@ -224,7 +224,7 @@ impl Backend for MacosBackend {
 
                 for screen in screens.iter() {
                     let name = screen.localizedName().to_string();
-                    if let Some(player) = by_id.get(&name) {
+                    if let Some(player) = displays::assigned(&screen, &by_id) {
                         surfaces.push(build_surface(mtm, &screen, player, scale)?);
                     } else {
                         log::info!("display {name:?} not in assignments; leaving alone");

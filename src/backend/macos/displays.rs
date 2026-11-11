@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ptr::NonNull;
 
 use anyhow::Context;
@@ -37,6 +38,19 @@ fn uuid(screen: &NSScreen) -> Option<String> {
         .map(|uuid| unsafe { CFRetained::from_raw(uuid) })
         .and_then(|uuid| CFUUID::new_string(None, Some(&uuid)))
         .map(|uuid| uuid.to_string())
+}
+
+/// The value the screen is assigned by its UUID, or else by its name.
+pub fn assigned<'a, T>(screen: &NSScreen, assignments: &'a HashMap<String, T>) -> Option<&'a T> {
+    let name = screen.localizedName().to_string();
+    let by_uuid = uuid(screen).and_then(|uuid| assignments.get(&uuid));
+    let by_name = assignments.get(&name);
+    if by_uuid.is_some() && by_name.is_some() {
+        log::warn!(
+            "display {name:?} is assigned by both its UUID and its name. Playing the UUID's video."
+        );
+    }
+    by_uuid.or(by_name)
 }
 
 pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {
