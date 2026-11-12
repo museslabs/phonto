@@ -164,10 +164,9 @@ impl ScreenObserver {
             return;
         };
         let sources = self.ivars().sources.borrow();
-        let target: &AnyObject = self;
         p.start(
             &view,
-            target,
+            self,
             &sources[p.source],
             self.ivars().power_paused.get(),
         );
