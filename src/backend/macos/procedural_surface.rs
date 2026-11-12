@@ -272,6 +272,9 @@ impl ProceduralSurface {
         // SAFETY: `ScreenObserver` answers `frame:`, which takes the link.
         let link = unsafe { view.displayLinkWithTarget_selector(target, sel!(frame:)) };
         if let Some(fps) = source.fps {
+            // Core Animation ignores a range below 1 Hz and fires at the full
+            // refresh. The limiter still holds the cap.
+            let fps = fps.max(1.0);
             link.setPreferredFrameRateRange(CAFrameRateRange {
                 minimum: fps,
                 maximum: fps,
