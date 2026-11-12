@@ -40,6 +40,10 @@ Using cargo:
 cargo install phonto
 ```
 
+On macOS, run `MACOSX_DEPLOYMENT_TARGET=14.2 cargo install phonto` instead. A
+macOS older than 14.2 then stops phonto at launch, instead of when an audio
+pack starts.
+
 From source:
 
 ```bash
