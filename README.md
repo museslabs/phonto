@@ -645,8 +645,9 @@ channels = [{ texture = "~/.cache/phonto/cover.jpg", watch = true }]
 
 phonto checks the file each second. Write a new file and rename it into
 place, so that phonto never reads half of an image. If the file does not
-exist yet, the channel is empty until it appears. If the new image does not
-load, the channel keeps the last image, and phonto writes a warning. To show
+exist yet, the channel is empty until it appears. If you delete the file, the
+channel is empty again. If the new image does not load, the channel keeps the
+last image, and phonto writes a warning. To show
 text, render it to an image, for example with ImageMagick:
 
 ```bash
