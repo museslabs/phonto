@@ -106,7 +106,13 @@ impl ProceduralSource {
     /// Starts the next frame if the frame-rate cap allows it. `slack` lets a
     /// display link that fires a little early still count. A cap that divides
     /// the refresh rate then keeps an even cadence.
-    fn advance(&mut self, gpu: &Gpu, now: Instant, slack: Duration) -> anyhow::Result<()> {
+    fn advance(
+        &mut self,
+        gpu: &Gpu,
+        now: Instant,
+        slack: Duration,
+        color_scheme: f32,
+    ) -> anyhow::Result<()> {
         if self.limiter.next_frame().is_some_and(|t| t > now + slack) {
             return Ok(());
         }
@@ -132,6 +138,7 @@ impl ProceduralSource {
             time_delta: tick.delta,
             frame_rate: tick.frame_rate,
             date: local_date(wall),
+            color_scheme,
             battery: self.battery,
             location: location(wall, self.location),
             inputs: self.commands.values(),
@@ -234,9 +241,10 @@ impl ProceduralSurface {
         source: &mut ProceduralSource,
         frame: NSRect,
         link: &CADisplayLink,
+        color_scheme: f32,
     ) -> anyhow::Result<bool> {
         let slack = Duration::from_secs_f64(link.duration() / 2.0);
-        source.advance(gpu, Instant::now(), slack)?;
+        source.advance(gpu, Instant::now(), slack, color_scheme)?;
         if self.frame == source.frame {
             return Ok(false);
         }

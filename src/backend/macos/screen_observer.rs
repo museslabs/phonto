@@ -2,13 +2,17 @@ use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send, rc::Retained, runtime::NSObject};
 use objc2_app_kit::{NSScreen, NSWindow};
 use objc2_av_foundation::{AVPlayer, AVPlayerLayer};
-use objc2_foundation::{MainThreadMarker, NSNotification};
+use objc2_foundation::{
+    MainThreadMarker, NSDictionary, NSKeyValueChangeKey, NSNotification, NSString,
+};
 use objc2_quartz_core::CADisplayLink;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
 use std::rc::Rc;
 
+use super::color_scheme;
 use super::displays::{assigned, display_id};
 use super::keyboard::Keyboard;
 use super::procedural::Gpu;
@@ -59,6 +63,8 @@ pub struct ScreenObserverIvars {
     gpu: Option<Gpu>,
     sources: RefCell<Vec<ProceduralSource>>,
     power_paused: Cell<bool>,
+    /// `iColorScheme`. It changes only when the appearance does.
+    color_scheme: Cell<f32>,
 }
 
 define_class!(
@@ -77,11 +83,26 @@ define_class!(
         fn _frame(&self, link: &CADisplayLink) {
             self.frame(link);
         }
+
+        /// The appearance of the app changed. It is the only key path that
+        /// the observer follows.
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+        fn _observe_value(
+            &self,
+            _key_path: Option<&NSString>,
+            _object: Option<&AnyObject>,
+            _change: Option<&NSDictionary<NSKeyValueChangeKey, AnyObject>>,
+            _context: *mut c_void,
+        ) {
+            self.appearance_changed();
+        }
     }
 );
 
 impl ScreenObserver {
+    /// Call `color_scheme::unobserve` before the observer is freed.
     pub fn new(
+        mtm: MainThreadMarker,
         surfaces: Vec<MirrorSurface>,
         policy: AttachPolicy,
         scale: ScaleMode,
@@ -95,9 +116,11 @@ impl ScreenObserver {
             gpu,
             sources: RefCell::new(sources),
             power_paused: Cell::new(false),
+            color_scheme: Cell::new(color_scheme::uniform(mtm)),
         };
         let this = Self::alloc().set_ivars(ivars);
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        color_scheme::observe(mtm, &this);
         for surface in this.ivars().surfaces.borrow_mut().iter_mut() {
             this.start(surface);
         }
@@ -115,6 +138,17 @@ impl ScreenObserver {
         }
         for source in self.ivars().sources.borrow().iter() {
             source.set_paused(paused);
+        }
+    }
+
+    fn appearance_changed(&self) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let value = color_scheme::uniform(mtm);
+        if value != self.ivars().color_scheme.get() {
+            log::info!("appearance changed: dark={}", value == 1.0);
+            self.ivars().color_scheme.set(value);
         }
     }
 
@@ -166,7 +200,8 @@ impl ScreenObserver {
         };
         let mut sources = self.ivars().sources.borrow_mut();
         let source = &mut sources[p.source];
-        match p.draw(mtm, gpu, source, frame, link) {
+        let color_scheme = self.ivars().color_scheme.get();
+        match p.draw(mtm, gpu, source, frame, link, color_scheme) {
             // A click on the desktop gives a wallpaper with a keyboard
             // channel the keys, as a click on a canvas does on Shadertoy.
             Ok(true) if source.keyboard.is_some() && !surface.window.isKeyWindow() => {

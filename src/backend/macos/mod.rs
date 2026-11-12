@@ -1,4 +1,5 @@
 mod battery_observer;
+mod color_scheme;
 mod displays;
 mod key_window;
 mod keyboard;
@@ -77,7 +78,7 @@ impl Backend for MacosBackend {
         use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
 
         if crate::procedural::is_procedural(&request.path) {
-            return procedural::dump(request);
+            return procedural::dump(request, color_scheme::uniform(self.mtm));
         }
         if request.size.is_some() {
             log::warn!("--size only applies to procedural wallpapers. Videos keep their own size.");
@@ -245,7 +246,7 @@ impl Backend for MacosBackend {
         // Re-apply geometry on display reconfiguration, and attach new
         // surfaces when a fresh display appears (respecting the policy).
         // It also draws the procedural wallpapers.
-        let screen_observer = ScreenObserver::new(surfaces, policy, scale, gpu, procedural);
+        let screen_observer = ScreenObserver::new(mtm, surfaces, policy, scale, gpu, procedural);
         unsafe {
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
                 &screen_observer,
@@ -270,6 +271,9 @@ impl Backend for MacosBackend {
 
         app.run();
         drop(loop_observers);
+        // KVO does not retain its observer. A freed observer that is still
+        // registered crashes on the next change of the appearance.
+        color_scheme::unobserve(mtm, &screen_observer);
         drop(screen_observer);
         drop(battery_observer);
 
