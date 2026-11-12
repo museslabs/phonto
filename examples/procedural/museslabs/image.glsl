@@ -203,8 +203,12 @@ vec3 drawStaff(vec3 col, vec2 q, float left, float right, float px) {
     vec2 clefSize = vec2(28.96, 78.8);
     vec2 uv = vec2((q.x - left - 0.5 * SPACE) / clefSize.x,
         0.3775 + (staffY(2.0) - q.y) / clefSize.y);
+    // Sample before the test. Inside it, the GPU has no texture coordinates
+    // for the pixels that skip it. On some GPUs the mipmap level then goes
+    // wrong at the edge, and a faint box outlines the image.
+    float clef = texture(iChannel3, uv).a;
     if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
-        col = mix(col, mix(paper, ink, 0.45), texture(iChannel3, uv).a);
+        col = mix(col, mix(paper, ink, 0.45), clef);
     }
 
     // A final barline at the end: a thin line and a thick line.
@@ -329,17 +333,19 @@ void mainImage(out vec4 color, in vec2 coord) {
     col = drawStaff(col, q, left, right, px);
     col = drawNotes(col, q, left, right, px);
 
+    // Sample before the test, as for the clef.
     vec2 logo = vec2(q.x, 400.0 - q.y) / 400.0;
+    float lyre = texture(iChannel0, logo).a;
     if (all(greaterThanEqual(logo, vec2(0.0))) && all(lessThanEqual(logo, vec2(1.0)))) {
-        col = mix(col, ink, texture(iChannel0, logo).a);
+        col = mix(col, ink, lyre);
     }
     col = drawStrings(col, q, px);
 
     // The wordmark under the lyre, as in the header of the site.
     vec2 wordmarkSize = vec2(112.0, 24.18);
     vec2 w = vec2((q.x - 200.0) / wordmarkSize.x + 0.5, 0.5 - (q.y - 322.0) / wordmarkSize.y);
+    vec2 text = texture(iChannel2, w).rg;
     if (all(greaterThanEqual(w, vec2(0.0))) && all(lessThanEqual(w, vec2(1.0)))) {
-        vec2 text = texture(iChannel2, w).rg;
         col = mix(col, ink, text.r);
         col = mix(col, inkSoft, text.g);
     }
