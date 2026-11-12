@@ -376,10 +376,13 @@ cat examples/procedural/system/inputs.toml >> ~/.config/phonto/config.toml
 ```
 
 The album example shows the cover of the music that plays, on a background of
-its own colors. A line under the cover shows how far the track is. It needs
-`playerctl`, which reads every player that supports MPRIS, such as Spotify,
-Firefox, mpv, and VLC. Its input command is a script. It prints whether music
-plays and how far the track is, and it keeps the cover in
+its own colors. A line under the cover shows how far the track is. On Linux,
+it needs `playerctl`, which reads every player that supports MPRIS, such as
+Spotify, Firefox, mpv, and VLC. On macOS, it needs `media-control`
+(`brew install media-control`), which reads what macOS shows as Now Playing,
+such as Spotify, Music, or a video in a browser. A browser may send no cover,
+or no position, for a video. Its input command is a script. It prints whether
+music plays and how far the track is, and it keeps the cover in
 `~/.cache/phonto/cover`, which the pack watches. Set it up first:
 
 ```bash

@@ -4,7 +4,8 @@
 #   cp examples/procedural/album/now-playing.sh ~/.config/phonto/
 #   cat examples/procedural/album/inputs.toml >> ~/.config/phonto/config.toml
 #
-# It needs playerctl, so it works on Linux.
+# It needs playerctl on Linux, or media-control on macOS
+# (brew install media-control).
 
 # 1 while music plays, and how far the track is. The script also keeps the
 # cover of the track in ~/.cache/phonto/cover.
