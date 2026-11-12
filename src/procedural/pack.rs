@@ -464,7 +464,7 @@ fn resolve_channel(
             let i = textures.load(&dir.join(crate::config::expand_tilde(path)), watch)?;
             (Input::Texture(i), Filter::Mipmap, Wrap::Repeat)
         }
-        (None, None, true) => keyboard_input(textures),
+        (None, None, true) => keyboard_input()?,
         _ => bail!("set exactly one of `buffer`, `texture` or `keyboard`"),
     };
 
@@ -534,19 +534,13 @@ fn is_glsl_name(name: &str) -> bool {
 /// The input, filter and wrap of a keyboard channel. Shaders read it with
 /// `texelFetch`, as on Shadertoy.
 #[cfg(target_os = "macos")]
-fn keyboard_input(_textures: &mut TextureSet) -> (Input, Filter, Wrap) {
-    (Input::Keyboard, Filter::Nearest, Wrap::Clamp)
+fn keyboard_input() -> anyhow::Result<(Input, Filter, Wrap)> {
+    Ok((Input::Keyboard, Filter::Nearest, Wrap::Clamp))
 }
 
-/// Off macOS, a keyboard channel is an image of a keyboard with no key down.
-/// A pack made for macOS then loads everywhere, and only reads no keys.
 #[cfg(not(target_os = "macos"))]
-fn keyboard_input(textures: &mut TextureSet) -> (Input, Filter, Wrap) {
-    (
-        Input::Texture(textures.keyboard()),
-        Filter::Nearest,
-        Wrap::Clamp,
-    )
+fn keyboard_input() -> anyhow::Result<(Input, Filter, Wrap)> {
+    bail!("keyboard channels only work on macOS so far")
 }
 
 fn parse_filter(s: &str) -> anyhow::Result<Filter> {
@@ -572,9 +566,6 @@ fn parse_wrap(s: &str) -> anyhow::Result<Wrap> {
 struct TextureSet {
     list: Vec<Texture>,
     by_path: HashMap<PathBuf, usize>,
-    /// The image of the keyboard channels, off macOS.
-    #[cfg(not(target_os = "macos"))]
-    keyboard: Option<usize>,
 }
 
 impl TextureSet {
@@ -604,35 +595,6 @@ impl TextureSet {
         self.list.push(Texture { watch, ..texture });
         self.by_path.insert(path.to_path_buf(), i);
         Ok(i)
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-impl TextureSet {
-    /// The keyboard image: 256 key codes wide and 3 rows high, as on macOS,
-    /// with no key down. A shader reads it with `texelFetch` at a key code,
-    /// and a read outside a texture is undefined. The image is added once,
-    /// however many channels read it.
-    fn keyboard(&mut self) -> usize {
-        if let Some(i) = self.keyboard {
-            return i;
-        }
-        log::warn!("keyboard channels only work on macOS. The pack reads no keys.");
-        let (width, height) = (256, 3);
-        let i = self.list.len();
-        self.list.push(Texture {
-            // Not in `by_path`, so it cannot be mistaken for a file.
-            path: PathBuf::from("<keyboard>"),
-            watch: false,
-            modified: None,
-            width,
-            height,
-            // Red 0 is a key that is up. Alpha 1 matches the R8 texture of
-            // macOS.
-            rgba: [0, 0, 0, 255].repeat(width as usize * height as usize),
-        });
-        self.keyboard = Some(i);
-        i
     }
 }
 
@@ -873,34 +835,6 @@ mod tests {
                 wrap: Wrap::Clamp
             }
         );
-    }
-
-    /// Off macOS, every keyboard channel reads one image of a keyboard with
-    /// no key down.
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn keyboard_channel_reads_no_keys() {
-        let dir = TempDir::new("keyboard-off-macos");
-        dir.write("i.glsl", SHADER);
-        dir.write(
-            MANIFEST,
-            "[image]\nshader = \"i.glsl\"\nchannels = [{ keyboard = true }, { keyboard = true, filter = \"linear\" }]",
-        );
-        let pack = Pack::load(&dir.0).unwrap();
-        assert_eq!(pack.textures.len(), 1);
-        assert_eq!(
-            pack.image.channels[0],
-            Channel {
-                input: Input::Texture(0),
-                filter: Filter::Nearest,
-                wrap: Wrap::Clamp
-            }
-        );
-        assert_eq!(pack.image.channels[1].input, Input::Texture(0));
-        assert_eq!(pack.image.channels[1].filter, Filter::Linear);
-        let keys = &pack.textures[0];
-        assert_eq!((keys.width, keys.height), (256, 3));
-        assert!(keys.rgba.chunks(4).all(|texel| texel == [0, 0, 0, 255]));
     }
 
     #[test]

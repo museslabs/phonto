@@ -572,11 +572,10 @@ in the pack. A table has exactly one of `buffer = "name"`,
 | `wrap` | `clamp`, `repeat`, `mirror` | `clamp` for buffers and the keyboard, `repeat` for textures |
 | `watch` | `true` loads the image again when its file changes (see [Live images](#live-images)) | `false` |
 
-The keyboard channel works only on macOS so far. On Wayland, a pack with one
-still loads, but the channel reads no keys, and phonto writes a warning. The
-channel is the keyboard texture of Shadertoy: 256 texels wide, one for each
-JavaScript key code, and 3 rows high. Row 0 is 1 while a key is down, row 1
-is 1 on the frame after a press, and row 2 flips on each press. Read it with
+The keyboard channel works only on macOS so far. It is the keyboard texture
+of Shadertoy: 256 texels wide, one for each JavaScript key code, and 3 rows
+high. Row 0 is 1 while a key is down, row 1 is 1 on the frame after a press,
+and row 2 flips on each press. Read it with
 `texelFetch(iChannelN, ivec2(code, row), 0).x`. A wallpaper only gets the
 keyboard after you click the desktop, as a Shadertoy canvas gets it after a
 click. A click on a window, or a switch to another app, gives the keyboard
