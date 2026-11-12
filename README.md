@@ -405,8 +405,7 @@ You can use a procedural wallpaper everywhere that you can use a video path:
 hyprlock recipe and `--shader` post-processing. `--rand` also picks pack
 directories, and `.glsl` files that have a `mainImage` function. A procedural
 wallpaper always fills the screen, so `--scale` has no effect. The same
-wallpapers run on Wayland and macOS. macOS does not have `--span` yet, and it
-does not read the audio.
+wallpapers run on Wayland and macOS. macOS does not read the audio yet.
 
 ### One scene across all displays
 
@@ -417,11 +416,12 @@ then shows its own part of the scene:
 phonto --span examples/procedural/koi
 ```
 
-phonto gets the place of each display from the compositor, through the
-xdg-output protocol. `iResolution`, `fragCoord`, `iMouse`, and `iPointer` then
-use the pixels of the whole desktop, so most shaders span without changes. The
-buffers also cover the whole desktop, so a simulation such as the Game of Life
-continues from one display to the next. The cost is the same as one copy on
+On Wayland, phonto gets the place of each display from the compositor,
+through the xdg-output protocol. On macOS, it takes them from the arrangement
+in System Settings > Displays. `iResolution`, `fragCoord`, `iMouse`, and
+`iPointer` then use the pixels of the whole desktop, so most shaders span
+without changes. The buffers also cover the whole desktop, so a simulation
+such as the Game of Life continues from one display to the next. The cost is the same as one copy on
 each display, plus any gaps between the displays.
 
 A centered scene falls on the edge between two displays. `iDisplays` gives
@@ -432,8 +432,6 @@ display its own vignette, as the koi pond does.
 `--span` does not work with `--display`, or with the `[[display]]` entries of
 the configuration, because they give each display its own wallpaper. A video
 still plays on each display.
-
-`--span` works only on Wayland so far.
 
 ### Single-file wallpapers
 

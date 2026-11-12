@@ -15,7 +15,6 @@ pub struct RunOptions {
     #[cfg(target_os = "linux")]
     pub layer: wayland::LayerMode,
     /// Draw one procedural wallpaper across all outputs, as one desktop.
-    #[cfg(target_os = "linux")]
     pub span: bool,
     /// Where the user is, for the sun of procedural wallpapers.
     pub location: Option<Location>,

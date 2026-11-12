@@ -4,6 +4,9 @@
 //! Each surface has a display link that fires at the refresh of its screen.
 //! The source keeps the clock. All surfaces of a source draw the same moment,
 //! so mirrored screens stay in sync.
+//!
+//! With `--span`, the source draws one image for the whole desktop, and each
+//! surface shows its part of it.
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -18,13 +21,14 @@ use objc2_app_kit::NSView;
 use objc2_core_foundation::CGSize;
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
 use objc2_foundation::{MainThreadMarker, NSRect, NSRunLoop, NSRunLoopCommonModes};
-use objc2_metal::{MTLCommandBuffer, MTLDrawable};
+use objc2_metal::{MTLCommandBuffer, MTLDrawable, MTLTexture};
 use objc2_quartz_core::{CADisplayLink, CAFrameRateRange, CAMetalDrawable, CAMetalLayer};
 
 use super::battery_observer;
 use super::keyboard::Keyboard;
 use super::pointer::DesktopPointer;
 use super::procedural::{self, Gpu, GpuTexture, Program, SCREEN_FORMAT, Target};
+use super::span;
 use crate::config::{InputCommand, Location};
 use crate::procedural::{
     Clock, CommandInputs, FrameInputs, FrameLimiter, Input, Pack, TextureWatcher, local_date,
@@ -56,6 +60,23 @@ pub struct ProceduralSource {
     /// that has the keyboard fills it.
     pub keyboard: Option<Rc<RefCell<Keyboard>>>,
     keyboard_texture: Option<GpuTexture>,
+    /// Set with `--span`.
+    span: Option<Span>,
+}
+
+/// One image for the whole desktop, with `--span`. The first surface that
+/// draws a frame of the source encodes it. The others only show their part.
+struct Span {
+    /// The frames of the screens, in the order of `NSScreen::screens`, which
+    /// puts the primary screen first.
+    screens: Vec<NSRect>,
+    /// The rectangle that covers the screens.
+    desktop: NSRect,
+    target: Option<Target>,
+    /// The pointer of the whole desktop.
+    pointer: DesktopPointer,
+    /// The last frame of the source that the target holds.
+    frame: u64,
 }
 
 impl ProceduralSource {
@@ -64,6 +85,7 @@ impl ProceduralSource {
         path: &str,
         location: Option<Location>,
         commands: &[InputCommand],
+        span: bool,
     ) -> anyhow::Result<Self> {
         let pack = Pack::load(Path::new(path))?;
         log::info!(
@@ -100,7 +122,28 @@ impl ProceduralSource {
             frame: 0,
             keyboard: reads_keys.then(Rc::default),
             keyboard_texture: None,
+            span: span.then(|| Span {
+                screens: Vec::new(),
+                desktop: span::desktop_rect(&[]),
+                target: None,
+                pointer: DesktopPointer::new(),
+                frame: 0,
+            }),
         })
+    }
+
+    pub fn spans(&self) -> bool {
+        self.span.is_some()
+    }
+
+    /// Sets the frames of the screens that a spanned wallpaper covers, in the
+    /// order of `NSScreen::screens`. A new size of the desktop makes a new
+    /// target, and `iFrame` starts at 0 again.
+    pub fn set_screens(&mut self, screens: &[NSRect]) {
+        if let Some(span) = &mut self.span {
+            span.desktop = span::desktop_rect(screens);
+            span.screens = screens.to_vec();
+        }
     }
 
     /// Starts the next frame if the frame-rate cap allows it. `slack` lets a
@@ -233,7 +276,8 @@ impl ProceduralSurface {
 
     /// Draws the next frame of `source`, if there is one. `frame` is the
     /// frame of the screen in global coordinates. Returns true if the user
-    /// clicked the desktop on this screen since the last frame.
+    /// clicked the desktop since the last frame: on this screen, or with
+    /// `--span` on any screen.
     pub fn draw(
         &mut self,
         mtm: MainThreadMarker,
@@ -250,40 +294,100 @@ impl ProceduralSurface {
         }
         self.frame = source.frame;
 
-        let surface = (
-            (frame.size.width.round() as u32).max(1),
-            (frame.size.height.round() as u32).max(1),
+        let cmd = gpu.command_buffer()?;
+        let keyboard = source.keyboard_texture.as_deref();
+        let (target, crop, clicked_desktop) = match &mut source.span {
+            Some(span) => {
+                let mut clicked = false;
+                if span.frame != source.frame {
+                    clicked =
+                        span.encode(mtm, gpu, &cmd, &source.program, &source.inputs, keyboard)?;
+                    span.frame = source.frame;
+                }
+                let target = span.target.as_ref().context("no spanned frame yet")?;
+                (target, span::crop(span.desktop, frame), clicked)
+            }
+            None => {
+                let surface = (
+                    (frame.size.width.round() as u32).max(1),
+                    (frame.size.height.round() as u32).max(1),
+                );
+                let dims = source.program.target_dims(surface);
+                if self.target.as_ref().map(Target::dims) != Some(dims) {
+                    self.target = Some(source.program.create_target(gpu, dims, false)?);
+                }
+                let target = self.target.as_mut().expect("target created above");
+
+                let clicked = self.pointer.poll(mtm, frame);
+                let (mouse, pointer) = self.pointer.uniforms(surface, dims);
+                let (displays, display_count) = procedural::one_display(dims);
+                let inputs = FrameInputs {
+                    mouse,
+                    pointer,
+                    displays,
+                    display_count,
+                    ..source.inputs
+                };
+                source.program.encode(&cmd, target, &inputs, keyboard);
+                (&*target, [0.0, 0.0, 1.0, 1.0], clicked)
+            }
+        };
+
+        // The drawable holds the part of the image that this screen shows.
+        // The layer scales it to the screen.
+        let dims = target.dims();
+        let part =
+            |fraction: f32, size: u32| f64::from(((fraction * size as f32).round() as u32).max(1));
+        let drawable_size = CGSize::new(part(crop[2], dims.0), part(crop[3], dims.1));
+        if self.layer.drawableSize() != drawable_size {
+            self.layer.setDrawableSize(drawable_size);
+        }
+        // Take the drawable last. It can wait until the screen frees one.
+        if let Some(drawable) = self.layer.nextDrawable() {
+            gpu.encode_present(&cmd, target, &drawable.texture(), crop);
+            cmd.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable));
+        }
+        cmd.commit();
+        Ok(clicked_desktop)
+    }
+}
+
+impl Span {
+    /// Encodes the next frame of the whole desktop into `cmd`. Returns true
+    /// if the user clicked the desktop since the last frame.
+    fn encode(
+        &mut self,
+        mtm: MainThreadMarker,
+        gpu: &Gpu,
+        cmd: &ProtocolObject<dyn MTLCommandBuffer>,
+        program: &Program,
+        shared: &FrameInputs,
+        keyboard: Option<&ProtocolObject<dyn MTLTexture>>,
+    ) -> anyhow::Result<bool> {
+        let size = (
+            (self.desktop.size.width.round() as u32).max(1),
+            (self.desktop.size.height.round() as u32).max(1),
         );
-        let dims = source.program.target_dims(surface);
+        let dims = program.target_dims(size);
         if self.target.as_ref().map(Target::dims) != Some(dims) {
-            self.target = Some(source.program.create_target(gpu, dims, false)?);
-            // The layer scales the drawable to the screen.
-            self.layer
-                .setDrawableSize(CGSize::new(f64::from(dims.0), f64::from(dims.1)));
+            self.target = Some(program.create_target(gpu, dims, false)?);
         }
         let target = self.target.as_mut().expect("target created above");
 
-        let clicked_desktop = self.pointer.poll(mtm, frame);
-        let (mouse, pointer) = self.pointer.uniforms(surface, dims);
-        let (displays, display_count) = procedural::one_display(dims);
+        // The pointer is read once for each frame of the source. A second
+        // read in the same frame would not see the click.
+        let clicked = self.pointer.poll(mtm, self.desktop);
+        let (mouse, pointer) = self.pointer.uniforms(size, dims);
+        let (displays, display_count) = span::display_rects(self.desktop, &self.screens, dims);
         let inputs = FrameInputs {
             mouse,
             pointer,
             displays,
             display_count,
-            ..source.inputs
+            ..*shared
         };
-
-        let cmd = gpu.command_buffer()?;
-        let keyboard = source.keyboard_texture.as_deref();
-        source.program.encode(&cmd, target, &inputs, keyboard);
-        // Take the drawable last. It can wait until the screen frees one.
-        if let Some(drawable) = self.layer.nextDrawable() {
-            gpu.encode_present(&cmd, target, &drawable.texture());
-            cmd.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable));
-        }
-        cmd.commit();
-        Ok(clicked_desktop)
+        program.encode(cmd, target, &inputs, keyboard);
+        Ok(clicked)
     }
 }
 

@@ -84,12 +84,15 @@ vertex PresentVertex phonto_present_vertex(uint id [[vertex_id]]) {
     return out;
 }
 
+// `crop` is the part of the image that the screen shows: x, y, width, and
+// height, as fractions from the bottom left.
 fragment float4 phonto_present_fragment(
     PresentVertex in [[stage_in]],
     texture2d<float> image [[texture(0)]],
-    sampler s [[sampler(0)]]
+    sampler s [[sampler(0)]],
+    constant float4 &crop [[buffer(0)]]
 ) {
-    return image.sample(s, in.uv);
+    return image.sample(s, crop.xy + in.uv * crop.zw);
 }
 "#;
 
@@ -127,12 +130,16 @@ impl Gpu {
             .context("create a Metal command buffer")
     }
 
-    /// Copies the image of `target` to `drawable`, which has the same size.
+    /// Copies the part `crop` of the image of `target` to `drawable`, which
+    /// has the size of that part. `crop` is x, y, width, and height, as
+    /// fractions of the image from the bottom left. `[0, 0, 1, 1]` is the
+    /// whole image.
     pub fn encode_present(
         &self,
         cmd: &CommandBuffer,
         target: &Target,
         drawable: &ProtocolObject<dyn MTLTexture>,
+        crop: [f32; 4],
     ) {
         let pass = MTLRenderPassDescriptor::new();
         let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
@@ -144,9 +151,12 @@ impl Gpu {
             return;
         };
         encoder.setRenderPipelineState(&self.present);
+        let crop_ptr = NonNull::new(crop.as_ptr().cast_mut().cast::<c_void>())
+            .expect("an array has a non-null pointer");
         unsafe {
             encoder.setFragmentTexture_atIndex(Some(&target.image), 0);
             encoder.setFragmentSamplerState_atIndex(Some(&self.present_sampler), 0);
+            encoder.setFragmentBytes_length_atIndex(crop_ptr, size_of_val(&crop), 0);
             encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
         }
         encoder.endEncoding();
@@ -906,8 +916,8 @@ fn pipeline(
         .map_err(|e| anyhow!("create a Metal pipeline: {}", e.localizedDescription()))
 }
 
-/// `iDisplays` and `iDisplayCount` for an image of `dims` pixels. macOS does
-/// not span a wallpaper across screens. The image is one display.
+/// `iDisplays` and `iDisplayCount` for an image of `dims` pixels that one
+/// screen shows, without `--span`.
 pub fn one_display((w, h): (u32, u32)) -> ([[f32; 4]; MAX_DISPLAYS], i32) {
     let mut displays = [[0.0; 4]; MAX_DISPLAYS];
     displays[0] = [0.0, 0.0, w as f32, h as f32];
