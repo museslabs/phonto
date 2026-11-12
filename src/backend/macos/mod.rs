@@ -1,3 +1,4 @@
+mod audio;
 mod battery_observer;
 mod color_scheme;
 mod displays;
@@ -14,6 +15,7 @@ mod span;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
 
 use anyhow::Context;
 use objc2::rc::Retained;
@@ -31,6 +33,7 @@ use objc2_av_foundation::{
 use objc2_foundation::{MainThreadMarker, NSNotificationCenter, NSString, NSURL};
 use objc2_quartz_core::CAAutoresizingMask;
 
+use self::audio::AudioCapture;
 use self::battery_observer::BatteryObserver;
 use self::key_window::KeyWindow;
 use self::loop_observer::LoopObserver;
@@ -246,8 +249,24 @@ impl Backend for MacosBackend {
             players,
             loop_observers,
             gpu,
-            procedural,
+            mut procedural,
         } = sources;
+
+        // One tap gives the audio to all the wallpapers that read it, on all
+        // screens.
+        if procedural.iter().any(ProceduralSource::reads_audio) {
+            match AudioCapture::start() {
+                Ok(capture) => {
+                    let capture = Rc::new(capture);
+                    for source in &mut procedural {
+                        source.set_audio(&capture);
+                    }
+                }
+                Err(err) => {
+                    log::warn!("no system audio, so the wallpaper draws without it: {err:#}");
+                }
+            }
+        }
 
         // Re-apply geometry on display reconfiguration, and attach new
         // surfaces when a fresh display appears (respecting the policy).

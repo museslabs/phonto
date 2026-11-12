@@ -12,8 +12,6 @@
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod actions;
-// Only the Wayland backend reads the system audio at this time.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod audio;
 mod commands;
 mod glsl;
@@ -27,7 +25,6 @@ use std::path::Path;
 
 #[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
 pub use actions::{ActionRunner, MAX_LABEL, label_texels};
-#[cfg(target_os = "linux")]
 pub use audio::{Analyzer, AudioFrame, SAMPLE_RATE};
 pub use commands::{CommandInputs, read_once as read_inputs_once};
 pub use glsl::{PassKind, fragment_shader, source_ids_help};
