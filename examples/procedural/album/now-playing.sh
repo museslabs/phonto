@@ -74,11 +74,16 @@ if [ "$(uname)" = Darwin ]; then
             base64 -D > "$part" 2>/dev/null &&
             [ -s "$part" ]; then
             mv "$part" "$cover" && printf '%s\n' "$id" > "$cover.url"
-        else
+        elif [ "$(cat "$cover.url" 2>/dev/null)" != none ]; then
             # A track without a cover, such as some videos in a browser,
-            # shows none, not the cover of the last track. It tries again
-            # each time, in case its cover comes later.
-            rm -f "$cover" "$cover.url"
+            # shows none, not the cover of the last track. phonto keeps the
+            # last image of a deleted file, and the pack draws a cover of
+            # one pixel as no cover. Each run still looks for a cover, in
+            # case it comes later.
+            [ -f "$cover" ] &&
+                sips -z 1 1 "$cover" --out "$part" > /dev/null 2>&1 &&
+                mv "$part" "$cover"
+            echo none > "$cover.url"
         fi
         rm -f "$part"
     fi
