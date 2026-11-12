@@ -936,6 +936,7 @@ pub fn dump(request: DumpRequest) -> anyhow::Result<()> {
     // dump uses the inputs of this moment, as it does for iDate.
     let system = FrameInputs {
         date: local_date(wall),
+        battery: super::battery_observer::uniform(),
         location: location(wall, request.location),
         inputs: user_inputs,
         displays,

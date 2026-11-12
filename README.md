@@ -406,7 +406,7 @@ hyprlock recipe and `--shader` post-processing. `--rand` also picks pack
 directories, and `.glsl` files that have a `mainImage` function. A procedural
 wallpaper always fills the screen, so `--scale` has no effect. The same
 wallpapers run on Wayland and macOS. macOS does not have `--span` yet, and it
-does not read the audio, the dark mode setting, or the battery.
+does not read the audio or the dark mode setting.
 
 ### One scene across all displays
 
@@ -507,9 +507,8 @@ and with the default setting macOS moves all windows away to show the desktop.
 For wallpapers that you click, such as the koi pond, set System Settings >
 Desktop & Dock > Click wallpaper to reveal desktop to "Only in Stage Manager".
 
-On macOS, phonto does not read the system audio, the dark mode setting, or
-the battery yet. `iAudio`, `iSpectrum`, `iChroma`, `iColorScheme`, and
-`iBattery` are 0 there.
+On macOS, phonto does not read the system audio or the dark mode setting yet.
+`iAudio`, `iSpectrum`, `iChroma`, and `iColorScheme` are 0 there.
 
 phonto reads the keyboard only on macOS, through a keyboard channel (see
 [Packs](#packs)). `iChannelTime` and `iSampleRate` exist only so that shaders

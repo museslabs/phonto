@@ -21,6 +21,7 @@ use objc2_foundation::{MainThreadMarker, NSRect, NSRunLoop, NSRunLoopCommonModes
 use objc2_metal::{MTLCommandBuffer, MTLDrawable};
 use objc2_quartz_core::{CADisplayLink, CAFrameRateRange, CAMetalDrawable, CAMetalLayer};
 
+use super::battery_observer;
 use super::keyboard::Keyboard;
 use super::pointer::DesktopPointer;
 use super::procedural::{self, Gpu, GpuTexture, Program, SCREEN_FORMAT, Target};
@@ -29,6 +30,9 @@ use crate::procedural::{
     Clock, CommandInputs, FrameInputs, FrameLimiter, Input, Pack, TextureWatcher, local_date,
     location,
 };
+
+/// How often `iBattery` reads the battery, as on Wayland.
+const BATTERY_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// A procedural wallpaper, compiled, with its clock.
 pub struct ProceduralSource {
@@ -42,6 +46,9 @@ pub struct ProceduralSource {
     location: Option<Location>,
     /// The values of the inputs that the pack reads.
     commands: CommandInputs,
+    /// `iBattery`, and when it was read.
+    battery: [f32; 4],
+    battery_read: Instant,
     watcher: Option<TextureWatcher>,
     /// Counts the frames of the source. A surface draws when this changes.
     frame: u64,
@@ -87,6 +94,8 @@ impl ProceduralSource {
             inputs: FrameInputs::default(),
             location,
             commands: CommandInputs::start(&pack.inputs, commands),
+            battery: battery_observer::uniform(),
+            battery_read: Instant::now(),
             watcher: TextureWatcher::start(&pack.textures),
             frame: 0,
             keyboard: reads_keys.then(Rc::default),
@@ -112,6 +121,10 @@ impl ProceduralSource {
                 log::warn!("{err:#}");
             }
         }
+        if now.saturating_duration_since(self.battery_read) >= BATTERY_POLL_INTERVAL {
+            self.battery = battery_observer::uniform();
+            self.battery_read = now;
+        }
         let tick = self.clock.tick(now);
         let wall = SystemTime::now();
         self.inputs = FrameInputs {
@@ -119,6 +132,7 @@ impl ProceduralSource {
             time_delta: tick.delta,
             frame_rate: tick.frame_rate,
             date: local_date(wall),
+            battery: self.battery,
             location: location(wall, self.location),
             inputs: self.commands.values(),
             ..FrameInputs::default()
