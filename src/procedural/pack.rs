@@ -229,6 +229,7 @@ enum ChannelManifest {
 struct ChannelTable {
     buffer: Option<String>,
     texture: Option<String>,
+    #[cfg(target_os = "macos")]
     #[serde(default)]
     keyboard: bool,
     filter: Option<String>,
@@ -443,7 +444,10 @@ fn resolve_channel(
         ChannelManifest::Full(t) => (
             t.buffer.as_deref(),
             t.texture.as_deref(),
+            #[cfg(target_os = "macos")]
             t.keyboard,
+            #[cfg(not(target_os = "macos"))]
+            false,
             t.filter.as_deref(),
             t.wrap.as_deref(),
             t.watch,
@@ -464,8 +468,12 @@ fn resolve_channel(
             let i = textures.load(&dir.join(crate::config::expand_tilde(path)), watch)?;
             (Input::Texture(i), Filter::Mipmap, Wrap::Repeat)
         }
-        (None, None, true) => keyboard_input()?,
+        #[cfg(target_os = "macos")]
+        (None, None, true) => (Input::Keyboard, Filter::Nearest, Wrap::Clamp),
+        #[cfg(target_os = "macos")]
         _ => bail!("set exactly one of `buffer`, `texture` or `keyboard`"),
+        #[cfg(not(target_os = "macos"))]
+        _ => bail!("set exactly one of `buffer` or `texture`"),
     };
 
     let filter = filter
@@ -529,18 +537,6 @@ fn is_glsl_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !name.starts_with("gl_")
         && !name.contains("__")
-}
-
-/// The input, filter and wrap of a keyboard channel. Shaders read it with
-/// `texelFetch`, as on Shadertoy.
-#[cfg(target_os = "macos")]
-fn keyboard_input() -> anyhow::Result<(Input, Filter, Wrap)> {
-    Ok((Input::Keyboard, Filter::Nearest, Wrap::Clamp))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn keyboard_input() -> anyhow::Result<(Input, Filter, Wrap)> {
-    bail!("keyboard channels only work on macOS so far")
 }
 
 fn parse_filter(s: &str) -> anyhow::Result<Filter> {
