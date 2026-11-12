@@ -5,9 +5,13 @@
 # plays, else 0, and how far the track is, from 0 to 1. It also keeps the
 # cover of the track in ~/.cache/phonto/cover, which the wallpaper watches.
 #
-# It needs playerctl, which reads every player that supports MPRIS, such as
-# Spotify, Firefox, Chromium, mpv, and VLC. A cover from the web also needs
-# curl.
+# On Linux, it needs playerctl, which reads every player that supports MPRIS,
+# such as Spotify, Firefox, Chromium, mpv, and VLC. A cover from the web also
+# needs curl.
+#
+# On macOS, it needs media-control (brew install media-control). It reads
+# what macOS shows as Now Playing, from any app, such as Spotify, Music, or a
+# video in a browser.
 
 cover="$HOME/.cache/phonto/cover"
 
@@ -49,6 +53,40 @@ fetch() {
         printf '%s\n' "$1" > "$cover.url"
     rm -f "$part"
 }
+
+if [ "$(uname)" = Darwin ]; then
+    # An app that starts phonto may not have Homebrew in its PATH.
+    PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
+    info=$(media-control get --now --no-artwork 2>/dev/null)
+    field() { printf '%s' "$info" | plutil -extract "$1" raw -o - - 2>/dev/null; }
+    # Without media-control, or with nothing to show, there is no track.
+    if ! id=$(field contentItemIdentifier); then
+        echo 0 0
+        exit 0
+    fi
+    # The cover is a few hundred kilobytes of base64. Only a new track reads
+    # it. cover.url names the track of the cover in place.
+    if [ "$id" != "$(cat "$cover.url" 2>/dev/null)" ]; then
+        mkdir -p "${cover%/*}"
+        part="$cover.part.$$"
+        if media-control get 2>/dev/null |
+            plutil -extract artworkData raw -o - - 2>/dev/null |
+            base64 -D > "$part" 2>/dev/null &&
+            [ -s "$part" ]; then
+            mv "$part" "$cover" && printf '%s\n' "$id" > "$cover.url"
+        else
+            # A track without a cover, such as some videos in a browser,
+            # shows none, not the cover of the last track. It tries again
+            # each time, in case its cover comes later.
+            rm -f "$cover" "$cover.url"
+        fi
+        rm -f "$part"
+    fi
+    [ "$(field playing)" = true ] && playing=1 || playing=0
+    awk -v p="$(field elapsedTimeNow)" -v l="$(field duration)" -v on="$playing" \
+        'BEGIN { printf "%d %.4f\n", on, (l > 0 ? p / l : 0) }'
+    exit 0
+fi
 
 if ! status=$(playerctl status 2>/dev/null); then
     echo 0 0
