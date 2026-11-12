@@ -10,6 +10,7 @@ mod pointer;
 mod procedural;
 mod procedural_surface;
 mod screen_observer;
+mod span;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -194,6 +195,11 @@ impl Backend for MacosBackend {
         let policy = match playback {
             Playback::Mirror(path) => {
                 let content = sources.open(mtm, &path, &options)?;
+                if options.span && matches!(content, Content::Video(_)) {
+                    log::warn!(
+                        "--span only applies to procedural wallpapers. A video plays on each display."
+                    );
+                }
                 for screen in screens.iter() {
                     surfaces.push(build_surface(
                         mtm,
@@ -305,7 +311,8 @@ impl Sources {
                 Some(gpu) => gpu,
                 gpu => gpu.insert(Gpu::new()?),
             };
-            let source = ProceduralSource::load(gpu, path, options.location, &options.inputs)?;
+            let source =
+                ProceduralSource::load(gpu, path, options.location, &options.inputs, options.span)?;
             let keyboard = source.keyboard.clone();
             self.procedural.push(source);
             return Ok(Content::Procedural {

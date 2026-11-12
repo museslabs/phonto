@@ -135,7 +135,7 @@ fn window_level(number: isize) -> Option<i32> {
 
 /// True if `point` is in `rect`, with the top and right edges outside, so
 /// that a point on the edge of two screens is in one of them.
-fn contains(rect: NSRect, point: NSPoint) -> bool {
+pub fn contains(rect: NSRect, point: NSPoint) -> bool {
     point.x >= rect.origin.x
         && point.x < rect.origin.x + rect.size.width
         && point.y > rect.origin.y

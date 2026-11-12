@@ -1,9 +1,9 @@
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send, rc::Retained, runtime::NSObject};
-use objc2_app_kit::{NSScreen, NSWindow};
+use objc2_app_kit::{NSEvent, NSScreen, NSWindow};
 use objc2_av_foundation::{AVPlayer, AVPlayerLayer};
 use objc2_foundation::{
-    MainThreadMarker, NSDictionary, NSKeyValueChangeKey, NSNotification, NSString,
+    MainThreadMarker, NSDictionary, NSKeyValueChangeKey, NSNotification, NSRect, NSString,
 };
 use objc2_quartz_core::CADisplayLink;
 
@@ -15,6 +15,7 @@ use std::rc::Rc;
 use super::color_scheme;
 use super::displays::{assigned, display_id};
 use super::keyboard::Keyboard;
+use super::pointer::contains;
 use super::procedural::Gpu;
 use super::procedural_surface::{ProceduralSource, ProceduralSurface};
 use crate::scale::ScaleMode;
@@ -121,6 +122,7 @@ impl ScreenObserver {
         let this = Self::alloc().set_ivars(ivars);
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         color_scheme::observe(mtm, &this);
+        this.update_span(mtm);
         for surface in this.ivars().surfaces.borrow_mut().iter_mut() {
             this.start(surface);
         }
@@ -188,27 +190,55 @@ impl ScreenObserver {
             return;
         };
         let mut surfaces = self.ivars().surfaces.borrow_mut();
-        let Some(surface) = surfaces
-            .iter_mut()
-            .find(|s| matches!(&s.layer, SurfaceLayer::Procedural(p) if p.is_driven_by(link)))
+        let Some(index) = surfaces
+            .iter()
+            .position(|s| matches!(&s.layer, SurfaceLayer::Procedural(p) if p.is_driven_by(link)))
         else {
             return;
         };
+        let surface = &mut surfaces[index];
         let frame = surface.window.frame();
         let SurfaceLayer::Procedural(p) = &mut surface.layer else {
             return;
         };
+        let source_index = p.source;
         let mut sources = self.ivars().sources.borrow_mut();
-        let source = &mut sources[p.source];
+        let source = &mut sources[source_index];
         let color_scheme = self.ivars().color_scheme.get();
-        match p.draw(mtm, gpu, source, frame, link, color_scheme) {
-            // A click on the desktop gives a wallpaper with a keyboard
-            // channel the keys, as a click on a canvas does on Shadertoy.
-            Ok(true) if source.keyboard.is_some() && !surface.window.isKeyWindow() => {
-                surface.window.makeKeyWindow();
+        let clicked_desktop = match p.draw(mtm, gpu, source, frame, link, color_scheme) {
+            Ok(clicked) => clicked,
+            Err(e) => {
+                log::warn!("procedural frame on {}: {e:#}", surface.name);
+                return;
             }
-            Ok(_) => {}
-            Err(e) => log::warn!("procedural frame on {}: {e:#}", surface.name),
+        };
+        if !clicked_desktop || source.keyboard.is_none() {
+            return;
+        }
+        // A click on the desktop gives a wallpaper with a keyboard channel
+        // the keys, as a click on a canvas does on Shadertoy. With --span,
+        // the click can be on any screen of the wallpaper.
+        let clicked = if source.spans() {
+            let at = NSEvent::mouseLocation();
+            surfaces.iter().find(|s| {
+                matches!(&s.layer, SurfaceLayer::Procedural(p) if p.source == source_index)
+                    && contains(s.window.frame(), at)
+            })
+        } else {
+            surfaces.get(index)
+        };
+        if let Some(surface) = clicked
+            && !surface.window.isKeyWindow()
+        {
+            surface.window.makeKeyWindow();
+        }
+    }
+
+    /// Gives the spanned wallpapers the frames of the screens.
+    fn update_span(&self, mtm: MainThreadMarker) {
+        let screens: Vec<NSRect> = NSScreen::screens(mtm).iter().map(|s| s.frame()).collect();
+        for source in self.ivars().sources.borrow_mut().iter_mut() {
+            source.set_screens(&screens);
         }
     }
 
@@ -299,6 +329,9 @@ impl ScreenObserver {
                 Err(e) => log::warn!("failed to attach new display {name}: {e:#}"),
             }
         }
+
+        // The screens can move, appear, or go away.
+        self.update_span(mtm);
     }
 
     /// Makes `surface` show `content`. A video layer only changes its player.
