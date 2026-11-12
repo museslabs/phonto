@@ -2,10 +2,10 @@
 //! wallpaper, and one [`ProceduralSurface`] for each screen that shows it.
 //!
 //! Each surface has a display link that fires at the refresh of its screen.
-//! The source keeps the clock. Only a surface that has drawn the newest frame
-//! of its source starts the next one. The source then starts at most one frame
-//! for each refresh of its fastest screen. A slower screen shows whichever
-//! frame is newest when its link fires.
+//! The source keeps the clock. Only a surface that has drawn or skipped the
+//! newest frame of its source starts the next one. The source then starts at
+//! most one frame for each refresh of its fastest screen. A slower screen
+//! shows whichever frame is newest when its link fires.
 //!
 //! A [`Scene`] is one image and the pointer over it. Without `--span`, each
 //! surface has its own. With `--span`, the source has one for the whole
@@ -230,7 +230,7 @@ pub struct ProceduralSurface {
     link: Option<Retained<CADisplayLink>>,
     /// The image of this screen, without `--span`. The first frame makes it.
     scene: Option<Scene>,
-    /// The last frame of the source that this surface drew.
+    /// The last frame of the source that this surface drew or skipped.
     frame: u64,
     /// True after a frame failed, until a frame draws.
     pub failing: bool,
@@ -331,6 +331,14 @@ impl ProceduralSurface {
                 std::slice::from_ref(&frame),
             ),
         };
+        if scene.frame == source.frame && scene.screens != screens {
+            // Another screen drew this frame before the screens changed. This
+            // screen's part of it would be wrong. Keep the last image. This
+            // surface may start the next frame, because the screen that drew
+            // this one may be gone.
+            self.frame = source.frame;
+            return Ok(false);
+        }
         let cmd = gpu.command_buffer()?;
         let mut clicked_desktop = false;
         if scene.frame != source.frame {
