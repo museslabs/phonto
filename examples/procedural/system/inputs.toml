@@ -17,8 +17,9 @@ name = "cores"
 command = "getconf _NPROCESSORS_ONLN"
 every = 3600
 
-# How full the disk of / is, in percent.
+# How full the disk is, in percent. On macOS, / is the system volume, and
+# your files are on /System/Volumes/Data.
 [[input]]
 name = "disk"
-command = "df -P / | awk 'NR == 2 { print $5 + 0 }'"
+command = "df -P \"$(test -d /System/Volumes/Data && echo /System/Volumes/Data || echo /)\" | awk 'NR == 2 { print $5 + 0 }'"
 every = 60
