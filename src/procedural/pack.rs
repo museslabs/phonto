@@ -700,14 +700,7 @@ impl TextureSet {
             Ok(texture) => texture,
             Err(err) if watch => {
                 log::info!("{err:#}. The channel stays empty until the file changes");
-                Texture {
-                    path: path.to_path_buf(),
-                    watch,
-                    modified: None,
-                    width: 1,
-                    height: 1,
-                    rgba: vec![0; 4],
-                }
+                empty_texture(path)
             }
             Err(err) => return Err(err),
         };
@@ -744,6 +737,18 @@ impl TextureSet {
         });
         self.keyboard = Some(i);
         i
+    }
+}
+
+/// The image of a watched file that does not exist: one clear pixel.
+pub(super) fn empty_texture(path: &Path) -> Texture {
+    Texture {
+        path: path.to_path_buf(),
+        watch: true,
+        modified: None,
+        width: 1,
+        height: 1,
+        rgba: vec![0; 4],
     }
 }
 
