@@ -10,8 +10,6 @@
 //! into levels, runs the input commands, and watches image files. Each
 //! backend does the drawing and reads the system.
 
-// Only the Wayland backend reads the system audio at this time.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod audio;
 mod commands;
 mod glsl;
@@ -21,7 +19,6 @@ mod watch;
 
 use std::path::Path;
 
-#[cfg(target_os = "linux")]
 pub use audio::{Analyzer, AudioFrame, SAMPLE_RATE};
 pub use commands::{CommandInputs, read_once as read_inputs_once};
 pub use glsl::{PassKind, fragment_shader, source_ids_help};

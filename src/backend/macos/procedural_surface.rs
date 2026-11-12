@@ -24,6 +24,7 @@ use objc2_foundation::{MainThreadMarker, NSRect, NSRunLoop, NSRunLoopCommonModes
 use objc2_metal::{MTLCommandBuffer, MTLDrawable, MTLTexture};
 use objc2_quartz_core::{CADisplayLink, CAFrameRateRange, CAMetalDrawable, CAMetalLayer};
 
+use super::audio::AudioCapture;
 use super::battery_observer;
 use super::keyboard::Keyboard;
 use super::pointer::DesktopPointer;
@@ -31,8 +32,8 @@ use super::procedural::{self, Gpu, GpuTexture, Program, SCREEN_FORMAT, Target};
 use super::span;
 use crate::config::{InputCommand, Location};
 use crate::procedural::{
-    Clock, CommandInputs, FrameInputs, FrameLimiter, Input, Pack, TextureWatcher, local_date,
-    location,
+    AudioFrame, Clock, CommandInputs, FrameInputs, FrameLimiter, Input, Pack, TextureWatcher,
+    local_date, location,
 };
 
 /// How often `iBattery` reads the battery, as on Wayland.
@@ -50,6 +51,10 @@ pub struct ProceduralSource {
     location: Option<Location>,
     /// The values of the inputs that the pack reads.
     commands: CommandInputs,
+    /// True if the pack sets `audio = true`.
+    reads_audio: bool,
+    /// The system audio, if the pack reads it and phonto can read it.
+    audio: Option<Rc<AudioCapture>>,
     /// `iBattery`, and when it was read.
     battery: [f32; 4],
     battery_read: Instant,
@@ -95,12 +100,6 @@ impl ProceduralSource {
             pack.fps.map_or_else(|| "no".to_string(), |f| f.to_string()),
             pack.render_scale
         );
-        if pack.audio {
-            log::warn!(
-                "`{}` reads the system audio, which phonto does not read on macOS yet. It draws without audio.",
-                pack.name
-            );
-        }
         let reads_keys = pack
             .buffers
             .iter()
@@ -116,6 +115,8 @@ impl ProceduralSource {
             inputs: FrameInputs::default(),
             location,
             commands: CommandInputs::start(&pack.inputs, commands),
+            reads_audio: pack.audio,
+            audio: None,
             battery: battery_observer::uniform(),
             battery_read: Instant::now(),
             watcher: TextureWatcher::start(&pack.textures),
@@ -130,6 +131,17 @@ impl ProceduralSource {
                 frame: 0,
             }),
         })
+    }
+
+    pub fn reads_audio(&self) -> bool {
+        self.reads_audio
+    }
+
+    /// Gives the wallpaper the system audio, if it reads it.
+    pub fn set_audio(&mut self, capture: &Rc<AudioCapture>) {
+        if self.reads_audio {
+            self.audio = Some(Rc::clone(capture));
+        }
     }
 
     pub fn spans(&self) -> bool {
@@ -181,6 +193,10 @@ impl ProceduralSource {
             time_delta: tick.delta,
             frame_rate: tick.frame_rate,
             date: local_date(wall),
+            audio: self
+                .audio
+                .as_deref()
+                .map_or_else(AudioFrame::default, AudioCapture::snapshot),
             color_scheme,
             battery: self.battery,
             location: location(wall, self.location),
@@ -192,9 +208,13 @@ impl ProceduralSource {
         Ok(())
     }
 
-    /// Stops running the input commands while the wallpaper is paused.
+    /// Stops running the input commands and reading the audio while the
+    /// wallpaper is paused.
     pub fn set_paused(&self, paused: bool) {
         self.commands.set_paused(paused);
+        if let Some(audio) = &self.audio {
+            audio.set_paused(paused);
+        }
     }
 }
 

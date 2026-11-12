@@ -144,6 +144,18 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",
     "CGColorSpace",
 ] }
+# The system audio of procedural wallpapers, through a process tap.
+objc2-core-audio = { version = "0.3", default-features = false, features = [
+    "std",
+    "AudioHardware",
+    "objc2",
+    "objc2-core-audio-types",
+    "objc2-foundation",
+] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = [
+    "std",
+    "CoreAudioBaseTypes",
+] }
 # Procedural wallpapers: glslang compiles their GLSL to SPIR-V, and
 # SPIRV-Cross translates that to Metal.
 glslang = "0.9.1"

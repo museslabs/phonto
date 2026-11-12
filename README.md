@@ -73,7 +73,7 @@ sudo dnf install gstreamer1-vaapi gstreamer1-plugins-base gstreamer1-plugins-goo
 
 ### macOS
 
-No external dependencies. phonto links against system frameworks (`AVFoundation`, `CoreMedia`, `AppKit`, `QuartzCore`). Decoding goes through VideoToolbox automatically for codecs the OS supports (H.264, HEVC, ProRes, etc.).
+No external dependencies. phonto needs macOS 14.2 or later, and links against system frameworks (`AVFoundation`, `CoreMedia`, `AppKit`, `QuartzCore`, `CoreAudio`). Decoding goes through VideoToolbox automatically for codecs the OS supports (H.264, HEVC, ProRes, etc.).
 
 ## Usage
 
@@ -387,25 +387,33 @@ cp examples/procedural/album/now-playing.sh ~/.config/phonto/
 cat examples/procedural/album/inputs.toml >> ~/.config/phonto/config.toml
 ```
 
-A pack that sets `audio = true` reads the monitor of your default output. A
-monitor is a copy of the sound that goes to your speakers. phonto reads it
-through the GStreamer PulseAudio plugin, which also works with PipeWire
-through `pipewire-pulse`. On Debian or Ubuntu, install
+On Linux, a pack that sets `audio = true` reads the monitor of your default
+output. A monitor is a copy of the sound that goes to your speakers. phonto
+reads it through the GStreamer PulseAudio plugin, which also works with
+PipeWire through `pipewire-pulse`. On Debian or Ubuntu, install
 `gstreamer1.0-pulseaudio`. Arch and Fedora include the plugin in their
 GStreamer good plugins package.
-
 phonto selects the default output when it starts. If you change outputs,
 restart phonto. If the monitor is not available, phonto logs a warning and
 draws the scene without audio. `dump` always draws without audio. While
 phonto reads the monitor, the sound server keeps your output device awake. A
 battery pause stops the reading.
 
+On macOS, phonto reads the sound of all apps through a Core Audio process tap.
+The first time, macOS asks you to allow System Audio Recording for the app
+that started phonto, such as your terminal. If you do not allow it, the tap
+gives silence, and the scene draws without audio. You can allow it later in
+System Settings > Privacy & Security > Screen & System Audio Recording, under
+System Audio Recording Only. The tap keeps reading when you change outputs.
+`dump` draws without audio, and a battery pause stops the reading.
+
 You can use a procedural wallpaper everywhere that you can use a video path:
 `--display ID PATH`, `[[display]].path`, and `dump`, and on Wayland also the
 hyprlock recipe and `--shader` post-processing. `--rand` also picks pack
 directories, and `.glsl` files that have a `mainImage` function. A procedural
 wallpaper always fills the screen, so `--scale` has no effect. The same
-wallpapers run on Wayland and macOS. macOS does not read the audio yet.
+wallpapers run on Wayland and macOS. Only a pack with a keyboard channel needs
+macOS.
 
 ### One scene across all displays
 
@@ -507,9 +515,6 @@ for this. Finder still gets the click too, so it deselects your desktop icons,
 and with the default setting macOS moves all windows away to show the desktop.
 For wallpapers that you click, such as the koi pond, set System Settings >
 Desktop & Dock > Click wallpaper to reveal desktop to "Only in Stage Manager".
-
-On macOS, phonto does not read the system audio yet. `iAudio`, `iSpectrum`,
-and `iChroma` are 0 there.
 
 phonto reads the keyboard only on macOS, through a keyboard channel (see
 [Packs](#packs)). `iChannelTime` and `iSampleRate` exist only so that shaders
