@@ -66,24 +66,29 @@ const float WORD[4] = float[4](2.694, 3.132, 3.097, 3.132);
 float glyph(vec2 p, int g) {
     float cell = CELL / ROW;
     vec2 q = vec2(p.x + 0.5 * (cell - ADVANCE[g]), p.y);
-    // Sample before the test. After an early return, the GPU has no texture
-    // coordinates for the pixels that left. On some GPUs the mipmap level
-    // then goes wrong at the edge, and a faint box outlines the cell.
-    float a = texture(iChannel0, (vec2(float(g) * CELL, ATLAS.y - ROW) + q * ROW) / ATLAS).a;
+    // Take the derivatives of the atlas coordinates before the test. After
+    // an early return, the GPU has no texture coordinates for the pixels that
+    // left. On some GPUs the mipmap level then goes wrong at the edge, and a
+    // faint box outlines the cell.
+    vec2 dx = dFdx(q) * ROW / ATLAS;
+    vec2 dy = dFdy(q) * ROW / ATLAS;
     if (q.x < 0.0 || q.x > cell || q.y < 0.0 || q.y > 1.0) {
         return 0.0;
     }
-    return a;
+    vec2 uv = (vec2(float(g) * CELL, ATLAS.y - ROW) + q * ROW) / ATLAS;
+    return textureGrad(iChannel0, uv, dx, dy).a;
 }
 
 // The coverage of word w, centered on p = 0.
 float word(vec2 p, int w) {
     p.x += 0.5 * WORD[w];
-    float a = texture(iChannel0, (vec2(0.0, ATLAS.y - ROW * float(w + 2)) + p * ROW) / ATLAS).a;
+    vec2 dx = dFdx(p) * ROW / ATLAS;
+    vec2 dy = dFdy(p) * ROW / ATLAS;
     if (p.x < 0.0 || p.x > WORD[w] || p.y < 0.0 || p.y > 1.0) {
         return 0.0;
     }
-    return a;
+    vec2 uv = (vec2(0.0, ATLAS.y - ROW * float(w + 2)) + p * ROW) / ATLAS;
+    return textureGrad(iChannel0, uv, dx, dy).a;
 }
 
 // The coverage of `n` and a percent sign, centered on p = 0.

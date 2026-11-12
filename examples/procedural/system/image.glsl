@@ -38,28 +38,34 @@ const float WORD[5] = float[5](1.306, 0.764, 1.562, 1.243, 16.542);
 // The space between two words, in row heights.
 const float SPACE = 0.28;
 
+// How much the atlas coordinates change from one pixel to the next. glyph
+// and word sample the atlas after an early return. There the GPU has no
+// texture coordinates for the pixels that left. On some GPUs, texture() then
+// gets the mipmap level wrong at the edge, and a faint box outlines the cell.
+// mainImage sets these once, where every pixel runs. All the text has the
+// size of the caption, and one pair serves every glyph and word.
+vec2 atlasDx;
+vec2 atlasDy;
+
 // The coverage of glyph g. p is in row heights from the bottom left of the
 // advance of the glyph.
 float glyph(vec2 p, int g) {
     float cell = CELL / ROW;
     vec2 q = vec2(p.x + 0.5 * (cell - ADVANCE[g]), p.y);
-    // Sample before the test. After an early return, the GPU has no texture
-    // coordinates for the pixels that left. On some GPUs the mipmap level
-    // then goes wrong at the edge, and a faint box outlines the cell.
-    float a = texture(iChannel0, (vec2(float(g) * CELL, ATLAS.y - ROW) + q * ROW) / ATLAS).a;
     if (q.x < 0.0 || q.x > cell || q.y < 0.0 || q.y > 1.0) {
         return 0.0;
     }
-    return a;
+    vec2 uv = (vec2(float(g) * CELL, ATLAS.y - ROW) + q * ROW) / ATLAS;
+    return textureGrad(iChannel0, uv, atlasDx, atlasDy).a;
 }
 
 // The coverage of word w. p is in row heights from its bottom left.
 float word(vec2 p, int w) {
-    float a = texture(iChannel0, (vec2(0.0, ATLAS.y - ROW * float(w + 2)) + p * ROW) / ATLAS).a;
     if (p.x < 0.0 || p.x > WORD[w] || p.y < 0.0 || p.y > 1.0) {
         return 0.0;
     }
-    return a;
+    vec2 uv = (vec2(0.0, ATLAS.y - ROW * float(w + 2)) + p * ROW) / ATLAS;
+    return textureGrad(iChannel0, uv, atlasDx, atlasDy).a;
 }
 
 // The glyphs of `v`, with 0 or 2 decimals. Returns how many there are.
@@ -216,6 +222,8 @@ void mainImage(out vec4 color, in vec2 coord) {
     // The caption, in the style of the figure captions of the site.
     float size = 0.03;
     vec2 caption = (p - vec2(0.0, -DISK_RING - 0.09)) / size;
+    atlasDx = dFdx(caption) * ROW / ATLAS;
+    atlasDy = dFdy(caption) * ROW / ATLAS;
     if (configured) {
         col = mix(col, ink, loadLine(caption));
         col = mix(col, mix(paper, ink, 0.6), diskLine(caption + vec2(0.0, 1.3)));
