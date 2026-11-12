@@ -205,9 +205,16 @@ impl ScreenObserver {
         let source = &mut sources[source_index];
         let color_scheme = self.ivars().color_scheme.get();
         let clicked_desktop = match p.draw(mtm, gpu, source, frame, link, color_scheme) {
-            Ok(clicked) => clicked,
+            Ok(clicked) => {
+                p.failing = false;
+                clicked
+            }
+            // The screen stops changing until a frame draws. Say so once.
             Err(e) => {
-                log::warn!("procedural frame on {}: {e:#}", surface.name);
+                if !p.failing {
+                    log::error!("procedural frame on {}: {e:#}", surface.name);
+                    p.failing = true;
+                }
                 return;
             }
         };

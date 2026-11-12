@@ -231,6 +231,8 @@ pub struct ProceduralSurface {
     pointer: DesktopPointer,
     /// The last frame of the source that this surface drew.
     frame: u64,
+    /// True after a frame failed, until a frame draws.
+    pub failing: bool,
 }
 
 impl ProceduralSurface {
@@ -260,6 +262,7 @@ impl ProceduralSurface {
             target: None,
             pointer: DesktopPointer::new(),
             frame: 0,
+            failing: false,
         })
     }
 
