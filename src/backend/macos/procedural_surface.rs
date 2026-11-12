@@ -7,8 +7,9 @@
 //! for each refresh of its fastest screen. A slower screen shows whichever
 //! frame is newest when its link fires.
 //!
-//! With `--span`, the source draws one image for the whole desktop, and each
-//! surface shows its part of it.
+//! A [`Scene`] is one image and the pointer over it. Without `--span`, each
+//! surface has its own. With `--span`, the source has one for the whole
+//! desktop, and each surface shows its part of it.
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -72,19 +73,23 @@ pub struct ProceduralSource {
     span: Option<Span>,
 }
 
-/// One image for the whole desktop, with `--span`. The first surface that
-/// draws a frame of the source encodes it. The others only show their part.
+/// The desktop, with `--span`. The first surface that draws a frame of the
+/// source encodes the scene. The others only show their part.
 struct Span {
     /// The frames of the screens, in the order of `NSScreen::screens`, which
     /// puts the primary screen first.
     screens: Vec<NSRect>,
-    /// The rectangle that covers the screens.
-    desktop: NSRect,
+    scene: Scene,
+}
+
+/// An image of one or more screens, and the pointer over them.
+struct Scene {
     target: Option<Target>,
-    /// The pointer of the whole desktop.
     pointer: DesktopPointer,
     /// The last frame of the source that the target holds.
     frame: u64,
+    /// The frames of the screens that the target shows.
+    screens: Vec<NSRect>,
 }
 
 impl ProceduralSource {
@@ -128,10 +133,7 @@ impl ProceduralSource {
             keyboard_texture: None,
             span: span.then(|| Span {
                 screens: Vec::new(),
-                desktop: span::desktop_rect(&[]),
-                target: None,
-                pointer: DesktopPointer::new(),
-                frame: 0,
+                scene: Scene::new(),
             }),
         })
     }
@@ -156,7 +158,6 @@ impl ProceduralSource {
     /// target, and `iFrame` starts at 0 again.
     pub fn set_screens(&mut self, screens: &[NSRect]) {
         if let Some(span) = &mut self.span {
-            span.desktop = span::desktop_rect(screens);
             span.screens = screens.to_vec();
         }
     }
@@ -227,8 +228,8 @@ pub struct ProceduralSurface {
     /// The index of the source in the observer's list.
     pub source: usize,
     link: Option<Retained<CADisplayLink>>,
-    target: Option<Target>,
-    pointer: DesktopPointer,
+    /// The image of this screen, without `--span`. The first frame makes it.
+    scene: Option<Scene>,
     /// The last frame of the source that this surface drew.
     frame: u64,
     /// True after a frame failed, until a frame draws.
@@ -259,8 +260,7 @@ impl ProceduralSurface {
             layer,
             source,
             link: None,
-            target: None,
-            pointer: DesktopPointer::new(),
+            scene: None,
             frame: 0,
             failing: false,
         })
@@ -324,44 +324,24 @@ impl ProceduralSurface {
             }
         }
 
-        let cmd = gpu.command_buffer()?;
-        let keyboard = source.keyboard_texture.as_deref();
-        let (target, crop, clicked_desktop) = match &mut source.span {
-            Some(span) => {
-                let mut clicked = false;
-                if span.frame != source.frame {
-                    clicked =
-                        span.encode(mtm, gpu, &cmd, &source.program, &source.inputs, keyboard)?;
-                    span.frame = source.frame;
-                }
-                let target = span.target.as_ref().context("no spanned frame yet")?;
-                (target, span::crop(span.desktop, frame), clicked)
-            }
-            None => {
-                let surface = (
-                    (frame.size.width.round() as u32).max(1),
-                    (frame.size.height.round() as u32).max(1),
-                );
-                let dims = source.program.target_dims(surface);
-                if self.target.as_ref().map(Target::dims) != Some(dims) {
-                    self.target = Some(source.program.create_target(gpu, dims, false)?);
-                }
-                let target = self.target.as_mut().expect("target created above");
-
-                let clicked = self.pointer.poll(mtm, frame);
-                let (mouse, pointer) = self.pointer.uniforms(surface, dims);
-                let (displays, display_count) = procedural::one_display(dims);
-                let inputs = FrameInputs {
-                    mouse,
-                    pointer,
-                    displays,
-                    display_count,
-                    ..source.inputs
-                };
-                source.program.encode(&cmd, target, &inputs, keyboard);
-                (&*target, [0.0, 0.0, 1.0, 1.0], clicked)
-            }
+        let (scene, screens) = match &mut source.span {
+            Some(span) => (&mut span.scene, span.screens.as_slice()),
+            None => (
+                self.scene.get_or_insert_with(Scene::new),
+                std::slice::from_ref(&frame),
+            ),
         };
+        let cmd = gpu.command_buffer()?;
+        let mut clicked_desktop = false;
+        if scene.frame != source.frame {
+            screens.clone_into(&mut scene.screens);
+            let keyboard = source.keyboard_texture.as_deref();
+            clicked_desktop =
+                scene.encode(mtm, gpu, &cmd, &source.program, &source.inputs, keyboard)?;
+            scene.frame = source.frame;
+        }
+        let target = scene.target.as_ref().context("no frame drawn yet")?;
+        let crop = span::crop(span::desktop_rect(screens), frame);
 
         // The drawable holds the part of the image that this screen shows.
         // The layer scales it to the screen.
@@ -383,9 +363,18 @@ impl ProceduralSurface {
     }
 }
 
-impl Span {
-    /// Encodes the next frame of the whole desktop into `cmd`. Returns true
-    /// if the user clicked the desktop since the last frame.
+impl Scene {
+    fn new() -> Self {
+        Self {
+            target: None,
+            pointer: DesktopPointer::new(),
+            frame: 0,
+            screens: Vec::new(),
+        }
+    }
+
+    /// Encodes the next frame of the screens into `cmd`. Returns true if the
+    /// user clicked the desktop on them since the last frame.
     fn encode(
         &mut self,
         mtm: MainThreadMarker,
@@ -395,9 +384,10 @@ impl Span {
         shared: &FrameInputs,
         keyboard: Option<&ProtocolObject<dyn MTLTexture>>,
     ) -> anyhow::Result<bool> {
+        let rect = span::desktop_rect(&self.screens);
         let size = (
-            (self.desktop.size.width.round() as u32).max(1),
-            (self.desktop.size.height.round() as u32).max(1),
+            (rect.size.width.round() as u32).max(1),
+            (rect.size.height.round() as u32).max(1),
         );
         let dims = program.target_dims(size);
         if self.target.as_ref().map(Target::dims) != Some(dims) {
@@ -405,11 +395,11 @@ impl Span {
         }
         let target = self.target.as_mut().expect("target created above");
 
-        // The pointer is read once for each frame of the source. A second
+        // The pointer is read once for each frame of the scene. A second
         // read in the same frame would not see the click.
-        let clicked = self.pointer.poll(mtm, self.desktop);
+        let clicked = self.pointer.poll(mtm, rect);
         let (mouse, pointer) = self.pointer.uniforms(size, dims);
-        let (displays, display_count) = span::display_rects(self.desktop, &self.screens, dims);
+        let (displays, display_count) = span::display_rects(rect, &self.screens, dims);
         let inputs = FrameInputs {
             mouse,
             pointer,

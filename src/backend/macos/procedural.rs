@@ -1,8 +1,8 @@
 //! Draws procedural wallpapers with Metal.
 //!
-//! A [`Program`] is a pack, compiled once. Each screen gets its own
-//! [`Target`], because screens have different sizes and buffers keep state
-//! between frames.
+//! A [`Program`] is a pack, compiled once. Each scene gets its own
+//! [`Target`]: one screen, or the whole desktop with `--span`. Scenes have
+//! different sizes, and buffers keep state between frames.
 //!
 //! The passes run in the coordinates of Metal, unchanged. `fragCoord.y` is
 //! then `k + 0.5` in row `k` of a texture, and row 0 is the first row that a
@@ -19,7 +19,7 @@ use anyhow::{Context, anyhow, bail};
 use objc2::available;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::NSString;
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
     MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice, MTLFunction, MTLGPUFamily,
@@ -32,10 +32,11 @@ use objc2_metal::{
 
 use super::keyboard::KEYS;
 use super::msl::{self, Translated};
+use super::span;
 use crate::backend::DumpRequest;
 use crate::procedural::{
-    self, BufferFormat, BufferSize, Filter, FrameInputs, Input, MAX_CHANNELS, MAX_DISPLAYS, Pack,
-    Pass, PassKind, Texture, Wrap, local_date, location, read_inputs_once,
+    self, BufferFormat, BufferSize, Filter, FrameInputs, Input, MAX_CHANNELS, Pack, Pass, PassKind,
+    Texture, Wrap, local_date, location, read_inputs_once,
 };
 
 type Device = ProtocolObject<dyn MTLDevice>;
@@ -916,14 +917,6 @@ fn pipeline(
         .map_err(|e| anyhow!("create a Metal pipeline: {}", e.localizedDescription()))
 }
 
-/// `iDisplays` and `iDisplayCount` for an image of `dims` pixels that one
-/// screen shows, without `--span`.
-pub fn one_display((w, h): (u32, u32)) -> ([[f32; 4]; MAX_DISPLAYS], i32) {
-    let mut displays = [[0.0; 4]; MAX_DISPLAYS];
-    displays[0] = [0.0, 0.0, w as f32, h as f32];
-    (displays, 1)
-}
-
 /// `phonto dump` for a procedural wallpaper. It steps the wallpaper from 0 to
 /// `--at` seconds, as on Wayland. Buffers that keep state get there the same
 /// way. `color_scheme` is `iColorScheme`.
@@ -942,7 +935,8 @@ pub fn dump(request: DumpRequest, color_scheme: f32) -> anyhow::Result<()> {
     let fps = pack.fps.map_or(UNCAPPED_DUMP_FPS, f64::from);
     let frames = (request.at * fps).floor() as u64;
     let wall = SystemTime::now();
-    let (displays, display_count) = one_display(dims);
+    let whole = NSRect::new(NSPoint::ZERO, NSSize::new(width.into(), height.into()));
+    let (displays, display_count) = span::display_rects(whole, &[whole], dims);
     // dump uses the inputs of this moment, as it does for iDate.
     let system = FrameInputs {
         date: local_date(wall),
