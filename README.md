@@ -406,7 +406,7 @@ hyprlock recipe and `--shader` post-processing. `--rand` also picks pack
 directories, and `.glsl` files that have a `mainImage` function. A procedural
 wallpaper always fills the screen, so `--scale` has no effect. The same
 wallpapers run on Wayland and macOS. macOS does not have `--span` yet, and it
-does not read the audio or the dark mode setting.
+does not read the audio.
 
 ### One scene across all displays
 
@@ -488,6 +488,9 @@ phonto reads the dark mode setting through the XDG desktop portal. GNOME,
 KDE, and the GTK portal that other desktops use all give it. If no portal
 gives it, `iColorScheme` is 0.
 
+On macOS, `iColorScheme` follows System Settings > Appearance, including
+Auto.
+
 With `iLocation` and `iDate`, a shader can compute the sun. The function
 `sun()` in `examples/procedural/museslabs/common.glsl` gives the height and
 the direction of the sun, and the times of sunrise and sunset. Copy it into
@@ -507,8 +510,8 @@ and with the default setting macOS moves all windows away to show the desktop.
 For wallpapers that you click, such as the koi pond, set System Settings >
 Desktop & Dock > Click wallpaper to reveal desktop to "Only in Stage Manager".
 
-On macOS, phonto does not read the system audio or the dark mode setting yet.
-`iAudio`, `iSpectrum`, `iChroma`, and `iColorScheme` are 0 there.
+On macOS, phonto does not read the system audio yet. `iAudio`, `iSpectrum`,
+and `iChroma` are 0 there.
 
 phonto reads the keyboard only on macOS, through a keyboard channel (see
 [Packs](#packs)). `iChannelTime` and `iSampleRate` exist only so that shaders

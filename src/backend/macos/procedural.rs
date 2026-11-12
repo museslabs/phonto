@@ -916,8 +916,8 @@ pub fn one_display((w, h): (u32, u32)) -> ([[f32; 4]; MAX_DISPLAYS], i32) {
 
 /// `phonto dump` for a procedural wallpaper. It steps the wallpaper from 0 to
 /// `--at` seconds, as on Wayland. Buffers that keep state get there the same
-/// way.
-pub fn dump(request: DumpRequest) -> anyhow::Result<()> {
+/// way. `color_scheme` is `iColorScheme`.
+pub fn dump(request: DumpRequest, color_scheme: f32) -> anyhow::Result<()> {
     let mut pack = Pack::load(Path::new(&request.path))?;
     // An input command can write an image that the pack watches. The
     // commands run first, and then the watched images load again.
@@ -936,6 +936,7 @@ pub fn dump(request: DumpRequest) -> anyhow::Result<()> {
     // dump uses the inputs of this moment, as it does for iDate.
     let system = FrameInputs {
         date: local_date(wall),
+        color_scheme,
         battery: super::battery_observer::uniform(),
         location: location(wall, request.location),
         inputs: user_inputs,
@@ -1031,18 +1032,21 @@ mod tests {
         )
         .unwrap();
         let out = dir.join("frame.png");
-        dump(DumpRequest {
-            path: dir.to_string_lossy().into_owned(),
-            at: 0.0,
-            out: out.clone(),
-            size: Some((4, 2)),
-            location: None,
-            inputs: vec![crate::config::InputCommand {
-                name: "wind".into(),
-                command: "echo 0.25 1".into(),
-                every: 1.0,
-            }],
-        })
+        dump(
+            DumpRequest {
+                path: dir.to_string_lossy().into_owned(),
+                at: 0.0,
+                out: out.clone(),
+                size: Some((4, 2)),
+                location: None,
+                inputs: vec![crate::config::InputCommand {
+                    name: "wind".into(),
+                    command: "echo 0.25 1".into(),
+                    every: 1.0,
+                }],
+            },
+            0.0,
+        )
         .unwrap();
         let pixel = image::open(&out).unwrap().to_rgba8().get_pixel(0, 0).0;
         std::fs::remove_dir_all(&dir).unwrap();
