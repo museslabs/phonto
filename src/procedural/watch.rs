@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use super::pack::{Texture, decode_texture, empty_texture};
+use super::pack::{Texture, decode_texture};
 
 /// How often the watcher checks the files.
 const POLL: Duration = Duration::from_secs(1);
@@ -42,27 +42,20 @@ impl TextureWatcher {
                     std::thread::sleep(poll);
                     for (index, path, seen) in &mut watched {
                         let now = modified(path);
-                        if now == *seen {
+                        if now.is_none() || now == *seen {
                             continue;
                         }
                         *seen = now;
-                        // A file that goes away empties the channel, as
-                        // before the file first appeared. A file that a
-                        // script still writes can fail to decode. Its next
-                        // change loads it again.
-                        let texture = match now {
-                            None => empty_texture(path),
-                            Some(_) => match decode_texture(path) {
-                                Ok(texture) => texture,
-                                Err(err) => {
-                                    log::warn!("{err:#}");
-                                    continue;
+                        // A file that a script still writes can fail to
+                        // decode. Its next change loads it again.
+                        match decode_texture(path) {
+                            Ok(texture) => {
+                                if let Ok(mut updates) = shared.lock() {
+                                    updates.retain(|(i, _)| i != index);
+                                    updates.push((*index, texture));
                                 }
-                            },
-                        };
-                        if let Ok(mut updates) = shared.lock() {
-                            updates.retain(|(i, _)| i != index);
-                            updates.push((*index, texture));
+                            }
+                            Err(err) => log::warn!("{err:#}"),
                         }
                     }
                 }
@@ -133,18 +126,6 @@ mod tests {
         }
         sizes.sort();
         assert_eq!(sizes, [(0, 8), (1, 3)]);
-
-        // A file that goes away empties its channel.
-        std::fs::remove_file(&cover).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        let emptied = loop {
-            assert!(std::time::Instant::now() < deadline, "the channel stayed");
-            if let Some((i, t)) = watcher.take().into_iter().next() {
-                break (i, t.width, t.rgba);
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        assert_eq!(emptied, (0, 1, vec![0; 4]));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
