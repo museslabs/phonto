@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::ProtocolObject;
 use objc2::sel;
 use objc2_app_kit::NSView;
 use objc2_core_foundation::CGSize;
@@ -29,6 +29,7 @@ use super::battery_observer;
 use super::keyboard::Keyboard;
 use super::pointer::DesktopPointer;
 use super::procedural::{self, Gpu, GpuTexture, Program, SCREEN_FORMAT, Target};
+use super::screen_observer::ScreenObserver;
 use super::span;
 use crate::config::{InputCommand, Location};
 use crate::procedural::{
@@ -264,13 +265,11 @@ impl ProceduralSurface {
     pub fn start(
         &mut self,
         view: &NSView,
-        target: &AnyObject,
+        target: &ScreenObserver,
         source: &ProceduralSource,
         paused: bool,
     ) {
-        if let Some(old) = self.link.take() {
-            old.invalidate();
-        }
+        // SAFETY: `ScreenObserver` answers `frame:`, which takes the link.
         let link = unsafe { view.displayLinkWithTarget_selector(target, sel!(frame:)) };
         if let Some(fps) = source.fps {
             link.setPreferredFrameRateRange(CAFrameRateRange {
