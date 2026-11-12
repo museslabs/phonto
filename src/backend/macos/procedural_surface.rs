@@ -2,8 +2,10 @@
 //! wallpaper, and one [`ProceduralSurface`] for each screen that shows it.
 //!
 //! Each surface has a display link that fires at the refresh of its screen.
-//! The source keeps the clock. All surfaces of a source draw the same moment,
-//! so mirrored screens stay in sync.
+//! The source keeps the clock. Only a surface that has drawn the newest frame
+//! of its source starts the next one. The source then starts at most one frame
+//! for each refresh of its fastest screen. A slower screen shows whichever
+//! frame is newest when its link fires.
 //!
 //! With `--span`, the source draws one image for the whole desktop, and each
 //! surface shows its part of it.
@@ -309,12 +311,15 @@ impl ProceduralSurface {
         link: &CADisplayLink,
         color_scheme: f32,
     ) -> anyhow::Result<bool> {
-        let slack = Duration::from_secs_f64(link.duration() / 2.0);
-        source.advance(gpu, Instant::now(), slack, color_scheme)?;
+        // A surface that lags only shows the newest frame. If every link
+        // started one, two screens would start two frames in each refresh.
         if self.frame == source.frame {
-            return Ok(false);
+            let slack = Duration::from_secs_f64(link.duration() / 2.0);
+            source.advance(gpu, Instant::now(), slack, color_scheme)?;
+            if self.frame == source.frame {
+                return Ok(false);
+            }
         }
-        self.frame = source.frame;
 
         let cmd = gpu.command_buffer()?;
         let keyboard = source.keyboard_texture.as_deref();
@@ -370,6 +375,7 @@ impl ProceduralSurface {
             cmd.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable));
         }
         cmd.commit();
+        self.frame = source.frame;
         Ok(clicked_desktop)
     }
 }
