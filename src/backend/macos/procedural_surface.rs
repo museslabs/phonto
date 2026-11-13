@@ -219,11 +219,15 @@ impl ProceduralSource {
     }
 
     /// Stops running the input commands and reading the audio while the
-    /// wallpaper is paused.
-    pub fn set_paused(&self, paused: bool) {
+    /// wallpaper is paused. A spanned wallpaper also forgets the clicks of
+    /// the pause.
+    pub fn set_paused(&mut self, paused: bool) {
         self.commands.set_paused(paused);
         if let Some(audio) = &self.audio {
             audio.set_paused(paused);
+        }
+        if !paused && let Some(span) = &mut self.span {
+            span.scene.forget_clicks();
         }
     }
 }
@@ -301,9 +305,12 @@ impl ProceduralSurface {
         self.link.as_deref().is_some_and(|l| std::ptr::eq(l, link))
     }
 
-    pub fn set_paused(&self, paused: bool) {
+    pub fn set_paused(&mut self, paused: bool) {
         if let Some(link) = &self.link {
             link.setPaused(paused);
+        }
+        if !paused && let Some(scene) = &mut self.scene {
+            scene.forget_clicks();
         }
     }
 
@@ -429,6 +436,13 @@ impl Scene {
         };
         program.encode(cmd, target, &inputs, keyboard);
         Ok(clicked)
+    }
+
+    /// Forgets the clicks of a pause, when the wallpaper resumes.
+    fn forget_clicks(&mut self) {
+        if let Some(pointer) = &mut self.pointer {
+            pointer.forget_clicks();
+        }
     }
 }
 
