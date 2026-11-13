@@ -296,9 +296,6 @@ impl Backend for MacosBackend {
 
         app.run();
         drop(loop_observers);
-        // KVO does not retain its observer. A freed observer that is still
-        // registered crashes on the next change of the appearance.
-        color_scheme::unobserve(mtm, &screen_observer);
         drop(screen_observer);
         drop(battery_observer);
 

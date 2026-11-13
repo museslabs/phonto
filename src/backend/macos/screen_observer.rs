@@ -1,5 +1,7 @@
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, DefinedClass, define_class, msg_send, rc::Retained, runtime::NSObject};
+use objc2::{
+    DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained, runtime::NSObject,
+};
 use objc2_app_kit::{NSEvent, NSScreen, NSWindow};
 use objc2_av_foundation::{AVPlayer, AVPlayerLayer};
 use objc2_foundation::{
@@ -70,6 +72,7 @@ pub struct ScreenObserverIvars {
 
 define_class!(
     #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
     #[ivars = ScreenObserverIvars]
     pub struct ScreenObserver;
 
@@ -100,8 +103,13 @@ define_class!(
     }
 );
 
+impl Drop for ScreenObserver {
+    fn drop(&mut self) {
+        color_scheme::unobserve(self);
+    }
+}
+
 impl ScreenObserver {
-    /// Call `color_scheme::unobserve` before the observer is freed.
     pub fn new(
         mtm: MainThreadMarker,
         surfaces: Vec<MirrorSurface>,
@@ -119,9 +127,9 @@ impl ScreenObserver {
             power_paused: Cell::new(false),
             color_scheme: Cell::new(color_scheme::uniform(mtm)),
         };
-        let this = Self::alloc().set_ivars(ivars);
+        let this = Self::alloc(mtm).set_ivars(ivars);
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
-        color_scheme::observe(mtm, &this);
+        color_scheme::observe(&this);
         this.update_span(mtm);
         for surface in this.ivars().surfaces.borrow_mut().iter_mut() {
             this.start(surface);
@@ -147,10 +155,7 @@ impl ScreenObserver {
     }
 
     fn appearance_changed(&self) {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        let value = color_scheme::uniform(mtm);
+        let value = color_scheme::uniform(self.mtm());
         if value != self.ivars().color_scheme.get() {
             log::info!("appearance changed: dark={}", value == 1.0);
             self.ivars().color_scheme.set(value);
@@ -188,7 +193,7 @@ impl ScreenObserver {
     }
 
     fn frame(&self, link: &CADisplayLink) {
-        let (Some(mtm), Some(gpu)) = (MainThreadMarker::new(), &self.ivars().gpu) else {
+        let Some(gpu) = &self.ivars().gpu else {
             return;
         };
         let mut surfaces = self.ivars().surfaces.borrow_mut();
@@ -207,7 +212,7 @@ impl ScreenObserver {
         let mut sources = self.ivars().sources.borrow_mut();
         let source = &mut sources[source_index];
         let color_scheme = self.ivars().color_scheme.get();
-        let clicked_desktop = match p.draw(mtm, gpu, source, frame, link, color_scheme) {
+        let clicked_desktop = match p.draw(self.mtm(), gpu, source, frame, link, color_scheme) {
             Ok(clicked) => {
                 p.failing = false;
                 clicked
@@ -252,9 +257,7 @@ impl ScreenObserver {
     }
 
     fn reapply(&self) {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
+        let mtm = self.mtm();
         let screens = NSScreen::screens(mtm);
 
         let by_id: HashMap<u32, Retained<NSScreen>> = screens
