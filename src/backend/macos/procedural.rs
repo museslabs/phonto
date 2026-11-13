@@ -52,6 +52,11 @@ const IMAGE_FORMAT: MTLPixelFormat = MTLPixelFormat::RGBA8Unorm;
 /// The format of the drawables of a `CAMetalLayer` that shows a wallpaper.
 pub const SCREEN_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 
+/// The storage of a texture that the CPU writes or reads. Intel and AMD GPUs
+/// don't allow Shared textures. On Apple GPUs, Managed is the same as
+/// Shared.
+const CPU_STORAGE: MTLStorageMode = MTLStorageMode::Managed;
+
 /// The image size of `dump` without `--size`, as on Wayland.
 const DEFAULT_DUMP_SIZE: (u32, u32) = (1920, 1080);
 
@@ -498,8 +503,21 @@ impl Target {
         self.dims
     }
 
+    /// Encodes the copy of the image that the CPU reads. The CPU reads its
+    /// own copy of a Managed texture. On Intel and AMD GPUs, that copy holds
+    /// the frame only after a synchronize.
+    fn encode_read_back(&self, cmd: &CommandBuffer) -> anyhow::Result<()> {
+        let blit = cmd
+            .blitCommandEncoder()
+            .context("create a Metal blit encoder")?;
+        blit.synchronizeResource(ProtocolObject::from_ref(&*self.image));
+        blit.endEncoding();
+        Ok(())
+    }
+
     /// The image as RGBA rows from the top of the picture to the bottom. The
-    /// target must be readable, and the GPU must have finished the frame.
+    /// target must be readable, and the GPU must have finished the frame and
+    /// [`Self::encode_read_back`].
     fn read_image(&self) -> image::RgbaImage {
         let (w, h) = self.dims;
         let mut rgba = vec![0u8; w as usize * h as usize * 4];
@@ -784,7 +802,7 @@ fn render_target(
     };
     descriptor.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
     descriptor.setStorageMode(if readable {
-        MTLStorageMode::Shared
+        CPU_STORAGE
     } else {
         MTLStorageMode::Private
     });
@@ -871,7 +889,7 @@ fn upload(
         )
     };
     descriptor.setUsage(MTLTextureUsage::ShaderRead);
-    descriptor.setStorageMode(MTLStorageMode::Shared);
+    descriptor.setStorageMode(CPU_STORAGE);
     let Some(texture) = gpu.device.newTextureWithDescriptor(&descriptor) else {
         bail!("the GPU cannot make a {w}x{h} texture");
     };
@@ -980,6 +998,9 @@ pub fn dump(request: DumpRequest, color_scheme: f32) -> anyhow::Result<()> {
         previous = time;
         let cmd = gpu.command_buffer()?;
         program.encode(&cmd, &mut target, &inputs, Some(&keyboard));
+        if i == frames {
+            target.encode_read_back(&cmd)?;
+        }
         cmd.commit();
         last = Some(cmd);
     }
