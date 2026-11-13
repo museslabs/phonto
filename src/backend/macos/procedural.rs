@@ -840,8 +840,14 @@ fn black_texture(gpu: &Gpu) -> anyhow::Result<GpuTexture> {
 }
 
 /// The keyboard texture, from the rows of `Keyboard::take_frame`.
-pub fn keyboard_texture(gpu: &Gpu, rows: &[u8; KEYS * 3]) -> anyhow::Result<GpuTexture> {
-    upload(gpu, MTLPixelFormat::R8Unorm, (KEYS as u32, 3), rows, false)
+pub fn keyboard_texture(gpu: &Gpu, rows: &[[u8; KEYS]; 3]) -> anyhow::Result<GpuTexture> {
+    upload(
+        gpu,
+        MTLPixelFormat::R8Unorm,
+        (KEYS as u32, 3),
+        rows.as_flattened(),
+        false,
+    )
 }
 
 /// A texture of `format` that holds `data`, rows packed without padding.
