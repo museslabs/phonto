@@ -146,16 +146,15 @@ impl Gpu {
         target: &Target,
         drawable: &ProtocolObject<dyn MTLTexture>,
         crop: [f32; 4],
-    ) {
+    ) -> anyhow::Result<()> {
         let pass = MTLRenderPassDescriptor::new();
         let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
         color.setTexture(Some(drawable));
         color.setLoadAction(MTLLoadAction::DontCare);
         color.setStoreAction(MTLStoreAction::Store);
-        let Some(encoder) = cmd.renderCommandEncoderWithDescriptor(&pass) else {
-            log::warn!("Metal could not start the copy to the screen");
-            return;
-        };
+        let encoder = cmd
+            .renderCommandEncoderWithDescriptor(&pass)
+            .context("Metal could not start the copy to the screen")?;
         encoder.setRenderPipelineState(&self.present);
         let crop_ptr = NonNull::new(crop.as_ptr().cast_mut().cast::<c_void>())
             .expect("an array has a non-null pointer");
@@ -166,6 +165,7 @@ impl Gpu {
             encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
         }
         encoder.endEncoding();
+        Ok(())
     }
 }
 
@@ -378,9 +378,9 @@ impl Program {
         // too.
         let cmd = gpu.command_buffer()?;
         for texture in buffers.iter().flat_map(|pp| &pp.slots) {
-            clear(&cmd, texture);
+            clear(&cmd, texture)?;
         }
-        clear(&cmd, &image);
+        clear(&cmd, &image)?;
         cmd.commit();
 
         Ok(Target {
@@ -393,13 +393,14 @@ impl Program {
 
     /// Encodes every pass of one frame. The image of `target` then holds the
     /// frame. `keyboard` is the keyboard texture, if the wallpaper has one.
+    /// If a pass fails, `target` is part way through a frame. Make a new one.
     pub fn encode(
         &self,
         cmd: &CommandBuffer,
         target: &mut Target,
         inputs: &FrameInputs,
         keyboard: Option<&ProtocolObject<dyn MTLTexture>>,
-    ) {
+    ) -> anyhow::Result<()> {
         let buffer_count = self.buffers.len();
         for i in 0..buffer_count {
             // A `once` buffer keeps what it drew on the first frame.
@@ -414,7 +415,7 @@ impl Program {
                 inputs,
                 keyboard,
             };
-            self.draw_pass(cmd, &self.passes[i], &output, pp.dims, &frame);
+            self.draw_pass(cmd, &self.passes[i], &output, pp.dims, &frame)?;
             target.buffers[i].current ^= 1;
         }
         let frame = Frame {
@@ -423,8 +424,9 @@ impl Program {
             keyboard,
         };
         let pass = &self.passes[buffer_count];
-        self.draw_pass(cmd, pass, &target.image, target.dims, &frame);
+        self.draw_pass(cmd, pass, &target.image, target.dims, &frame)?;
         target.frame = target.frame.wrapping_add(1);
+        Ok(())
     }
 
     /// Draws one pass into `output`, which is `dims` pixels.
@@ -435,7 +437,7 @@ impl Program {
         output: &ProtocolObject<dyn MTLTexture>,
         dims: (u32, u32),
         frame: &Frame,
-    ) {
+    ) -> anyhow::Result<()> {
         let Frame {
             target,
             inputs,
@@ -446,10 +448,9 @@ impl Program {
         color.setTexture(Some(output));
         color.setLoadAction(pass.load);
         color.setStoreAction(MTLStoreAction::Store);
-        let Some(encoder) = cmd.renderCommandEncoderWithDescriptor(&descriptor) else {
-            log::warn!("Metal could not start a pass");
-            return;
-        };
+        let encoder = cmd
+            .renderCommandEncoderWithDescriptor(&descriptor)
+            .context("Metal could not start a pass")?;
         encoder.setRenderPipelineState(&pass.pipeline);
 
         let mut resolutions = [[0.0f32; 3]; MAX_CHANNELS];
@@ -495,6 +496,7 @@ impl Program {
         }
         unsafe { encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3) };
         encoder.endEncoding();
+        Ok(())
     }
 }
 
@@ -807,7 +809,7 @@ fn render_target(
         .with_context(|| format!("create a {w}x{h} render target"))
 }
 
-fn clear(cmd: &CommandBuffer, texture: &ProtocolObject<dyn MTLTexture>) {
+fn clear(cmd: &CommandBuffer, texture: &ProtocolObject<dyn MTLTexture>) -> anyhow::Result<()> {
     let pass = MTLRenderPassDescriptor::new();
     let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
     color.setTexture(Some(texture));
@@ -819,9 +821,10 @@ fn clear(cmd: &CommandBuffer, texture: &ProtocolObject<dyn MTLTexture>) {
         alpha: 0.0,
     });
     color.setStoreAction(MTLStoreAction::Store);
-    if let Some(encoder) = cmd.renderCommandEncoderWithDescriptor(&pass) {
-        encoder.endEncoding();
-    }
+    cmd.renderCommandEncoderWithDescriptor(&pass)
+        .context("Metal could not start clearing a render target")?
+        .endEncoding();
+    Ok(())
 }
 
 /// Uploads an image of a pack, with mipmaps for `filter = "mipmap"`.
@@ -993,7 +996,7 @@ pub fn dump(request: DumpRequest, color_scheme: f32) -> anyhow::Result<()> {
         };
         previous = time;
         let cmd = gpu.command_buffer()?;
-        program.encode(&cmd, &mut target, &inputs, Some(&keyboard));
+        program.encode(&cmd, &mut target, &inputs, Some(&keyboard))?;
         if i == frames {
             target.encode_read_back(&cmd)?;
         }
