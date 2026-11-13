@@ -17,12 +17,9 @@ pub struct RunOptions {
     /// Draw one procedural wallpaper across all outputs, as one desktop.
     #[cfg(target_os = "linux")]
     pub span: bool,
-    /// Where the user is, for the sun of procedural wallpapers. Only the
-    /// Wayland backend draws procedural wallpapers at this time.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    /// Where the user is, for the sun of procedural wallpapers.
     pub location: Option<Location>,
     /// The `[[input]]` commands of the configuration.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub inputs: Vec<InputCommand>,
 }
 
@@ -44,10 +41,8 @@ pub struct DumpRequest {
     /// The image size for procedural wallpapers. Videos keep their own size.
     pub size: Option<(u32, u32)>,
     /// Where the user is, for the sun of procedural wallpapers.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub location: Option<Location>,
     /// The `[[input]]` commands of the configuration.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub inputs: Vec<InputCommand>,
 }
 

@@ -33,7 +33,7 @@ pub use pack::{
 pub use watch::TextureWatcher;
 
 /// True if the backend of this platform can draw procedural wallpapers.
-pub const SUPPORTED: bool = cfg!(target_os = "linux");
+pub const SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
 
 /// True if `path` is a `.glsl` file, a pack directory, or the
 /// `manifest.toml` of a pack.
