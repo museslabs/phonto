@@ -86,12 +86,18 @@ define_class!(
         // handles.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            self.ivars().keyboard.borrow_mut().key(event.keyCode(), true);
+            self.ivars()
+                .keyboard
+                .borrow_mut()
+                .key(event.keyCode(), true, event.isARepeat());
         }
 
         #[unsafe(method(keyUp:))]
         fn key_up(&self, event: &NSEvent) {
-            self.ivars().keyboard.borrow_mut().key(event.keyCode(), false);
+            self.ivars()
+                .keyboard
+                .borrow_mut()
+                .key(event.keyCode(), false, false);
         }
 
         #[unsafe(method(flagsChanged:))]
