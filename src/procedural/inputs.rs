@@ -2,6 +2,7 @@
 //! frame-rate cap, the date, the location, and the pointer. `super::audio`
 //! makes the audio levels.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::audio::AudioFrame;
@@ -199,7 +200,15 @@ pub struct Pointer {
     /// True after a press, until a frame reads it.
     clicked: bool,
     ever_clicked: bool,
+    /// Where the left button was pressed since the backend last read the
+    /// presses to run actions, oldest first. Unlike `click`, which a frame
+    /// reads as on Shadertoy, no press is lost: each one can run an action.
+    presses: VecDeque<[f64; 2]>,
 }
+
+/// The most presses that wait for the backend. More presses between two
+/// frames push out the oldest.
+const MAX_PRESSES: usize = 16;
 
 impl Pointer {
     pub fn enter(&mut self, x: f64, y: f64) {
@@ -228,6 +237,10 @@ impl Pointer {
             self.ever_clicked = true;
             self.click = self.pos;
             self.drag = self.pos;
+            if self.presses.len() == MAX_PRESSES {
+                self.presses.pop_front();
+            }
+            self.presses.push_back(self.pos);
         } else {
             self.down = false;
         }
@@ -241,7 +254,17 @@ impl Pointer {
     /// `zw` is the click position. `z` is positive while the button is held.
     /// `w` is positive only on the first frame after a press. `iPointer` is
     /// `(x, y, 1 over the wallpaper, 1 while pressed)`.
-    pub fn uniforms(&mut self, area: [f64; 4], target: (u32, u32)) -> ([f32; 4], [f32; 4]) {
+    ///
+    /// With `take_click` false, the frame does not take the click: `w` stays
+    /// negative, and the next frame gets the click. The first frame of a new
+    /// render target does this, because phonto reads the actions of a click
+    /// from the frame before it.
+    pub fn uniforms(
+        &mut self,
+        area: [f64; 4],
+        target: (u32, u32),
+        take_click: bool,
+    ) -> ([f32; 4], [f32; 4]) {
         let [left, top, width, height] = area;
         let sx = f64::from(target.0) / width.max(1.0);
         let sy = f64::from(target.1) / height.max(1.0);
@@ -255,12 +278,14 @@ impl Pointer {
                 dx,
                 dy,
                 if self.down { cx } else { -cx },
-                if self.clicked { cy } else { -cy },
+                if self.clicked && take_click { cy } else { -cy },
             ]
         } else {
             [0.0; 4]
         };
-        self.clicked = false;
+        if take_click {
+            self.clicked = false;
+        }
 
         let [px, py] = to_target(self.pos);
         let pointer = [
@@ -271,6 +296,36 @@ impl Pointer {
         ];
         (mouse, pointer)
     }
+
+    /// The places of the presses that no one took yet, oldest first, as
+    /// fractions of `area` from the bottom left. `area` is the same as for
+    /// `uniforms`. A press outside `area` is left out.
+    pub fn take_presses(&mut self, area: [f64; 4]) -> Vec<[f64; 2]> {
+        self.presses
+            .drain(..)
+            .filter_map(|pos| fraction(pos, area))
+            .collect()
+    }
+
+    /// The place of the pointer while it is over the wallpaper, as a
+    /// fraction of `area` from the bottom left.
+    pub fn hover(&self, area: [f64; 4]) -> Option<[f64; 2]> {
+        if !self.inside {
+            return None;
+        }
+        fraction(self.pos, area)
+    }
+}
+
+/// `pos` in surface coordinates, as a fraction of `area` from the bottom
+/// left. `None` if `pos` is outside `area`.
+fn fraction([x, y]: [f64; 2], [left, top, width, height]: [f64; 4]) -> Option<[f64; 2]> {
+    let fx = (x - left) / width.max(1.0);
+    let fy = (top + height - y) / height.max(1.0);
+    // The surface rows go from 0 at the top to `height` at the bottom. So a
+    // row inside the area gives a fraction above 0 and at most 1.
+    let inside = (0.0..1.0).contains(&fx) && fy > 0.0 && fy <= 1.0;
+    inside.then_some([fx, fy])
 }
 
 #[cfg(test)]
@@ -348,33 +403,48 @@ mod tests {
         let surface = (100, 50);
         let mut p = Pointer::default();
         p.enter(10.0, 5.0);
-        let (mouse, pointer) = p.uniforms(whole(surface), surface);
+        let (mouse, pointer) = p.uniforms(whole(surface), surface, true);
         assert_eq!(mouse, [0.0; 4], "no click yet");
         assert_eq!(pointer, [10.0, 45.0, 1.0, 0.0]);
 
         p.button(BTN_LEFT, true);
         p.motion(20.0, 10.0);
-        let (mouse, _) = p.uniforms(whole(surface), surface);
+        let (mouse, _) = p.uniforms(whole(surface), surface, true);
         assert_eq!(mouse, [20.0, 40.0, 10.0, 45.0], "first frame: z, w > 0");
-        let (mouse, pointer) = p.uniforms(whole(surface), surface);
+        let (mouse, pointer) = p.uniforms(whole(surface), surface, true);
         assert_eq!(mouse, [20.0, 40.0, 10.0, -45.0], "held: z > 0, w < 0");
         assert_eq!(pointer[3], 1.0);
 
         p.button(BTN_LEFT, false);
         p.motion(30.0, 10.0);
-        let (mouse, pointer) = p.uniforms(whole(surface), surface);
+        let (mouse, pointer) = p.uniforms(whole(surface), surface, true);
         assert_eq!(mouse, [20.0, 40.0, -10.0, -45.0], "released: drag stays");
         assert_eq!(pointer, [30.0, 40.0, 1.0, 0.0]);
 
         p.leave();
-        assert_eq!(p.uniforms(whole(surface), surface).1[2], 0.0);
+        assert_eq!(p.uniforms(whole(surface), surface, true).1[2], 0.0);
+    }
+
+    #[test]
+    fn a_click_can_wait_for_the_next_frame() {
+        let surface = (100, 50);
+        let mut p = Pointer::default();
+        p.enter(10.0, 5.0);
+        p.button(BTN_LEFT, true);
+        p.button(BTN_LEFT, false);
+        let (mouse, _) = p.uniforms(whole(surface), surface, false);
+        assert_eq!(mouse[3], -45.0, "the frame does not take the click");
+        let (mouse, _) = p.uniforms(whole(surface), surface, true);
+        assert_eq!(mouse, [10.0, 45.0, -10.0, 45.0], "the next frame does");
+        let (mouse, _) = p.uniforms(whole(surface), surface, true);
+        assert_eq!(mouse[3], -45.0);
     }
 
     #[test]
     fn pointer_scales_to_render_target() {
         let mut p = Pointer::default();
         p.enter(50.0, 0.0);
-        let (_, pointer) = p.uniforms(whole((100, 50)), (50, 25));
+        let (_, pointer) = p.uniforms(whole((100, 50)), (50, 25), true);
         assert_eq!(&pointer[..2], &[25.0, 25.0]);
     }
 
@@ -384,15 +454,57 @@ mod tests {
         // that size shows it.
         let mut p = Pointer::default();
         p.enter(50.0, 20.0);
-        let (_, pointer) = p.uniforms([-100.0, 0.0, 300.0, 100.0], (150, 50));
+        let (_, pointer) = p.uniforms([-100.0, 0.0, 300.0, 100.0], (150, 50), true);
         assert_eq!(&pointer[..2], &[75.0, 40.0]);
+    }
+
+    #[test]
+    fn presses_wait_for_the_backend() {
+        let area = [0.0, 0.0, 200.0, 100.0];
+        let mut p = Pointer::default();
+        p.enter(50.0, 25.0);
+        assert_eq!(p.hover(area), Some([0.25, 0.75]));
+        assert!(p.take_presses(area).is_empty());
+        p.button(BTN_LEFT, true);
+        p.button(BTN_LEFT, false);
+        // A frame reads the click for iMouse. The press stays for the
+        // actions, and it goes after one read.
+        let _ = p.uniforms(area, (200, 100), true);
+        assert_eq!(p.take_presses(area), [[0.25, 0.75]]);
+        assert!(p.take_presses(area).is_empty());
+        p.leave();
+        assert_eq!(p.hover(area), None);
+        // A desktop area that starts at x = 100 does not include x = 50.
+        p.button(BTN_LEFT, true);
+        assert!(p.take_presses([100.0, 0.0, 200.0, 100.0]).is_empty());
+    }
+
+    #[test]
+    fn every_press_between_frames_waits() {
+        // Two clicks in different places before the next frame, as with a
+        // low frame rate: both wait, in order.
+        let area = [0.0, 0.0, 200.0, 100.0];
+        let mut p = Pointer::default();
+        p.enter(20.0, 50.0);
+        p.button(BTN_LEFT, true);
+        p.button(BTN_LEFT, false);
+        p.motion(180.0, 50.0);
+        p.button(BTN_LEFT, true);
+        p.button(BTN_LEFT, false);
+        assert_eq!(p.take_presses(area), [[0.1, 0.5], [0.9, 0.5]]);
+        // Past the limit, the oldest presses go.
+        for _ in 0..MAX_PRESSES + 3 {
+            p.button(BTN_LEFT, true);
+            p.button(BTN_LEFT, false);
+        }
+        assert_eq!(p.take_presses(area).len(), MAX_PRESSES);
     }
 
     #[test]
     fn other_buttons_are_ignored() {
         let mut p = Pointer::default();
         p.button(0x111, true);
-        assert_eq!(p.uniforms(whole((10, 10)), (10, 10)).0, [0.0; 4]);
+        assert_eq!(p.uniforms(whole((10, 10)), (10, 10), true).0, [0.0; 4]);
     }
 
     #[test]

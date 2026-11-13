@@ -6,6 +6,7 @@
 
 use std::fmt::Write;
 
+use super::actions::MAX_LABEL;
 use super::pack::NamedInput;
 
 /// The declarations that each pass gets. The names and meanings are the same
@@ -48,6 +49,41 @@ uniform int iDisplayCount;          // 1 unless the wallpaper spans several disp
 out vec4 phonto_FragColor;
 ";
 
+/// The labels of the actions, for a pack with actions. The texture has one
+/// row of `MAX_LABEL` texels for each action (see `actions::label_texels`).
+const ACTION_LABELS: &str =
+    "uniform sampler2D iActionLabels;    // The labels of the actions. See iActionLabel.
+uniform int iActionCount;           // The number of actions of the pack.
+
+// The Unicode code point at `index` of the label of `action` (1 for the first
+// action). 0 after the end of the label.
+int iActionLabel(int action, int index) {
+    if (action < 1 || action > iActionCount || index < 0 || index >= PHONTO_MAX_LABEL) {
+        return 0;
+    }
+    vec4 t = texelFetch(iActionLabels, ivec2(index, action - 1), 0);
+    return int(t.r * 255.0 + 0.5) + 256 * int(t.g * 255.0 + 0.5);
+}
+
+// The number of characters in the label of `action`. 0 without a label.
+int iActionLabelLength(int action) {
+    for (int i = 0; i < PHONTO_MAX_LABEL; i++) {
+        if (iActionLabel(action, i) == 0) {
+            return i;
+        }
+    }
+    return PHONTO_MAX_LABEL;
+}
+
+// True if the configuration gives `action` a command.
+bool iActionHasCommand(int action) {
+    if (action < 1 || action > iActionCount) {
+        return false;
+    }
+    return texelFetch(iActionLabels, ivec2(0, action - 1), 0).b > 0.5;
+}
+";
+
 /// Source-string numbers for `#line`. A compile error then tells which file a
 /// line is in. For example, `0:12` is line 12 of the pass file.
 const PASS_SOURCE: u32 = 0;
@@ -62,14 +98,20 @@ pub enum PassKind {
     Image,
 }
 
+/// The source of a pass. `has_actions` adds the labels of the actions.
 pub fn fragment_shader(
     common: Option<&str>,
     code: &str,
     kind: PassKind,
     inputs: &[NamedInput],
+    has_actions: bool,
 ) -> String {
     let mut s = String::with_capacity(HEADER.len() + common.map_or(0, str::len) + code.len() + 256);
     s.push_str(HEADER);
+    if has_actions {
+        let _ = writeln!(s, "#define PHONTO_MAX_LABEL {MAX_LABEL}");
+        s.push_str(ACTION_LABELS);
+    }
     // The inputs of the pack are the fields of one uniform, so their names
     // do not collide with the names in the shader.
     if !inputs.is_empty() {
@@ -136,6 +178,7 @@ mod tests {
             "void mainImage(out vec4 c, in vec2 p) { c = vec4(helper()); }",
             PassKind::Buffer,
             &[],
+            false,
         );
         assert!(src.starts_with("#version 300 es\n"));
         let common = src.find("#line 1 1\nfloat helper").unwrap();
@@ -173,6 +216,7 @@ mod tests {
             "void mainImage(out vec4 c, in vec2 p) {}",
             PassKind::Image,
             &inputs,
+            false,
         );
         assert!(src.contains("struct phonto_Inputs {\n    float rain;\n    vec2 wind;\n};"));
         assert!(src.contains("uniform phonto_Inputs iInput;"));
@@ -181,8 +225,20 @@ mod tests {
             "void mainImage(out vec4 c, in vec2 p) {}",
             PassKind::Image,
             &[],
+            false,
         );
         assert!(!plain.contains("iInput"));
+    }
+
+    #[test]
+    fn actions_add_the_label_helpers() {
+        let code = "void mainImage(out vec4 c, in vec2 p) { c = vec4(float(iActionLabel(1, 0))); }";
+        let src = fragment_shader(None, code, PassKind::Image, &[], true);
+        assert!(src.contains(&format!("#define PHONTO_MAX_LABEL {MAX_LABEL}")));
+        assert!(src.contains("uniform sampler2D iActionLabels;"));
+        assert!(src.contains("int iActionLabelLength(int action)"));
+        let plain = fragment_shader(None, code, PassKind::Image, &[], false);
+        assert!(!plain.contains("iActionLabels"));
     }
 
     #[test]
@@ -201,6 +257,7 @@ mod tests {
             "void mainImage(out vec4 c, in vec2 p) {}",
             PassKind::Image,
             &[],
+            false,
         );
         assert!(src.contains("phonto_FragColor.a = 1.0;"));
         assert!(!src.contains("#line 1 1"));
@@ -213,6 +270,7 @@ mod tests {
             "#version 300 es\nvoid mainImage(out vec4 c, in vec2 p) {}",
             PassKind::Image,
             &[],
+            false,
         );
         assert_eq!(src.matches("#version").count(), 1);
         assert!(src.contains("#line 1 0\n\nvoid mainImage"));

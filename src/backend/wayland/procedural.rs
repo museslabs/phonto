@@ -25,9 +25,23 @@ pub struct Program {
     passes: Vec<CompiledPass>,
     buffers: Vec<BufferTarget>,
     textures: Vec<UploadedTexture>,
+    videos: Vec<VideoTexture>,
     samplers: Vec<((Filter, Wrap), glow::Sampler)>,
     render_scale: f32,
+    /// The buffer that holds the number of the action at each pixel.
+    action_buffer: Option<usize>,
+    /// The labels of the actions, if the pack has actions.
+    labels: Option<ActionLabels>,
 }
+
+/// The `iActionLabels` texture, on the texture unit after the channels.
+struct ActionLabels {
+    texture: glow::Texture,
+    count: usize,
+}
+
+/// The texture unit of `iActionLabels`. GLES 3.0 has at least 16 units.
+const LABELS_UNIT: u32 = MAX_CHANNELS as u32;
 
 /// How to make the render targets of one buffer pass.
 struct BufferTarget {
@@ -72,6 +86,7 @@ struct Uniforms {
     location: Option<glow::UniformLocation>,
     displays: Option<glow::UniformLocation>,
     display_count: Option<glow::UniformLocation>,
+    action_count: Option<glow::UniformLocation>,
     /// `iInput.<name>` for each input of the pack, and its size.
     inputs: Vec<(Option<glow::UniformLocation>, usize)>,
 }
@@ -80,6 +95,19 @@ struct UploadedTexture {
     texture: glow::Texture,
     width: u32,
     height: u32,
+}
+
+/// The last frame of a video channel. Each decoded frame is copied into
+/// `texture` with its rows turned over, so that `uv = (0, 0)` is the bottom
+/// left, as for images.
+struct VideoTexture {
+    texture: glow::Texture,
+    width: u32,
+    height: u32,
+    /// Reads the decoded frame during the copy.
+    read_fbo: glow::Framebuffer,
+    /// Writes `texture` during the copy.
+    draw_fbo: glow::Framebuffer,
 }
 
 /// The render targets and the frame count of one output.
@@ -119,8 +147,11 @@ impl Program {
             passes: Vec::with_capacity(pack.buffers.len() + 1),
             buffers,
             textures: Vec::with_capacity(pack.textures.len()),
+            videos: Vec::with_capacity(pack.videos.len()),
             samplers: Vec::new(),
             render_scale: pack.render_scale,
+            action_buffer: pack.actions.as_ref().map(|a| a.buffer),
+            labels: None,
         };
         if let Err(e) = program.build(gl, pack) {
             program.destroy(gl);
@@ -134,6 +165,19 @@ impl Program {
         for t in &pack.textures {
             let uploaded = upload_texture(gl, t, max_size)?;
             self.textures.push(uploaded);
+        }
+        for _ in &pack.videos {
+            let video = VideoTexture::new(gl)?;
+            self.videos.push(video);
+        }
+        if let Some(actions) = &pack.actions {
+            // Empty labels until `set_action_labels`.
+            let count = actions.names.len();
+            let texels = vec![0u8; count * procedural::MAX_LABEL * 4];
+            self.labels = Some(ActionLabels {
+                texture: upload_labels(gl, &texels, count)?,
+                count,
+            });
         }
         for buffer in &pack.buffers {
             let compiled = self.compile_pass(gl, pack, &buffer.pass, PassKind::Buffer)?;
@@ -157,6 +201,7 @@ impl Program {
             &pass.source.code,
             kind,
             &pack.inputs,
+            pack.actions.is_some(),
         );
         let program = link(gl, &source).with_context(|| {
             format!(
@@ -175,6 +220,9 @@ impl Program {
                 if let Some(loc) = gl.get_uniform_location(program, &format!("iChannel{unit}")) {
                     gl.uniform_1_i32(Some(&loc), unit as i32);
                 }
+            }
+            if let Some(loc) = gl.get_uniform_location(program, "iActionLabels") {
+                gl.uniform_1_i32(Some(&loc), LABELS_UNIT as i32);
             }
             let loc = |name: &str| gl.get_uniform_location(program, name);
             Uniforms {
@@ -198,6 +246,7 @@ impl Program {
                 location: loc("iLocation"),
                 displays: loc("iDisplays"),
                 display_count: loc("iDisplayCount"),
+                action_count: loc("iActionCount"),
                 inputs: pack
                     .inputs
                     .iter()
@@ -350,7 +399,7 @@ impl Program {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(target.image.fbo));
             self.draw_pass(gl, &self.passes[buffer_count], target.dims, target, inputs);
 
-            for unit in 0..MAX_CHANNELS as u32 {
+            for unit in 0..=LABELS_UNIT {
                 gl.bind_sampler(unit, None);
             }
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
@@ -436,12 +485,25 @@ impl Program {
                         let t = &self.textures[i];
                         (t.texture, t.width, t.height)
                     }
+                    Input::Video(i) => {
+                        let v = &self.videos[i];
+                        (v.texture, v.width, v.height)
+                    }
                 };
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                 gl.bind_sampler(unit as u32, Some(channel.sampler));
                 resolutions[unit * 3..unit * 3 + 3].copy_from_slice(&[w as f32, h as f32, 1.0]);
             }
             gl.uniform_3_f32_slice(u.channel_resolution.as_ref(), &resolutions);
+
+            if let Some(labels) = &self.labels {
+                gl.uniform_1_i32(u.action_count.as_ref(), labels.count as i32);
+                gl.active_texture(glow::TEXTURE0 + LABELS_UNIT);
+                gl.bind_texture(glow::TEXTURE_2D, Some(labels.texture));
+                // The texture has its own nearest filtering, and the shader
+                // reads it with texelFetch.
+                gl.bind_sampler(LABELS_UNIT, None);
+            }
 
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
@@ -462,6 +524,143 @@ impl Program {
         Ok(())
     }
 
+    /// Copies a decoded frame of video `index` into the texture of its
+    /// channels. The context must be current. The copy runs on the GPU after
+    /// the call returns: the returned fence signals when it is done, and
+    /// `frame` must stay valid until then.
+    pub fn update_video(
+        &mut self,
+        gl: &glow::Context,
+        index: usize,
+        frame: &TextureRef,
+    ) -> anyhow::Result<glow::Fence> {
+        let video = &mut self.videos[index];
+        let (w, h) = (frame.width as i32, frame.height as i32);
+        unsafe {
+            if (video.width, video.height) != (frame.width, frame.height) {
+                gl.bind_texture(glow::TEXTURE_2D, Some(video.texture));
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    glow::RGBA8 as i32,
+                    w,
+                    h,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(None),
+                );
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                video.width = frame.width;
+                video.height = frame.height;
+            }
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(video.read_fbo));
+            gl.framebuffer_texture_2d(
+                glow::READ_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(frame.texture),
+                0,
+            );
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(video.draw_fbo));
+            gl.framebuffer_texture_2d(
+                glow::DRAW_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(video.texture),
+                0,
+            );
+            let status = gl.check_framebuffer_status(glow::READ_FRAMEBUFFER);
+            if status == glow::FRAMEBUFFER_COMPLETE {
+                // The destination rows go from h to 0, so the copy turns the
+                // frame over.
+                gl.blit_framebuffer(
+                    0,
+                    0,
+                    w,
+                    h,
+                    0,
+                    h,
+                    w,
+                    0,
+                    glow::COLOR_BUFFER_BIT,
+                    glow::NEAREST,
+                );
+            }
+            // Detach the decoded frame, because the decoder uses its texture
+            // again.
+            gl.framebuffer_texture_2d(
+                glow::READ_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                None,
+                0,
+            );
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+            if status != glow::FRAMEBUFFER_COMPLETE {
+                bail!("cannot read the decoded video frame (status {status:#x})");
+            }
+            gl.fence_sync(glow::SYNC_GPU_COMMANDS_COMPLETE, 0)
+                .map_err(|e| anyhow!("cannot make a fence for the video copy: {e}"))
+        }
+    }
+
+    /// Sets the labels of the actions: the texels of
+    /// `procedural::label_texels`. The context must be current.
+    pub fn set_action_labels(&mut self, gl: &glow::Context, texels: &[u8]) -> anyhow::Result<()> {
+        let Some(labels) = &mut self.labels else {
+            return Ok(());
+        };
+        if texels.len() != labels.count * procedural::MAX_LABEL * 4 {
+            bail!(
+                "the labels do not match the {} actions of the pack",
+                labels.count
+            );
+        }
+        let texture = upload_labels(gl, texels, labels.count)?;
+        unsafe { gl.delete_texture(std::mem::replace(&mut labels.texture, texture)) };
+        Ok(())
+    }
+
+    /// True if the actions buffer draws only once, so the actions do not move
+    /// until the target changes.
+    pub fn actions_are_static(&self) -> bool {
+        self.action_buffer.is_some_and(|i| self.buffers[i].once)
+    }
+
+    /// The value in the red channel of the actions buffer at `at`, a
+    /// fraction of the image from the bottom left. It is the number of the
+    /// action that the last frame drew there, and 0 is no action. `None` if
+    /// the pack has no actions, or if no frame drew yet. The context must be
+    /// current.
+    pub fn read_action(&self, gl: &glow::Context, target: &Target, at: [f64; 2]) -> Option<u8> {
+        let index = self.action_buffer?;
+        if !target.has_drawn() {
+            return None;
+        }
+        let pp = &target.buffers[index];
+        let (w, h) = pp.dims;
+        let texel = |f: f64, size: u32| ((f * f64::from(size)) as i32).clamp(0, size as i32 - 1);
+        let mut rgba = [0u8; 4];
+        unsafe {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(pp.slots[pp.current].fbo));
+            // `Pack::load` makes sure that this buffer is RGBA8, so this read
+            // works on every GPU.
+            gl.read_pixels(
+                texel(at[0], w),
+                texel(at[1], h),
+                1,
+                1,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(&mut rgba)),
+            );
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        }
+        Some(rgba[0])
+    }
+
     /// Frees the GL objects. The context must be current.
     pub fn destroy(self, gl: &glow::Context) {
         unsafe {
@@ -470,6 +669,14 @@ impl Program {
             }
             for t in self.textures {
                 gl.delete_texture(t.texture);
+            }
+            for v in self.videos {
+                gl.delete_framebuffer(v.read_fbo);
+                gl.delete_framebuffer(v.draw_fbo);
+                gl.delete_texture(v.texture);
+            }
+            if let Some(labels) = self.labels {
+                gl.delete_texture(labels.texture);
             }
             for (_, s) in self.samplers {
                 gl.delete_sampler(s);
@@ -483,6 +690,12 @@ impl Target {
         self.dims
     }
 
+    /// True after the first frame. A new target has nothing in its buffers
+    /// before that.
+    pub fn has_drawn(&self) -> bool {
+        self.frame != 0
+    }
+
     /// Frees the GL objects. The context must be current.
     pub fn destroy(self, gl: &glow::Context) {
         for pp in self.buffers {
@@ -491,6 +704,51 @@ impl Target {
             }
         }
         self.image.destroy(gl);
+    }
+}
+
+impl VideoTexture {
+    /// A black texture of one pixel, until the first frame comes.
+    fn new(gl: &glow::Context) -> anyhow::Result<Self> {
+        unsafe {
+            let texture = gl.create_texture().map_err(|e| anyhow!(e))?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                1,
+                1,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&[0, 0, 0, 255])),
+            );
+            set_texture_params(gl, glow::LINEAR);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            let read_fbo = match gl.create_framebuffer() {
+                Ok(f) => f,
+                Err(e) => {
+                    gl.delete_texture(texture);
+                    bail!(e);
+                }
+            };
+            let draw_fbo = match gl.create_framebuffer() {
+                Ok(f) => f,
+                Err(e) => {
+                    gl.delete_framebuffer(read_fbo);
+                    gl.delete_texture(texture);
+                    bail!(e);
+                }
+            };
+            Ok(Self {
+                texture,
+                width: 1,
+                height: 1,
+                read_fbo,
+                draw_fbo,
+            })
+        }
     }
 }
 
@@ -590,6 +848,56 @@ fn upload_texture(
             width: t.width,
             height: t.height,
         })
+    }
+}
+
+/// The longest wait for a fence, in nanoseconds.
+const FENCE_TIMEOUT_NS: i32 = 1_000_000_000;
+
+/// True if the GPU finished the work before `fence`. With `wait`, this waits
+/// for it at most one second. The context must be current.
+pub fn fence_signaled(gl: &glow::Context, fence: glow::Fence, wait: bool) -> bool {
+    let timeout = if wait { FENCE_TIMEOUT_NS } else { 0 };
+    let status = unsafe { gl.client_wait_sync(fence, glow::SYNC_FLUSH_COMMANDS_BIT, timeout) };
+    status == glow::ALREADY_SIGNALED || status == glow::CONDITION_SATISFIED
+}
+
+/// Deletes `fence`. The context must be current.
+pub fn delete_fence(gl: &glow::Context, fence: glow::Fence) {
+    unsafe { gl.delete_sync(fence) };
+}
+
+/// Uploads the texels of the labels of `count` actions: one row of
+/// `MAX_LABEL` texels for each action.
+fn upload_labels(gl: &glow::Context, texels: &[u8], count: usize) -> anyhow::Result<glow::Texture> {
+    unsafe {
+        let texture = gl.create_texture().map_err(|e| anyhow!(e))?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            procedural::MAX_LABEL as i32,
+            count as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(texels)),
+        );
+        // One level and no mipmaps, so the texture is complete.
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        Ok(texture)
     }
 }
 
