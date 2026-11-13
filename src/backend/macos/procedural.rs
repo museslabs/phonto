@@ -207,7 +207,7 @@ struct UploadedTexture {
 }
 
 /// Where each uniform that phonto sets is in the uniform block of a pass. A
-/// field is `None` if the block has no such uniform.
+/// field is `None` if the pass doesn't read the uniform.
 #[derive(Default)]
 struct UniformLayout {
     buffer: Option<usize>,
@@ -314,6 +314,13 @@ impl Program {
             default_sampler: samplers.get(&gpu.device, Filter::Linear, Wrap::Clamp)?,
             render_scale: pack.render_scale,
         })
+    }
+
+    /// True if a pass reads `iMouse` or `iPointer`.
+    pub fn reads_pointer(&self) -> bool {
+        self.passes
+            .iter()
+            .any(|p| p.uniforms.mouse.is_some() || p.uniforms.pointer.is_some())
     }
 
     /// Uploads a new image for `Pack::textures[index]`, for a watched file

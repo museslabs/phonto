@@ -49,6 +49,7 @@ pub struct Translated {
     pub uniform_buffer: Option<usize>,
     /// The size of the uniform block in bytes.
     pub uniform_size: usize,
+    /// The members of the uniform block that the pass reads.
     pub uniforms: Vec<Member>,
     /// The texture and sampler indices of `iChannelN`. `None` if the pass
     /// does not read the channel.
@@ -136,7 +137,14 @@ fn to_msl(spirv: &[u32]) -> anyhow::Result<Translated> {
             .map_err(spirv_cross_error)?;
         if let TypeInner::Struct(s) = ty.inner {
             uniform_size = s.size;
+            // The block declares every uniform of the header.
+            let read = compiler
+                .active_buffer_ranges(r.id)
+                .map_err(spirv_cross_error)?;
             for m in s.members {
+                if !read.iter().any(|range| range.index as usize == m.index) {
+                    continue;
+                }
                 let name = m.name.map(|n| n.to_string()).unwrap_or_default();
                 let offset = m.offset as usize;
                 let member_type = compiler.type_description(m.id).map_err(spirv_cross_error)?;
@@ -306,7 +314,7 @@ mod tests {
         let glsl = fragment_shader(
             None,
             "void mainImage(out vec4 c, in vec2 p) {
-                c = texture(iChannel2, p / iResolution.xy) + vec4(iTime) + iMouse;
+                c = texture(iChannel2, p / iResolution.xy) + vec4(iTime + iChannelTime[1]) + iMouse;
             }",
             PassKind::Image,
             &[],
@@ -320,6 +328,10 @@ mod tests {
         let offset = |name: &str| t.uniforms.iter().find(|m| m.name == name).map(|m| m.offset);
         assert!(offset("iTime").is_some());
         assert!(offset("iMouse").is_some());
+        assert!(
+            offset("iPointer").is_none(),
+            "unread uniforms have no offset"
+        );
         let channel_time = t
             .uniforms
             .iter()

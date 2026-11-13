@@ -69,6 +69,9 @@ pub struct ProceduralSource {
     /// that has the keyboard fills it.
     pub keyboard: Option<Rc<RefCell<Keyboard>>>,
     keyboard_texture: Option<GpuTexture>,
+    /// True if the scenes read the pointer: for `iMouse` or `iPointer`, or
+    /// for the click that gives a keyboard channel the keys.
+    polls_pointer: bool,
     /// Set with `--span`.
     span: Option<Span>,
 }
@@ -85,7 +88,7 @@ struct Span {
 /// An image of one or more screens, and the pointer over them.
 struct Scene {
     target: Option<Target>,
-    pointer: DesktopPointer,
+    pointer: Option<DesktopPointer>,
     /// The last frame of the source that the target holds.
     frame: u64,
     /// The frames of the screens that the target shows.
@@ -115,8 +118,10 @@ impl ProceduralSource {
             .chain([&pack.image])
             .flat_map(|pass| &pass.channels)
             .any(|c| c.input == Input::Keyboard);
+        let program = Program::compile(gpu, &pack)?;
+        let polls_pointer = reads_keys || program.reads_pointer();
         Ok(Self {
-            program: Program::compile(gpu, &pack)?,
+            program,
             fps: pack.fps,
             clock: Clock::new(pack.fps),
             limiter: FrameLimiter::new(pack.fps),
@@ -131,9 +136,10 @@ impl ProceduralSource {
             frame: 0,
             keyboard: reads_keys.then(Rc::default),
             keyboard_texture: None,
+            polls_pointer,
             span: span.then(|| Span {
                 screens: Vec::new(),
-                scene: Scene::new(),
+                scene: Scene::new(polls_pointer),
             }),
         })
     }
@@ -327,7 +333,8 @@ impl ProceduralSurface {
         let (scene, screens) = match &mut source.span {
             Some(span) => (&mut span.scene, span.screens.as_slice()),
             None => (
-                self.scene.get_or_insert_with(Scene::new),
+                self.scene
+                    .get_or_insert_with(|| Scene::new(source.polls_pointer)),
                 std::slice::from_ref(&frame),
             ),
         };
@@ -372,10 +379,10 @@ impl ProceduralSurface {
 }
 
 impl Scene {
-    fn new() -> Self {
+    fn new(polls_pointer: bool) -> Self {
         Self {
             target: None,
-            pointer: DesktopPointer::new(),
+            pointer: polls_pointer.then(DesktopPointer::new),
             frame: 0,
             screens: Vec::new(),
         }
@@ -405,8 +412,13 @@ impl Scene {
 
         // The pointer is read once for each frame of the scene. A second
         // read in the same frame would not see the click.
-        let clicked = self.pointer.poll(mtm, rect);
-        let (mouse, pointer) = self.pointer.uniforms(size, dims);
+        let (clicked, (mouse, pointer)) = match &mut self.pointer {
+            Some(p) => {
+                let clicked = p.poll(mtm, rect);
+                (clicked, p.uniforms(size, dims))
+            }
+            None => (false, (shared.mouse, shared.pointer)),
+        };
         let (displays, display_count) = span::display_rects(rect, &self.screens, dims);
         let inputs = FrameInputs {
             mouse,
