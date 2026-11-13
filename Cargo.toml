@@ -125,6 +125,7 @@ objc2-metal = { version = "0.3", default-features = false, features = [
     "std",
     "MTLAllocation",
     "MTLBlitCommandEncoder",
+    "MTLBuffer",
     "MTLCommandBuffer",
     "MTLCommandEncoder",
     "MTLCommandQueue",

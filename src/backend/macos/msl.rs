@@ -21,6 +21,9 @@ use crate::procedural::MAX_CHANNELS;
 /// loose uniforms.
 const UNIFORM_BLOCK: &str = "PhontoUniforms";
 
+/// The texture of the action labels, for a pack with actions.
+const ACTION_LABELS: &str = "iActionLabels";
+
 /// Goes before the name of every function and struct of a shader in MSL.
 /// Metal declares names that GLSL does not have, such as the functions
 /// `atan2`, `log10` and `select`, and the reserved types `quad` and `complex`.
@@ -127,6 +130,9 @@ pub struct Translated {
     /// The texture and sampler indices of `iChannelN`. `None` if the pass
     /// does not read the channel.
     pub channels: [Option<(usize, usize)>; MAX_CHANNELS],
+    /// The texture and sampler indices of `iActionLabels`. `None` if the
+    /// pass does not read the labels.
+    pub labels: Option<(usize, usize)>,
 }
 
 /// A member of the uniform block.
@@ -281,11 +287,18 @@ fn to_msl(spirv: &[u32]) -> anyhow::Result<Translated> {
         block = Some(r.id);
     }
 
-    let channels: Vec<_> = resources
+    let mut channels = Vec::new();
+    let mut labels = None;
+    for r in resources
         .resources_for_type(ResourceType::SampledImage)
         .map_err(spirv_cross_error)?
-        .filter_map(|r| Some((channel_index(&r.name)?, r.id)))
-        .collect();
+    {
+        if r.name == ACTION_LABELS {
+            labels = Some(r.id);
+        } else if let Some(n) = channel_index(&r.name) {
+            channels.push((n, r.id));
+        }
+    }
 
     let mut options = CompilerOptions::default();
     options.version = MslVersion::new(2, 4, 0);
@@ -307,13 +320,14 @@ fn to_msl(spirv: &[u32]) -> anyhow::Result<Translated> {
         Some(id) => binding(id, AutomaticResourceBindingTier::Primary)?,
         None => None,
     };
-    let mut slots = [None; MAX_CHANNELS];
-    for (n, id) in channels {
+    let slot = |id| -> anyhow::Result<_> {
         let texture = binding(id, AutomaticResourceBindingTier::Primary)?;
         let sampler = binding(id, AutomaticResourceBindingTier::Secondary)?;
-        if let (Some(texture), Some(sampler)) = (texture, sampler) {
-            slots[n] = Some((texture, sampler));
-        }
+        Ok(texture.zip(sampler))
+    };
+    let mut slots = [None; MAX_CHANNELS];
+    for (n, id) in channels {
+        slots[n] = slot(id)?;
     }
 
     Ok(Translated {
@@ -323,6 +337,7 @@ fn to_msl(spirv: &[u32]) -> anyhow::Result<Translated> {
         uniform_size,
         uniforms,
         channels: slots,
+        labels: labels.map(slot).transpose()?.flatten(),
     })
 }
 
@@ -451,6 +466,24 @@ mod tests {
         assert_eq!(channel_time.stride, 16, "std140 pads a float array to vec4");
         assert!(t.channels[2].is_some());
         assert!(t.channels[0].is_none(), "unused channels have no slot");
+    }
+
+    #[test]
+    fn binds_the_action_labels() {
+        let glsl = fragment_shader(
+            None,
+            "void mainImage(out vec4 c, in vec2 p) {
+                c = vec4(float(iActionLabelLength(2)), texture(iChannel1, p).r, 0.0, 1.0);
+            }",
+            PassKind::Image,
+            &[],
+            true,
+        );
+        let t = translate(&glsl).unwrap();
+        assert!(t.labels.is_some());
+        assert!(t.channels[1].is_some());
+        assert_ne!(t.labels, t.channels[1]);
+        assert!(t.uniforms.iter().any(|m| m.name == "iActionCount"));
     }
 
     #[test]

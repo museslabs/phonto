@@ -19,25 +19,25 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::Context;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::sel;
+use objc2::{Message, sel};
 use objc2_app_kit::NSView;
 use objc2_core_foundation::CGSize;
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
 use objc2_foundation::{MainThreadMarker, NSRect, NSRunLoop, NSRunLoopCommonModes};
-use objc2_metal::{MTLCommandBuffer, MTLDrawable, MTLTexture};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLDrawable, MTLTexture};
 use objc2_quartz_core::{CADisplayLink, CAFrameRateRange, CAMetalDrawable, CAMetalLayer};
 
 use super::audio::AudioCapture;
 use super::battery_observer;
 use super::keyboard::Keyboard;
 use super::pointer::DesktopPointer;
-use super::procedural::{self, Gpu, GpuTexture, Program, SCREEN_FORMAT, Target};
+use super::procedural::{self, Gpu, GpuBuffer, GpuTexture, Program, SCREEN_FORMAT, Target};
 use super::screen_observer::ScreenObserver;
 use super::span;
-use crate::config::{InputCommand, Location};
+use crate::config::{ActionCommand, InputCommand, Location};
 use crate::procedural::{
-    AudioFrame, Clock, CommandInputs, FrameInputs, FrameLimiter, Input, Pack, TextureWatcher,
-    local_date, location,
+    ActionRunner, AudioFrame, Clock, CommandInputs, FrameInputs, FrameLimiter, Input, Pack,
+    TextureWatcher, local_date, location,
 };
 
 /// How often `iBattery` reads the battery, as on Wayland.
@@ -69,8 +69,11 @@ pub struct ProceduralSource {
     /// that has the keyboard fills it.
     pub keyboard: Option<Rc<RefCell<Keyboard>>>,
     keyboard_texture: Option<GpuTexture>,
-    /// True if the scenes read the pointer: for `iMouse` or `iPointer`, or
-    /// for the click that gives a keyboard channel the keys.
+    /// The commands of the actions, if the pack has actions.
+    actions: Option<ActionRunner>,
+    /// True if the scenes read the pointer: for `iMouse` or `iPointer`, for
+    /// the click that gives a keyboard channel the keys, or for the clicks
+    /// that run actions.
     polls_pointer: bool,
     /// Set with `--span`.
     span: Option<Span>,
@@ -93,6 +96,16 @@ struct Scene {
     frame: u64,
     /// The frames of the screens that the target shows.
     screens: Vec<NSRect>,
+    /// The actions under presses, oldest first, until the GPU has read them.
+    action_reads: Vec<ActionRead>,
+}
+
+/// The actions under the presses of one frame, as the GPU reads them.
+struct ActionRead {
+    /// The frame that reads them. The texels are ready when it completes.
+    cmd: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    /// The texel under each press. Its red byte is the action.
+    texels: GpuBuffer,
 }
 
 impl ProceduralSource {
@@ -101,6 +114,7 @@ impl ProceduralSource {
         path: &str,
         location: Option<Location>,
         commands: &[InputCommand],
+        actions: &[ActionCommand],
         span: bool,
     ) -> anyhow::Result<Self> {
         let pack = Pack::load(Path::new(path))?;
@@ -118,8 +132,8 @@ impl ProceduralSource {
             .chain([&pack.image])
             .flat_map(|pass| &pass.channels)
             .any(|c| c.input == Input::Keyboard);
-        let program = Program::compile(gpu, &pack)?;
-        let polls_pointer = reads_keys || program.reads_pointer();
+        let program = Program::compile(gpu, &pack, actions)?;
+        let polls_pointer = reads_keys || program.reads_pointer() || pack.actions.is_some();
         Ok(Self {
             program,
             fps: pack.fps,
@@ -136,6 +150,10 @@ impl ProceduralSource {
             frame: 0,
             keyboard: reads_keys.then(Rc::default),
             keyboard_texture: None,
+            actions: pack
+                .actions
+                .as_ref()
+                .map(|a| ActionRunner::new(&a.names, actions)),
             polls_pointer,
             span: span.then(|| Span {
                 screens: Vec::new(),
@@ -356,6 +374,9 @@ impl ProceduralSurface {
         let cmd = gpu.command_buffer()?;
         let mut clicked_desktop = false;
         if scene.frame != source.frame {
+            if let Some(actions) = &source.actions {
+                scene.run_actions(actions);
+            }
             screens.clone_into(&mut scene.screens);
             let keyboard = source.keyboard_texture.as_deref();
             clicked_desktop =
@@ -396,6 +417,7 @@ impl Scene {
             pointer: polls_pointer.then(DesktopPointer::new),
             frame: 0,
             screens: Vec::new(),
+            action_reads: Vec::new(),
         }
     }
 
@@ -422,13 +444,21 @@ impl Scene {
         let target = self.target.as_mut().expect("target created above");
 
         // The pointer is read once for each frame of the scene. A second
-        // read in the same frame would not see the click.
-        let (clicked, (mouse, pointer)) = match &mut self.pointer {
+        // read in the same frame would not see the click. A new target has
+        // no frame to read actions from. Its clicks wait for its first frame,
+        // and the action and the shader then see a click on the same frame.
+        let drawn = target.has_drawn();
+        let (clicked, (mouse, pointer), read) = match &mut self.pointer {
             Some(p) => {
                 let clicked = p.poll(mtm, rect);
-                (clicked, p.uniforms(size, dims))
+                let read = if drawn {
+                    program.encode_action_reads(gpu, cmd, target, &p.take_presses(size))?
+                } else {
+                    None
+                };
+                (clicked, p.uniforms(size, dims, drawn), read)
             }
-            None => (false, (shared.mouse, shared.pointer)),
+            None => (false, (shared.mouse, shared.pointer), None),
         };
         let (displays, display_count) = span::display_rects(rect, &self.screens, dims);
         let inputs = FrameInputs {
@@ -442,14 +472,57 @@ impl Scene {
         program
             .encode(cmd, target, &inputs, keyboard)
             .inspect_err(|_| self.target = None)?;
+        if let Some(texels) = read {
+            self.action_reads.push(ActionRead {
+                cmd: cmd.retain(),
+                texels,
+            });
+        }
         Ok(clicked)
     }
 
-    /// Forgets the clicks of a pause, when the wallpaper resumes.
+    /// Runs the actions under the presses of the frames that the GPU has
+    /// finished. A display link callback never waits for the GPU.
+    fn run_actions(&mut self, actions: &ActionRunner) {
+        // The frames of one queue complete in order.
+        let done = self
+            .action_reads
+            .iter()
+            .take_while(|r| {
+                matches!(
+                    r.cmd.status(),
+                    MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error
+                )
+            })
+            .count();
+        for read in self.action_reads.drain(..done) {
+            if read.cmd.status() == MTLCommandBufferStatus::Error {
+                log::warn!("the GPU failed a frame, so the actions of its clicks do not run");
+                continue;
+            }
+            // SAFETY: The GPU has finished writing the buffer, and nothing
+            // writes it again. It holds `length` bytes.
+            let texels = unsafe {
+                std::slice::from_raw_parts(
+                    read.texels.contents().cast::<u8>().as_ptr(),
+                    read.texels.length(),
+                )
+            };
+            for [red, ..] in texels.as_chunks::<4>().0 {
+                if let Some(index) = actions.index(*red) {
+                    actions.run(index);
+                }
+            }
+        }
+    }
+
+    /// Forgets the clicks of a pause, when the wallpaper resumes. A click
+    /// that the GPU read just before the pause would run minutes late.
     fn forget_clicks(&mut self) {
         if let Some(pointer) = &mut self.pointer {
             pointer.forget_clicks();
         }
+        self.action_reads.clear();
     }
 }
 
