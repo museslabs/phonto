@@ -57,6 +57,9 @@ pub const SCREEN_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
 /// Shared.
 const CPU_STORAGE: MTLStorageMode = MTLStorageMode::Managed;
 
+/// The most bytes that `setFragmentBytes` takes.
+const MAX_UNIFORM_BYTES: usize = 4096;
+
 /// The image size of `dump` without `--size`, as on Wayland.
 const DEFAULT_DUMP_SIZE: (u32, u32) = (1920, 1080);
 
@@ -409,13 +412,18 @@ impl Program {
                 continue;
             }
             let pp = &target.buffers[i];
-            let output = pp.slots[1 - pp.current].clone();
             let frame = Frame {
                 target,
                 inputs,
                 keyboard,
             };
-            self.draw_pass(cmd, &self.passes[i], &output, pp.dims, &frame)?;
+            self.draw_pass(
+                cmd,
+                &self.passes[i],
+                &pp.slots[1 - pp.current],
+                pp.dims,
+                &frame,
+            )?;
             target.buffers[i].current ^= 1;
         }
         let frame = Frame {
@@ -487,12 +495,17 @@ impl Program {
         }
 
         if let Some(index) = pass.uniforms.buffer {
-            let bytes = pass
-                .uniforms
-                .bytes(dims, target.dims, target.frame, inputs, &resolutions);
-            let ptr = NonNull::new(bytes.as_ptr().cast_mut().cast::<c_void>())
-                .expect("a Vec has a non-null pointer");
-            unsafe { encoder.setFragmentBytes_length_atIndex(ptr, bytes.len(), index) };
+            let mut bytes = [0u8; MAX_UNIFORM_BYTES];
+            let bytes = &mut bytes[..pass.uniforms.size];
+            pass.uniforms
+                .write(bytes, dims, target.dims, target.frame, inputs, &resolutions);
+            unsafe {
+                encoder.setFragmentBytes_length_atIndex(
+                    NonNull::from(&*bytes).cast(),
+                    bytes.len(),
+                    index,
+                );
+            }
         }
         unsafe { encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3) };
         encoder.endEncoding();
@@ -581,54 +594,50 @@ impl UniformLayout {
         }
     }
 
-    /// The uniform block of a pass of `dims` pixels.
-    fn bytes(
+    /// Writes the uniform block of a pass of `dims` pixels into `b`, which
+    /// holds zeros.
+    fn write(
         &self,
+        b: &mut [u8],
         dims: (u32, u32),
         image: (u32, u32),
         frame: i32,
         inputs: &FrameInputs,
         resolutions: &[[f32; 3]; MAX_CHANNELS],
-    ) -> Vec<u8> {
-        let mut b = vec![0u8; self.size];
+    ) {
+        put(b, self.resolution, &[dims.0 as f32, dims.1 as f32, 1.0]);
         put(
-            &mut b,
-            self.resolution,
-            &[dims.0 as f32, dims.1 as f32, 1.0],
-        );
-        put(
-            &mut b,
+            b,
             self.image_resolution,
             &[image.0 as f32, image.1 as f32, 1.0],
         );
-        put(&mut b, self.time, &[inputs.time]);
-        put(&mut b, self.time_delta, &[inputs.time_delta]);
-        put(&mut b, self.frame_rate, &[inputs.frame_rate]);
-        put(&mut b, self.mouse, &inputs.mouse);
-        put(&mut b, self.date, &inputs.date);
-        put(&mut b, self.sample_rate, &[44_100.0]);
-        put(&mut b, self.pointer, &inputs.pointer);
-        put(&mut b, self.audio, &inputs.audio.levels);
-        put(&mut b, self.color_scheme, &[inputs.color_scheme]);
-        put(&mut b, self.battery, &inputs.battery);
-        put(&mut b, self.location, &inputs.location);
-        put_int(&mut b, self.frame, frame);
-        put_int(&mut b, self.display_count, inputs.display_count);
+        put(b, self.time, &[inputs.time]);
+        put(b, self.time_delta, &[inputs.time_delta]);
+        put(b, self.frame_rate, &[inputs.frame_rate]);
+        put(b, self.mouse, &inputs.mouse);
+        put(b, self.date, &inputs.date);
+        put(b, self.sample_rate, &[44_100.0]);
+        put(b, self.pointer, &inputs.pointer);
+        put(b, self.audio, &inputs.audio.levels);
+        put(b, self.color_scheme, &[inputs.color_scheme]);
+        put(b, self.battery, &inputs.battery);
+        put(b, self.location, &inputs.location);
+        put_int(b, self.frame, frame);
+        put_int(b, self.display_count, inputs.display_count);
         for (unit, resolution) in resolutions.iter().enumerate() {
             if let Some((at, stride)) = self.channel_time {
-                put(&mut b, Some(at + unit * stride), &[inputs.time]);
+                put(b, Some(at + unit * stride), &[inputs.time]);
             }
             if let Some((at, stride)) = self.channel_resolution {
-                put(&mut b, Some(at + unit * stride), resolution);
+                put(b, Some(at + unit * stride), resolution);
             }
         }
-        put_array(&mut b, self.spectrum, inputs.audio.spectrum.map(|v| [v]));
-        put_array(&mut b, self.chroma, inputs.audio.chroma.map(|v| [v]));
-        put_array(&mut b, self.displays, inputs.displays);
+        put_array(b, self.spectrum, inputs.audio.spectrum.map(|v| [v]));
+        put_array(b, self.chroma, inputs.audio.chroma.map(|v| [v]));
+        put_array(b, self.displays, inputs.displays);
         for (&(at, size), value) in self.inputs.iter().zip(&inputs.inputs) {
-            put(&mut b, at, &value[..size]);
+            put(b, at, &value[..size]);
         }
-        b
     }
 }
 
@@ -715,6 +724,15 @@ fn compile_pass(
         });
     }
 
+    let uniforms = UniformLayout::new(&translated, pack);
+    // Only uniforms that a pass declares itself can pass the limit.
+    if uniforms.buffer.is_some() && uniforms.size > MAX_UNIFORM_BYTES {
+        bail!(
+            "pass `{}`: its uniforms take {} bytes. Metal takes at most {MAX_UNIFORM_BYTES}",
+            pass.name,
+            uniforms.size
+        );
+    }
     let discards = translated.source.contains("discard_fragment");
     Ok(CompiledPass {
         pipeline,
@@ -723,7 +741,7 @@ fn compile_pass(
         } else {
             MTLLoadAction::DontCare
         },
-        uniforms: UniformLayout::new(&translated, pack),
+        uniforms,
         channels,
         slots: translated.channels,
     })
