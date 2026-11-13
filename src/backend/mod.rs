@@ -21,7 +21,6 @@ pub struct RunOptions {
     /// The `[[input]]` commands of the configuration.
     pub inputs: Vec<InputCommand>,
     /// The `[[action]]` commands of the configuration.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub actions: Vec<ActionCommand>,
 }
 
@@ -47,7 +46,6 @@ pub struct DumpRequest {
     /// The `[[input]]` commands of the configuration.
     pub inputs: Vec<InputCommand>,
     /// The `[[action]]` entries of the configuration, for their labels.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub actions: Vec<ActionCommand>,
 }
 

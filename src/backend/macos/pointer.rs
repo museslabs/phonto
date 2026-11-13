@@ -91,10 +91,22 @@ impl DesktopPointer {
     }
 
     /// `(iMouse, iPointer)` for the next frame. `surface` is the size of the
-    /// screen in points.
-    pub fn uniforms(&mut self, surface: (u32, u32), target: (u32, u32)) -> ([f32; 4], [f32; 4]) {
-        let area = [0.0, 0.0, f64::from(surface.0), f64::from(surface.1)];
-        self.pointer.uniforms(area, target, true)
+    /// screen in points. With `take_click` false, the click waits for the
+    /// frame after.
+    pub fn uniforms(
+        &mut self,
+        surface: (u32, u32),
+        target: (u32, u32),
+        take_click: bool,
+    ) -> ([f32; 4], [f32; 4]) {
+        self.pointer.uniforms(area(surface), target, take_click)
+    }
+
+    /// The places of the presses since the last call, oldest first, as
+    /// fractions of the screen from the bottom left. `surface` is as for
+    /// `uniforms`.
+    pub fn take_presses(&mut self, surface: (u32, u32)) -> Vec<[f64; 2]> {
+        self.pointer.take_presses(area(surface))
     }
 
     /// True if the window under `location` is the desktop: Finder's desktop
@@ -112,6 +124,11 @@ impl DesktopPointer {
         self.last_hit = Some((number, desktop));
         desktop
     }
+}
+
+/// The area of `Pointer` for a screen of `surface` points.
+fn area(surface: (u32, u32)) -> [f64; 4] {
+    [0.0, 0.0, f64::from(surface.0), f64::from(surface.1)]
 }
 
 fn left_clicks() -> u32 {

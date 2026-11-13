@@ -20,26 +20,28 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-    MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice, MTLFunction, MTLGPUFamily,
-    MTLLibrary, MTLLoadAction, MTLMathMode, MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion,
-    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
-    MTLRenderPipelineState, MTLSamplerAddressMode, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
-    MTLSamplerMipFilter, MTLSamplerState, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage,
+    MTLBlitCommandEncoder, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder,
+    MTLCommandQueue, MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice, MTLFunction,
+    MTLGPUFamily, MTLLibrary, MTLLoadAction, MTLMathMode, MTLOrigin, MTLPixelFormat,
+    MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLSamplerAddressMode,
+    MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerMipFilter, MTLSamplerState, MTLSize,
+    MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor, MTLTextureUsage,
 };
 
 use super::keyboard::KEYS;
 use super::msl::{self, Translated};
 use super::span;
 use crate::backend::DumpRequest;
+use crate::config::ActionCommand;
 use crate::procedural::{
-    self, BufferFormat, BufferSize, Filter, FrameInputs, Input, MAX_CHANNELS, Pack, Pass, PassKind,
-    Texture, Wrap, local_date, location, read_inputs_once,
+    self, BufferFormat, BufferSize, Filter, FrameInputs, Input, MAX_CHANNELS, MAX_LABEL, Pack,
+    Pass, PassKind, Texture, Wrap, local_date, location, read_inputs_once,
 };
 
 type Device = ProtocolObject<dyn MTLDevice>;
 type CommandBuffer = ProtocolObject<dyn MTLCommandBuffer>;
+pub type GpuBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 pub type GpuTexture = Retained<ProtocolObject<dyn MTLTexture>>;
 type Sampler = Retained<ProtocolObject<dyn MTLSamplerState>>;
 type Pipeline = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
@@ -182,6 +184,10 @@ pub struct Program {
     black: GpuTexture,
     default_sampler: Sampler,
     render_scale: f32,
+    /// The labels of the actions and their sampler, if the pack has actions.
+    labels: Option<(GpuTexture, Sampler)>,
+    /// The buffer that holds the number of the action at each pixel.
+    action_buffer: Option<usize>,
 }
 
 /// How to make the render targets of one buffer pass.
@@ -202,6 +208,9 @@ struct CompiledPass {
     channels: Vec<BoundChannel>,
     /// The texture and sampler indices of each channel that the pass reads.
     slots: [Option<(usize, usize)>; MAX_CHANNELS],
+    /// The texture and sampler indices of `iActionLabels`, if the pass reads
+    /// the labels.
+    labels: Option<(usize, usize)>,
 }
 
 struct BoundChannel {
@@ -236,6 +245,8 @@ struct UniformLayout {
     battery: Option<usize>,
     location: Option<usize>,
     display_count: Option<usize>,
+    /// The offset of `iActionCount`, and the number of actions.
+    action_count: Option<(usize, i32)>,
     /// The offset and the array stride.
     channel_time: Option<(usize, usize)>,
     channel_resolution: Option<(usize, usize)>,
@@ -271,14 +282,13 @@ struct PingPong {
 }
 
 impl Program {
-    pub fn compile(gpu: &Gpu, pack: &Pack) -> anyhow::Result<Self> {
-        Self::build(gpu, pack).with_context(|| format!("procedural wallpaper `{}`", pack.name))
+    /// Compiles `pack`. `actions` gives the labels of its actions.
+    pub fn compile(gpu: &Gpu, pack: &Pack, actions: &[ActionCommand]) -> anyhow::Result<Self> {
+        Self::build(gpu, pack, actions)
+            .with_context(|| format!("procedural wallpaper `{}`", pack.name))
     }
 
-    fn build(gpu: &Gpu, pack: &Pack) -> anyhow::Result<Self> {
-        if pack.actions.is_some() {
-            bail!("actions don't work on macOS yet");
-        }
+    fn build(gpu: &Gpu, pack: &Pack, actions: &[ActionCommand]) -> anyhow::Result<Self> {
         if let Some(video) = pack.videos.first() {
             bail!(
                 "video channels don't work on macOS yet ({})",
@@ -323,6 +333,18 @@ impl Program {
             &mut samplers,
         )?;
         passes.push(image);
+        let labels = match &pack.actions {
+            Some(a) => {
+                let texels = procedural::label_texels(&a.names, actions);
+                let dims = (MAX_LABEL as u32, a.names.len() as u32);
+                let texture = upload(gpu, MTLPixelFormat::RGBA8Unorm, dims, &texels, false)?;
+                Some((
+                    texture,
+                    samplers.get(&gpu.device, Filter::Nearest, Wrap::Clamp)?,
+                ))
+            }
+            None => None,
+        };
 
         Ok(Self {
             passes,
@@ -331,7 +353,59 @@ impl Program {
             black: black_texture(gpu)?,
             default_sampler: samplers.get(&gpu.device, Filter::Linear, Wrap::Clamp)?,
             render_scale: pack.render_scale,
+            labels,
+            action_buffer: pack.actions.as_ref().map(|a| a.buffer),
         })
+    }
+
+    /// Encodes copies of the texels of the actions buffer under `at` into a
+    /// buffer that the CPU reads. They copy the last finished frame of
+    /// `target`, the one on screen. Encode them before the next frame. `at`
+    /// holds fractions of the image from the bottom left. Once `cmd` has
+    /// completed, byte `4 * i` is the action under `at[i]`. `None` if the
+    /// pack has no actions or `at` is empty.
+    pub fn encode_action_reads(
+        &self,
+        gpu: &Gpu,
+        cmd: &CommandBuffer,
+        target: &Target,
+        at: &[[f64; 2]],
+    ) -> anyhow::Result<Option<GpuBuffer>> {
+        let Some(index) = self.action_buffer.filter(|_| !at.is_empty()) else {
+            return Ok(None);
+        };
+        let pp = &target.buffers[index];
+        let (w, h) = pp.dims;
+        // Unlike textures, buffers can be Shared on every Mac.
+        let texels = gpu
+            .device
+            .newBufferWithLength_options(4 * at.len(), MTLResourceOptions::StorageModeShared)
+            .context("create a Metal buffer for the actions")?;
+        let blit = cmd
+            .blitCommandEncoder()
+            .context("create a Metal blit encoder")?;
+        let texel = |f: f64, size: u32| ((f * f64::from(size)) as usize).min(size as usize - 1);
+        let one = MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        for (i, &[x, y]) in at.iter().enumerate() {
+            let origin = MTLOrigin {
+                x: texel(x, w),
+                y: texel(y, h),
+                z: 0,
+            };
+            // SAFETY: The texel is inside the texture, and its 4 bytes fit
+            // the buffer at `4 * i`. The command buffer keeps both alive.
+            unsafe {
+                blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
+                    &pp.slots[pp.current], 0, 0, origin, one, &texels, 4 * i, 4, 4,
+                );
+            }
+        }
+        blit.endEncoding();
+        Ok(Some(texels))
     }
 
     /// True if a pass reads `iMouse` or `iPointer`.
@@ -504,6 +578,14 @@ impl Program {
                 }
             }
         }
+        if let (Some((texture_index, sampler_index)), Some((texture, sampler))) =
+            (pass.labels, &self.labels)
+        {
+            unsafe {
+                encoder.setFragmentTexture_atIndex(Some(texture), texture_index);
+                encoder.setFragmentSamplerState_atIndex(Some(sampler), sampler_index);
+            }
+        }
 
         if let Some(index) = pass.uniforms.buffer {
             let mut bytes = [0u8; MAX_UNIFORM_BYTES];
@@ -527,6 +609,12 @@ impl Program {
 impl Target {
     pub fn dims(&self) -> (u32, u32) {
         self.dims
+    }
+
+    /// True after the first frame. A new target has nothing in its buffers
+    /// before that.
+    pub fn has_drawn(&self) -> bool {
+        self.frame != 0
     }
 
     /// Encodes the copy of the image that the CPU reads. The CPU reads its
@@ -591,6 +679,10 @@ impl UniformLayout {
             battery: offset("iBattery"),
             location: offset("iLocation"),
             display_count: offset("iDisplayCount"),
+            action_count: pack
+                .actions
+                .as_ref()
+                .and_then(|a| Some((offset("iActionCount")?, a.names.len() as i32))),
             channel_time: array("iChannelTime"),
             channel_resolution: array("iChannelResolution"),
             spectrum: array("iSpectrum"),
@@ -634,6 +726,9 @@ impl UniformLayout {
         put(b, self.location, &inputs.location);
         put_int(b, self.frame, frame);
         put_int(b, self.display_count, inputs.display_count);
+        if let Some((at, count)) = self.action_count {
+            put_int(b, Some(at), count);
+        }
         for (unit, resolution) in resolutions.iter().enumerate() {
             if let Some((at, stride)) = self.channel_time {
                 put(b, Some(at + unit * stride), &[inputs.time]);
@@ -755,6 +850,7 @@ fn compile_pass(
         uniforms,
         channels,
         slots: translated.channels,
+        labels: translated.labels,
     })
 }
 
@@ -991,7 +1087,7 @@ pub fn dump(request: DumpRequest, color_scheme: f32) -> anyhow::Result<()> {
     let user_inputs = read_inputs_once(&pack.inputs, &request.inputs);
     pack.reload_watched();
     let gpu = Gpu::new()?;
-    let program = Program::compile(&gpu, &pack)?;
+    let program = Program::compile(&gpu, &pack, &request.actions)?;
     let (width, height) = request.size.unwrap_or(DEFAULT_DUMP_SIZE);
     let dims = program.target_dims((width, height));
     let mut target = program.create_target(&gpu, dims, true)?;
@@ -1129,5 +1225,105 @@ mod tests {
             pixel.iter().zip(expected).all(|(&p, e)| p.abs_diff(e) <= 1),
             "{pixel:?}"
         );
+    }
+
+    /// A pack with actions in its own temporary directory.
+    fn actions_pack(name: &str, image: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("phonto-metal-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Action 1 on the left half, 2 at the bottom right, 3 at the top right.
+        std::fs::write(
+            dir.join("pick.glsl"),
+            "void mainImage(out vec4 c, in vec2 p) {
+                int a = p.x < iResolution.x * 0.5 ? 1 : (p.y < iResolution.y * 0.5 ? 2 : 3);
+                c = vec4(float(a) / 255.0, 0.0, 0.0, 1.0);
+            }",
+        )
+        .unwrap();
+        std::fs::write(dir.join("image.glsl"), image).unwrap();
+        std::fs::write(
+            dir.join(procedural::MANIFEST),
+            "[[buffer]]\nname = \"pick\"\nshader = \"pick.glsl\"\nformat = \"rgba8\"\nonce = true\n\
+             [image]\nshader = \"image.glsl\"\n\
+             [actions]\nbuffer = \"pick\"\nnames = [\"a\", \"b\", \"c\"]\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    /// The labels, the commands and the number of actions reach the shader.
+    #[test]
+    fn dump_draws_the_action_labels() {
+        let dir = actions_pack(
+            "labels",
+            "void mainImage(out vec4 c, in vec2 p) {
+                c = vec4(float(iActionLabel(1, 0)) / 255.0, float(iActionCount) / 255.0,
+                         iActionHasCommand(2) ? 1.0 : 0.0, 1.0);
+            }",
+        );
+        let out = dir.join("frame.png");
+        let actions = vec![
+            ActionCommand {
+                name: "a".into(),
+                label: Some("A".into()),
+                ..ActionCommand::default()
+            },
+            ActionCommand {
+                name: "b".into(),
+                command: Some("true".into()),
+                ..ActionCommand::default()
+            },
+        ];
+        dump(
+            DumpRequest {
+                path: dir.to_string_lossy().into_owned(),
+                at: 0.0,
+                out: out.clone(),
+                size: Some((4, 2)),
+                location: None,
+                inputs: Vec::new(),
+                actions,
+            },
+            0.0,
+        )
+        .unwrap();
+        let pixel = image::open(&out).unwrap().to_rgba8().get_pixel(0, 0).0;
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(pixel, [b'A', 3, 255, 255]);
+    }
+
+    /// A press reads the action that the last frame drew under it. A
+    /// fraction is from the bottom left, as `fragCoord`.
+    #[test]
+    fn reads_the_action_under_each_press() {
+        let dir = actions_pack(
+            "reads",
+            "void mainImage(out vec4 c, in vec2 p) { c = vec4(1.0); }",
+        );
+        let pack = Pack::load(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let gpu = Gpu::new().unwrap();
+        let program = Program::compile(&gpu, &pack, &[]).unwrap();
+        let mut target = program.create_target(&gpu, (64, 32), false).unwrap();
+        let cmd = gpu.command_buffer().unwrap();
+        program
+            .encode(&cmd, &mut target, &FrameInputs::default(), None)
+            .unwrap();
+        cmd.commit();
+
+        let cmd = gpu.command_buffer().unwrap();
+        let at = [[0.25, 0.9], [0.75, 0.1], [0.75, 0.9], [0.99, 1.0]];
+        let texels = program
+            .encode_action_reads(&gpu, &cmd, &target, &at)
+            .unwrap()
+            .unwrap();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        let bytes = unsafe {
+            std::slice::from_raw_parts(texels.contents().cast::<u8>().as_ptr(), texels.length())
+        };
+        let red: Vec<u8> = bytes.as_chunks::<4>().0.iter().map(|t| t[0]).collect();
+        assert_eq!(red, [1, 2, 3, 3]);
     }
 }

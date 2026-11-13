@@ -327,8 +327,14 @@ impl Sources {
                 Some(gpu) => gpu,
                 gpu => gpu.insert(Gpu::new()?),
             };
-            let source =
-                ProceduralSource::load(gpu, path, options.location, &options.inputs, options.span)?;
+            let source = ProceduralSource::load(
+                gpu,
+                path,
+                options.location,
+                &options.inputs,
+                &options.actions,
+                options.span,
+            )?;
             let keyboard = source.keyboard.clone();
             self.procedural.push(source);
             return Ok(Content::Procedural {

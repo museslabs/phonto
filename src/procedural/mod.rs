@@ -10,7 +10,6 @@
 //! into levels, runs the input commands and the commands of actions, and
 //! watches image files. Each backend does the drawing and reads the system.
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod actions;
 mod audio;
 mod commands;
@@ -23,7 +22,6 @@ mod watch;
 
 use std::path::Path;
 
-#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
 pub use actions::{ActionRunner, MAX_LABEL, label_texels};
 pub use audio::{Analyzer, AudioFrame, SAMPLE_RATE};
 pub use commands::{CommandInputs, read_once as read_inputs_once};
