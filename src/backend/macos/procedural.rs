@@ -10,7 +10,6 @@
 //! way on both backends. Only the screen shows row 0 at the top instead of
 //! the bottom. The image turns over on its way to the screen.
 
-use std::ffi::c_void;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::time::SystemTime;
@@ -159,12 +158,14 @@ impl Gpu {
             .renderCommandEncoderWithDescriptor(&pass)
             .context("Metal could not start the copy to the screen")?;
         encoder.setRenderPipelineState(&self.present);
-        let crop_ptr = NonNull::new(crop.as_ptr().cast_mut().cast::<c_void>())
-            .expect("an array has a non-null pointer");
         unsafe {
             encoder.setFragmentTexture_atIndex(Some(&target.image), 0);
             encoder.setFragmentSamplerState_atIndex(Some(&self.present_sampler), 0);
-            encoder.setFragmentBytes_length_atIndex(crop_ptr, size_of_val(&crop), 0);
+            encoder.setFragmentBytes_length_atIndex(
+                NonNull::from(&crop).cast(),
+                size_of_val(&crop),
+                0,
+            );
             encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
         }
         encoder.endEncoding();
@@ -536,11 +537,9 @@ impl Target {
     fn read_image(&self) -> image::RgbaImage {
         let (w, h) = self.dims;
         let mut rgba = vec![0u8; w as usize * h as usize * 4];
-        let ptr =
-            NonNull::new(rgba.as_mut_ptr().cast::<c_void>()).expect("a Vec has a non-null pointer");
         unsafe {
             self.image.getBytes_bytesPerRow_fromRegion_mipmapLevel(
-                ptr,
+                NonNull::from(rgba.as_mut_slice()).cast(),
                 w as usize * 4,
                 region(self.dims),
                 0,
@@ -564,8 +563,9 @@ impl UniformLayout {
         };
         Self {
             buffer: t.uniform_buffer,
-            // Metal wants the bytes of a buffer in whole 16-byte rows.
-            size: t.uniform_size.max(16).next_multiple_of(16),
+            // MSL rounds the size of the block up to 16 bytes, the alignment
+            // of its vec4s. Metal rejects bytes that don't cover the block.
+            size: t.uniform_size.next_multiple_of(16),
             resolution: offset("iResolution"),
             image_resolution: offset("iImageResolution"),
             time: offset("iTime"),
@@ -900,6 +900,11 @@ fn upload(
     data: &[u8],
     mipmapped: bool,
 ) -> anyhow::Result<GpuTexture> {
+    let bytes_per_pixel = match format {
+        MTLPixelFormat::RGBA8Unorm => 4,
+        MTLPixelFormat::R8Unorm => 1,
+        _ => unreachable!("phonto uploads only RGBA8 and R8 textures"),
+    };
     let descriptor = unsafe {
         MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
             format, w as usize, h as usize, mipmapped,
@@ -910,14 +915,14 @@ fn upload(
     let Some(texture) = gpu.device.newTextureWithDescriptor(&descriptor) else {
         bail!("the GPU cannot make a {w}x{h} texture");
     };
-    let ptr = NonNull::new(data.as_ptr().cast_mut().cast::<c_void>())
-        .expect("a slice has a non-null pointer");
+    let bytes_per_row = w as usize * bytes_per_pixel;
+    assert_eq!(data.len(), bytes_per_row * h as usize);
     unsafe {
         texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
             region((w, h)),
             0,
-            ptr,
-            data.len() / h as usize,
+            NonNull::from(data).cast(),
+            bytes_per_row,
         );
     }
     Ok(texture)
