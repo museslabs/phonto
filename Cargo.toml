@@ -143,6 +143,10 @@ objc2-metal = { version = "0.3", default-features = false, features = [
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",
     "CGColorSpace",
+    "CGEventSource",
+    "CGEventTypes",
+    "CGWindow",
+    "CGWindowLevel",
 ] }
 # The system audio of procedural wallpapers, through a process tap.
 objc2-core-audio = { version = "0.3", default-features = false, features = [
