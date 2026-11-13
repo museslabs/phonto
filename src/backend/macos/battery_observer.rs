@@ -11,6 +11,7 @@ use objc2_io_kit::{
     IOPSGetProvidingPowerSourceType, IOPSNotificationCreateRunLoopSource,
 };
 
+use super::screen_observer::ScreenObserver;
 use crate::backend::PauseMode;
 
 // CFSTR(kIOPMBatteryPowerKey). Compare against the literal so we don't have
@@ -21,7 +22,7 @@ const BATTERY_POWER: &str = "Battery Power";
 const CURRENT_CAPACITY: &str = "Current Capacity";
 const MAX_CAPACITY: &str = "Max Capacity";
 
-/// Pauses the player based on power source.
+/// Pauses the players and the procedural wallpapers based on power source.
 ///
 /// Owns a heap-allocated context handed to IOKit by raw pointer. The run loop
 /// retains the source independently of our `CFRetained` handle, so `Drop`
@@ -33,13 +34,23 @@ pub struct BatteryObserver {
 
 struct Context {
     players: Vec<Retained<AVPlayer>>,
+    /// Pauses the procedural wallpapers.
+    screens: Retained<ScreenObserver>,
     mode: PauseMode,
 }
 
 impl BatteryObserver {
     /// Returns `None` only on IOKit setup failure (already logged).
-    pub fn install(players: Vec<Retained<AVPlayer>>, mode: PauseMode) -> Option<Self> {
-        let mut ctx = Box::new(Context { players, mode });
+    pub fn install(
+        players: Vec<Retained<AVPlayer>>,
+        screens: Retained<ScreenObserver>,
+        mode: PauseMode,
+    ) -> Option<Self> {
+        let mut ctx = Box::new(Context {
+            players,
+            screens,
+            mode,
+        });
         let ctx_ptr: *mut Context = &raw mut *ctx;
 
         let Some(source) = (unsafe {
@@ -61,7 +72,7 @@ impl BatteryObserver {
         };
         main.add_source(Some(&source), Some(mode_ref));
 
-        apply_state(&ctx.players, &ctx.mode);
+        apply_state(&ctx);
 
         Some(Self { _ctx: ctx, source })
     }
@@ -77,10 +88,15 @@ impl Drop for BatteryObserver {
 
 unsafe extern "C-unwind" fn power_changed(context: *mut c_void) {
     let ctx = unsafe { &*(context.cast::<Context>()) };
-    apply_state(&ctx.players, &ctx.mode);
+    apply_state(ctx);
 }
 
-fn apply_state(players: &[Retained<AVPlayer>], mode: &PauseMode) {
+fn apply_state(ctx: &Context) {
+    let Context {
+        players,
+        screens,
+        mode,
+    } = ctx;
     let on_batt = on_battery();
     let pct = battery_percent();
 
@@ -101,6 +117,7 @@ fn apply_state(players: &[Retained<AVPlayer>], mode: &PauseMode) {
             unsafe { player.play() };
         }
     }
+    screens.set_power_paused(should_pause);
 }
 
 fn on_battery() -> bool {

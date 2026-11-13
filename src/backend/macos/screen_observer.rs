@@ -1,12 +1,16 @@
+use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send, rc::Retained, runtime::NSObject};
 use objc2_app_kit::{NSScreen, NSWindow};
 use objc2_av_foundation::{AVPlayer, AVPlayerLayer};
 use objc2_foundation::{MainThreadMarker, NSNotification};
+use objc2_quartz_core::CADisplayLink;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use super::displays::{assigned, display_id};
+use super::procedural::Gpu;
+use super::procedural_surface::{ProceduralSource, ProceduralSurface};
 use crate::scale::ScaleMode;
 
 pub struct MirrorSurface {
@@ -15,22 +19,42 @@ pub struct MirrorSurface {
     /// display ID.
     pub display_id: u32,
     pub window: Retained<NSWindow>,
-    pub layer: Retained<AVPlayerLayer>,
+    pub layer: SurfaceLayer,
+}
+
+/// What a surface draws with.
+pub enum SurfaceLayer {
+    Video(Retained<AVPlayerLayer>),
+    Procedural(ProceduralSurface),
+}
+
+/// What a screen shows.
+#[derive(Clone)]
+pub enum Content {
+    Video(Retained<AVPlayer>),
+    Procedural {
+        /// The index of a procedural source of the observer.
+        source: usize,
+    },
 }
 
 pub enum AttachPolicy {
-    /// Every screen, including ones that appear later, gets a surface sharing
-    /// this player.
-    Mirror(Retained<AVPlayer>),
+    /// Every screen, including ones that appear later, gets a surface that
+    /// shows this content.
+    Mirror(Content),
     /// Only screens that a key in the map names, by UUID or by name, get a
-    /// surface, attached to that key's player. Unmatched screens are left alone.
-    PerDisplay(HashMap<String, Retained<AVPlayer>>),
+    /// surface, showing that key's content. Unmatched screens are left alone.
+    PerDisplay(HashMap<String, Content>),
 }
 
 pub struct ScreenObserverIvars {
     surfaces: RefCell<Vec<MirrorSurface>>,
     policy: AttachPolicy,
     scale: ScaleMode,
+    /// Only set if a screen shows a procedural wallpaper.
+    gpu: Option<Gpu>,
+    sources: RefCell<Vec<ProceduralSource>>,
+    power_paused: Cell<bool>,
 }
 
 define_class!(
@@ -43,6 +67,12 @@ define_class!(
         fn _screens_changed(&self, _notif: &NSNotification) {
             self.reapply();
         }
+
+        /// The display link of a procedural surface fired.
+        #[unsafe(method(frame:))]
+        fn _frame(&self, link: &CADisplayLink) {
+            self.frame(link);
+        }
     }
 );
 
@@ -51,14 +81,90 @@ impl ScreenObserver {
         surfaces: Vec<MirrorSurface>,
         policy: AttachPolicy,
         scale: ScaleMode,
+        gpu: Option<Gpu>,
+        sources: Vec<ProceduralSource>,
     ) -> Retained<Self> {
         let ivars = ScreenObserverIvars {
             surfaces: RefCell::new(surfaces),
             policy,
             scale,
+            gpu,
+            sources: RefCell::new(sources),
+            power_paused: Cell::new(false),
         };
         let this = Self::alloc().set_ivars(ivars);
-        unsafe { msg_send![super(this), init] }
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        for surface in this.ivars().surfaces.borrow_mut().iter_mut() {
+            this.start(surface);
+        }
+        this
+    }
+
+    /// Pauses or resumes the procedural wallpapers. Their time stops during
+    /// the pause.
+    pub fn set_power_paused(&self, paused: bool) {
+        self.ivars().power_paused.set(paused);
+        for surface in self.ivars().surfaces.borrow().iter() {
+            if let SurfaceLayer::Procedural(p) = &surface.layer {
+                p.set_paused(paused);
+            }
+        }
+        for source in self.ivars().sources.borrow().iter() {
+            source.set_paused(paused);
+        }
+    }
+
+    /// Starts the display link of a procedural surface.
+    fn start(&self, surface: &mut MirrorSurface) {
+        let SurfaceLayer::Procedural(p) = &mut surface.layer else {
+            return;
+        };
+        let Some(view) = surface.window.contentView() else {
+            log::warn!("display {} has no content view", surface.name);
+            return;
+        };
+        let sources = self.ivars().sources.borrow();
+        let target: &AnyObject = self;
+        p.start(
+            &view,
+            target,
+            &sources[p.source],
+            self.ivars().power_paused.get(),
+        );
+    }
+
+    fn build(
+        &self,
+        mtm: MainThreadMarker,
+        screen: &NSScreen,
+        content: &Content,
+    ) -> anyhow::Result<MirrorSurface> {
+        let gpu = self.ivars().gpu.as_ref();
+        let mut surface = super::build_surface(mtm, screen, content, self.ivars().scale, gpu)?;
+        self.start(&mut surface);
+        Ok(surface)
+    }
+
+    fn frame(&self, link: &CADisplayLink) {
+        let Some(gpu) = &self.ivars().gpu else {
+            return;
+        };
+        let mut surfaces = self.ivars().surfaces.borrow_mut();
+        let Some(surface) = surfaces
+            .iter_mut()
+            .find(|s| matches!(&s.layer, SurfaceLayer::Procedural(p) if p.is_driven_by(link)))
+        else {
+            return;
+        };
+        let frame = surface.window.frame();
+        let SurfaceLayer::Procedural(p) = &mut surface.layer else {
+            return;
+        };
+        let mut sources = self.ivars().sources.borrow_mut();
+        let source = &mut sources[p.source];
+        if let Err(e) = p.draw(gpu, source, frame, link) {
+            log::warn!("procedural frame on {}: {e:#}", surface.name);
+        }
     }
 
     fn reapply(&self) {
@@ -80,7 +186,10 @@ impl ScreenObserver {
             let frame = screen.frame();
             let backing = screen.backingScaleFactor();
             surface.window.setFrame_display(frame, false);
-            surface.layer.setContentsScale(backing);
+            // A procedural layer sizes its drawable on the next frame.
+            if let SurfaceLayer::Video(layer) = &surface.layer {
+                layer.setContentsScale(backing);
+            }
             let name = screen.localizedName().to_string();
             if name != surface.name {
                 // macOS renames a screen when a monitor of the same model
@@ -88,14 +197,13 @@ impl ScreenObserver {
                 // it until it's ordered front again.
                 surface.window.makeKeyAndOrderFront(None);
                 surface.name = name;
-                // Play what the screen is now assigned, as a restart would.
-                // With no assignment it keeps its video.
+                // Show what the screen is now assigned, as a restart would.
+                // With no assignment it keeps its wallpaper.
                 if let AttachPolicy::PerDisplay(map) = &self.ivars().policy
-                    && let Some(player) = assigned(screen, map)
-                    && unsafe { surface.layer.player(mtm) }.as_ref() != Some(player)
+                    && let Some(content) = assigned(screen, map)
+                    && !shows(surface, content, mtm)
                 {
-                    unsafe { surface.layer.setPlayer(Some(&**player)) };
-                    log::info!("switched video on renamed display: {}", surface.name);
+                    self.switch(mtm, surface, screen, content);
                 }
             }
             log::info!(
@@ -131,14 +239,14 @@ impl ScreenObserver {
                 continue;
             }
             let name = screen.localizedName().to_string();
-            let player = match &self.ivars().policy {
-                AttachPolicy::Mirror(p) => p,
+            let content = match &self.ivars().policy {
+                AttachPolicy::Mirror(c) => c,
                 AttachPolicy::PerDisplay(map) => match assigned(&screen, map) {
-                    Some(p) => p,
+                    Some(c) => c,
                     None => continue,
                 },
             };
-            match super::build_surface(mtm, &screen, player, self.ivars().scale) {
+            match self.build(mtm, &screen, content) {
                 Ok(surface) => {
                     log::info!("attached new display: {name}");
                     self.ivars().surfaces.borrow_mut().push(surface);
@@ -146,5 +254,43 @@ impl ScreenObserver {
                 Err(e) => log::warn!("failed to attach new display {name}: {e:#}"),
             }
         }
+    }
+
+    /// Makes `surface` show `content`. A video layer only changes its player.
+    /// Any other change builds a new surface.
+    fn switch(
+        &self,
+        mtm: MainThreadMarker,
+        surface: &mut MirrorSurface,
+        screen: &NSScreen,
+        content: &Content,
+    ) {
+        if let (SurfaceLayer::Video(layer), Content::Video(player)) = (&surface.layer, content) {
+            unsafe { layer.setPlayer(Some(&**player)) };
+            log::info!("switched video on renamed display: {}", surface.name);
+            return;
+        }
+        match self.build(mtm, screen, content) {
+            Ok(new) => {
+                let old = std::mem::replace(surface, new);
+                old.window.orderOut(None);
+                log::info!("switched wallpaper on renamed display: {}", surface.name);
+            }
+            Err(e) => log::warn!(
+                "failed to switch wallpaper on renamed display {}: {e:#}",
+                surface.name
+            ),
+        }
+    }
+}
+
+/// True if `surface` already shows `content`.
+fn shows(surface: &MirrorSurface, content: &Content, mtm: MainThreadMarker) -> bool {
+    match (&surface.layer, content) {
+        (SurfaceLayer::Video(layer), Content::Video(player)) => {
+            unsafe { layer.player(mtm) }.as_ref() == Some(player)
+        }
+        (SurfaceLayer::Procedural(p), Content::Procedural { source, .. }) => p.source == *source,
+        _ => false,
     }
 }

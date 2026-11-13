@@ -118,6 +118,33 @@ objc2-io-kit = { version = "0.3", default-features = false, features = [
     "std",
     "ps",
 ] }
+objc2-metal = { version = "0.3", default-features = false, features = [
+    "std",
+    "MTLAllocation",
+    "MTLBlitCommandEncoder",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLDevice",
+    "MTLDrawable",
+    "MTLLibrary",
+    "MTLPixelFormat",
+    "MTLRenderCommandEncoder",
+    "MTLRenderPass",
+    "MTLRenderPipeline",
+    "MTLResource",
+    "MTLSampler",
+    "MTLTexture",
+    "MTLTypes",
+] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGColorSpace",
+] }
+# Procedural wallpapers: glslang compiles their GLSL to SPIR-V, and
+# SPIRV-Cross translates that to Metal.
+glslang = "0.9.1"
+spirv-cross2 = { version = "0.7.2", default-features = false, features = ["msl"] }
 
 [profile.release]
 debug = "none"

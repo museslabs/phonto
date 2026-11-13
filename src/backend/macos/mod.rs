@@ -2,6 +2,9 @@ mod battery_observer;
 mod displays;
 pub mod live_lockscreen;
 mod loop_observer;
+mod msl;
+mod procedural;
+mod procedural_surface;
 mod screen_observer;
 
 use std::collections::HashMap;
@@ -25,7 +28,9 @@ use objc2_quartz_core::CAAutoresizingMask;
 
 use self::battery_observer::BatteryObserver;
 use self::loop_observer::LoopObserver;
-use self::screen_observer::{AttachPolicy, MirrorSurface, ScreenObserver};
+use self::procedural::Gpu;
+use self::procedural_surface::{ProceduralSource, ProceduralSurface};
+use self::screen_observer::{AttachPolicy, Content, MirrorSurface, ScreenObserver, SurfaceLayer};
 use super::{Backend, DumpRequest, PauseMode, RunOptions};
 use crate::displays::DisplayInfo;
 use crate::plan::Playback;
@@ -68,10 +73,7 @@ impl Backend for MacosBackend {
         use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
 
         if crate::procedural::is_procedural(&request.path) {
-            anyhow::bail!(
-                "procedural wallpapers are not supported on macOS yet: {}",
-                request.path
-            );
+            return procedural::dump(request);
         }
         if request.size.is_some() {
             log::warn!("--size only applies to procedural wallpapers. Videos keep their own size.");
@@ -172,19 +174,6 @@ impl Backend for MacosBackend {
     }
 
     fn run(self, playback: Playback, options: RunOptions) -> anyhow::Result<()> {
-        let paths: Vec<&str> = match &playback {
-            Playback::Mirror(path) => vec![path.as_str()],
-            Playback::PerDisplay(assignments) => {
-                assignments.iter().map(|a| a.path.as_str()).collect()
-            }
-        };
-        if let Some(path) = paths
-            .into_iter()
-            .find(|p| crate::procedural::is_procedural(p))
-        {
-            anyhow::bail!("procedural wallpapers are not supported on macOS yet: {path}");
-        }
-
         let mtm = self.mtm;
         let scale = options.scale;
 
@@ -195,37 +184,42 @@ impl Backend for MacosBackend {
         let screens = NSScreen::screens(mtm);
 
         let mut surfaces: Vec<MirrorSurface> = Vec::new();
-        let mut players: Vec<Retained<AVPlayer>> = Vec::new();
-        let mut loop_observers: Vec<Retained<LoopObserver>> = Vec::new();
+        let mut sources = Sources::default();
 
         let policy = match playback {
             Playback::Mirror(path) => {
-                let (item, player) = make_player(mtm, &path)?;
-                loop_observers.push(install_loop_observer(player.clone(), &item));
-                players.push(player.clone());
-
+                let content = sources.open(mtm, &path, &options)?;
                 for screen in screens.iter() {
-                    surfaces.push(build_surface(mtm, &screen, &player, scale)?);
+                    surfaces.push(build_surface(
+                        mtm,
+                        &screen,
+                        &content,
+                        scale,
+                        sources.gpu.as_ref(),
+                    )?);
                 }
                 if surfaces.is_empty() {
                     anyhow::bail!("no screens detected");
                 }
 
-                AttachPolicy::Mirror(player)
+                AttachPolicy::Mirror(content)
             }
             Playback::PerDisplay(assignments) => {
-                let mut by_id: HashMap<String, Retained<AVPlayer>> = HashMap::new();
+                let mut by_id: HashMap<String, Content> = HashMap::new();
                 for a in &assignments {
-                    let (item, player) = make_player(mtm, &a.path)?;
-                    loop_observers.push(install_loop_observer(player.clone(), &item));
-                    players.push(player.clone());
-                    by_id.insert(a.native_id.clone(), player);
+                    by_id.insert(a.native_id.clone(), sources.open(mtm, &a.path, &options)?);
                 }
 
                 for screen in screens.iter() {
                     let name = screen.localizedName().to_string();
-                    if let Some(player) = displays::assigned(&screen, &by_id) {
-                        surfaces.push(build_surface(mtm, &screen, player, scale)?);
+                    if let Some(content) = displays::assigned(&screen, &by_id) {
+                        surfaces.push(build_surface(
+                            mtm,
+                            &screen,
+                            content,
+                            scale,
+                            sources.gpu.as_ref(),
+                        )?);
                     } else {
                         log::info!("display {name:?} not in assignments; leaving alone");
                     }
@@ -237,9 +231,17 @@ impl Backend for MacosBackend {
             }
         };
 
+        let Sources {
+            players,
+            loop_observers,
+            gpu,
+            procedural,
+        } = sources;
+
         // Re-apply geometry on display reconfiguration, and attach new
         // surfaces when a fresh display appears (respecting the policy).
-        let screen_observer = ScreenObserver::new(surfaces, policy, scale);
+        // It also draws the procedural wallpapers.
+        let screen_observer = ScreenObserver::new(surfaces, policy, scale, gpu, procedural);
         unsafe {
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
                 &screen_observer,
@@ -252,7 +254,7 @@ impl Backend for MacosBackend {
         let battery_observer = if matches!(options.pause, PauseMode::Never) {
             None
         } else {
-            BatteryObserver::install(players.clone(), options.pause)
+            BatteryObserver::install(players.clone(), screen_observer.clone(), options.pause)
         };
         if battery_observer.is_none() {
             for player in &players {
@@ -268,6 +270,44 @@ impl Backend for MacosBackend {
         drop(battery_observer);
 
         Ok(())
+    }
+}
+
+/// The videos and procedural wallpapers that the screens show.
+#[derive(Default)]
+struct Sources {
+    players: Vec<Retained<AVPlayer>>,
+    loop_observers: Vec<Retained<LoopObserver>>,
+    /// Made with the first procedural wallpaper.
+    gpu: Option<Gpu>,
+    procedural: Vec<ProceduralSource>,
+}
+
+impl Sources {
+    /// Opens `path` as a video, or compiles it as a procedural wallpaper. A
+    /// broken shader then fails before any window appears.
+    fn open(
+        &mut self,
+        mtm: MainThreadMarker,
+        path: &str,
+        options: &RunOptions,
+    ) -> anyhow::Result<Content> {
+        if crate::procedural::is_procedural(path) {
+            let gpu = match &mut self.gpu {
+                Some(gpu) => gpu,
+                gpu => gpu.insert(Gpu::new()?),
+            };
+            let source = ProceduralSource::load(gpu, path, options.location, &options.inputs)?;
+            self.procedural.push(source);
+            return Ok(Content::Procedural {
+                source: self.procedural.len() - 1,
+            });
+        }
+        let (item, player) = make_player(mtm, path)?;
+        self.loop_observers
+            .push(install_loop_observer(player.clone(), &item));
+        self.players.push(player.clone());
+        Ok(Content::Video(player))
     }
 }
 
@@ -319,8 +359,9 @@ fn install_loop_observer(
 pub(super) fn build_surface(
     mtm: MainThreadMarker,
     screen: &NSScreen,
-    player: &AVPlayer,
+    content: &Content,
     scale: ScaleMode,
+    gpu: Option<&Gpu>,
 ) -> anyhow::Result<MirrorSurface> {
     let name = screen.localizedName().to_string();
     let frame = screen.frame();
@@ -353,20 +394,31 @@ pub(super) fn build_surface(
     content_view.setWantsLayer(true);
     window.setContentView(Some(&content_view));
 
-    let player_layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(player)) };
-    if let Some(gravity) = video_gravity_for(scale) {
-        unsafe { player_layer.setVideoGravity(gravity) };
-    }
-    player_layer.setFrame(content_view.bounds());
-    player_layer.setAutoresizingMask(
-        CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
-    );
-    player_layer.setContentsScale(backing_scale);
+    let layer = match content {
+        Content::Video(player) => {
+            let player_layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(player)) };
+            if let Some(gravity) = video_gravity_for(scale) {
+                unsafe { player_layer.setVideoGravity(gravity) };
+            }
+            player_layer.setFrame(content_view.bounds());
+            player_layer.setAutoresizingMask(
+                CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
+            );
+            player_layer.setContentsScale(backing_scale);
 
-    let root_layer = content_view
-        .layer()
-        .context("content view has no root layer")?;
-    root_layer.addSublayer(&player_layer);
+            let root_layer = content_view
+                .layer()
+                .context("content view has no root layer")?;
+            root_layer.addSublayer(&player_layer);
+            SurfaceLayer::Video(player_layer)
+        }
+        // A procedural wallpaper always fills the screen. `--scale` is only
+        // for videos.
+        Content::Procedural { source, .. } => {
+            let gpu = gpu.context("a procedural wallpaper needs the GPU")?;
+            SurfaceLayer::Procedural(ProceduralSurface::new(gpu, &content_view, *source)?)
+        }
+    };
 
     window.makeKeyAndOrderFront(None);
 
@@ -382,7 +434,7 @@ pub(super) fn build_surface(
         name,
         display_id: displays::display_id(screen),
         window,
-        layer: player_layer,
+        layer,
     })
 }
 
