@@ -132,13 +132,16 @@ impl ScreenObserver {
     /// Pauses or resumes the procedural wallpapers. Their time stops during
     /// the pause.
     pub fn set_power_paused(&self, paused: bool) {
-        self.ivars().power_paused.set(paused);
-        for surface in self.ivars().surfaces.borrow().iter() {
-            if let SurfaceLayer::Procedural(p) = &surface.layer {
+        // The power source reports every change of the charge.
+        if self.ivars().power_paused.replace(paused) == paused {
+            return;
+        }
+        for surface in self.ivars().surfaces.borrow_mut().iter_mut() {
+            if let SurfaceLayer::Procedural(p) = &mut surface.layer {
                 p.set_paused(paused);
             }
         }
-        for source in self.ivars().sources.borrow().iter() {
+        for source in self.ivars().sources.borrow_mut().iter_mut() {
             source.set_paused(paused);
         }
     }

@@ -82,6 +82,14 @@ impl DesktopPointer {
         std::mem::take(&mut self.desktop_click)
     }
 
+    /// Forgets the clicks since the last call to `poll`, for a wallpaper that
+    /// resumes from a pause. A click from the pause would land on the first
+    /// frame, minutes late.
+    pub fn forget_clicks(&mut self) {
+        self.clicks = left_clicks();
+        self.desktop_click = false;
+    }
+
     /// `(iMouse, iPointer)` for the next frame. `surface` is the size of the
     /// screen in points.
     pub fn uniforms(&mut self, surface: (u32, u32), target: (u32, u32)) -> ([f32; 4], [f32; 4]) {
