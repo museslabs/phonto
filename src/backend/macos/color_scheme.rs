@@ -1,11 +1,13 @@
 //! `iColorScheme` on macOS: whether the desktop prefers dark colors.
 
-use objc2::runtime::NSObject;
+use objc2::MainThreadOnly;
 use objc2_app_kit::{NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication};
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration,
     ns_string,
 };
+
+use super::screen_observer::ScreenObserver;
 
 /// True if System Settings > Appearance is dark now. The appearance of the
 /// app follows it, and resolves Auto.
@@ -25,11 +27,12 @@ pub fn uniform(mtm: MainThreadMarker) -> f32 {
 }
 
 /// Calls `observeValueForKeyPath:ofObject:change:context:` on `observer`
-/// when the appearance changes. Call [`unobserve`] before `observer` is
-/// freed.
-pub fn observe(mtm: MainThreadMarker, observer: &NSObject) {
+/// when the appearance changes, until [`unobserve`].
+pub fn observe(observer: &ScreenObserver) {
+    // SAFETY: `ScreenObserver` answers that selector. KVO does not retain
+    // the observer. Its `Drop` calls `unobserve`.
     unsafe {
-        NSApplication::sharedApplication(mtm).addObserver_forKeyPath_options_context(
+        NSApplication::sharedApplication(observer.mtm()).addObserver_forKeyPath_options_context(
             observer,
             ns_string!("effectiveAppearance"),
             NSKeyValueObservingOptions::empty(),
@@ -38,9 +41,10 @@ pub fn observe(mtm: MainThreadMarker, observer: &NSObject) {
     }
 }
 
-pub fn unobserve(mtm: MainThreadMarker, observer: &NSObject) {
+pub fn unobserve(observer: &ScreenObserver) {
+    // SAFETY: `ScreenObserver::new` called `observe`, once.
     unsafe {
-        NSApplication::sharedApplication(mtm)
+        NSApplication::sharedApplication(observer.mtm())
             .removeObserver_forKeyPath(observer, ns_string!("effectiveAppearance"));
     }
 }
