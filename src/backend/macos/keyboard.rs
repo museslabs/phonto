@@ -11,6 +11,12 @@ use objc2_app_kit::NSEventModifierFlags;
 /// One texel for each JavaScript key code.
 pub const KEYS: usize = 256;
 
+/// `NX_DEVICELCMDKEYMASK` and `NX_DEVICERCMDKEYMASK` from IOLLEvent.h. Both
+/// Command keys set `NSEventModifierFlags::Command`, but each has its own
+/// texel. The other pairs of modifiers share a texel and a flag each.
+const LEFT_COMMAND: NSEventModifierFlags = NSEventModifierFlags(0x08);
+const RIGHT_COMMAND: NSEventModifierFlags = NSEventModifierFlags(0x10);
+
 pub struct Keyboard {
     rows: [[u8; KEYS]; 3],
     /// True if the texture differs from the one that the last frame got.
@@ -48,7 +54,12 @@ impl Keyboard {
             0x38 | 0x3C => NSEventModifierFlags::Shift,
             0x3B | 0x3E => NSEventModifierFlags::Control,
             0x3A | 0x3D => NSEventModifierFlags::Option,
-            0x37 | 0x36 => NSEventModifierFlags::Command,
+            // An event without the device bits, as a synthesized one can be.
+            0x37 | 0x36 if !flags.intersects(LEFT_COMMAND | RIGHT_COMMAND) => {
+                NSEventModifierFlags::Command
+            }
+            0x37 => LEFT_COMMAND,
+            0x36 => RIGHT_COMMAND,
             0x39 => NSEventModifierFlags::CapsLock,
             _ => return,
         };
@@ -245,6 +256,31 @@ mod tests {
         k.take_frame();
         k.release_all();
         assert_eq!(texel(&k.take_frame().unwrap(), 32, 0), 0);
+    }
+
+    #[test]
+    fn each_command_key_releases() {
+        let command = NSEventModifierFlags::Command;
+        let mut k = Keyboard::default();
+        k.modifier(0x37, command | LEFT_COMMAND);
+        k.modifier(0x36, command | LEFT_COMMAND | RIGHT_COMMAND);
+        let t = k.take_frame().unwrap();
+        assert_eq!((texel(&t, 91, 0), texel(&t, 93, 0)), (255, 255));
+        k.modifier(0x37, command | RIGHT_COMMAND);
+        let t = k.take_frame().unwrap();
+        assert_eq!((texel(&t, 91, 0), texel(&t, 93, 0)), (0, 255));
+        k.modifier(0x36, NSEventModifierFlags::empty());
+        let t = k.take_frame().unwrap();
+        assert_eq!((texel(&t, 91, 0), texel(&t, 93, 0)), (0, 0));
+    }
+
+    #[test]
+    fn command_without_device_bits_uses_the_flag() {
+        let mut k = Keyboard::default();
+        k.modifier(0x37, NSEventModifierFlags::Command);
+        assert_eq!(texel(&k.take_frame().unwrap(), 91, 0), 255);
+        k.modifier(0x37, NSEventModifierFlags::empty());
+        assert_eq!(texel(&k.take_frame().unwrap(), 91, 0), 0);
     }
 
     #[test]
