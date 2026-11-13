@@ -262,7 +262,8 @@ random = true
 ```
 
 Each `[[display]]` needs exactly one of `path` or `random = true`. Phonto errors
-at startup if both or neither are set.
+at startup if both or neither are set. An entry that only sets `pause_behind`
+plays nothing (see [Pausing behind windows](#pausing-behind-windows-macos)).
 
 A `[[display]]` whose display is not currently connected is not an error.
 Phonto waits and attaches the wallpaper when that display appears.
@@ -812,6 +813,8 @@ keep the GPU busy. To make a wallpaper cheaper:
   a `once = true` buffer.
 - Use `--pause-on-battery` or `--pause-below`. Time stops during the pause and
   continues after it.
+- On macOS, a wallpaper also pauses while windows cover it (see
+  [Pausing behind windows](#pausing-behind-windows-macos)).
 
 On macOS, the output size is the size of the screen in points, not in pixels.
 On a Retina display that looks like 2560x1440, a pass draws 2560x1440 pixels,
@@ -983,3 +986,56 @@ Stop playback when the laptop is unplugged or charge drops below a threshold. Th
 phonto /path/to/video --pause-on-battery
 phonto /path/to/video --pause-below 30
 ```
+
+### Pausing behind windows (macOS)
+
+On macOS, a wallpaper pauses while windows cover its screen, and resumes as
+soon as the desktop shows again. This is on by default, also behind
+translucent windows, so a wallpaper that played behind your windows before now
+holds a still frame there. `[pause_behind]` sets which windows pause it, on
+battery and on power:
+
+```toml
+[pause_behind]
+on_battery = "any"
+on_power = "opaque"
+```
+
+- `any`, the default, pauses when windows of apps cover 95% of the screen,
+  translucent or not. The menu bar and the gaps between tiled windows don't
+  count against it. A window over half the screen never pauses it.
+- `opaque` pauses when opaque windows cover the middle of the screen, all of
+  it but a 64-point border. It keeps running behind translucent windows. Two
+  windows side by side never pause it, because the gap between them runs
+  through the middle.
+- `none` never pauses for windows.
+
+A hidden wallpaper pauses in every mode, `none` included: on the lock screen,
+behind an app in native full screen, under the screen saver, while the
+displays sleep, and while another user's session is in front. A screen pauses
+once it has been covered for a second, so a window that passes over it
+doesn't pause it. It resumes at once.
+
+A display can override the table in its `[[display]]` entry. The entry holds
+everything about one display, so it needs no `path` or `random`. A key that it
+leaves out comes from `[pause_behind]`:
+
+```toml
+[[display]]
+id = "LG HDR 4K"   # a display ID or an [[alias]] name
+pause_behind = { on_power = "none" }
+```
+
+`pause_behind` applies to whatever phonto plays, `phonto /path/to/video`
+included. A display that isn't connected takes its entry when it connects.
+Two entries that set `pause_behind` for one display are an error.
+
+A video mirrored across screens pauses only when every screen is covered,
+because one player feeds them all. A procedural wallpaper with `--span` keeps
+running while any of its screens is uncovered, and its time stops only when
+all of them pause.
+
+`--pause-on-battery` and `--pause-below` still pause everything, whatever
+`pause_behind` says.
+
+Linux reads `[pause_behind]` and ignores it, so one config works on both.
