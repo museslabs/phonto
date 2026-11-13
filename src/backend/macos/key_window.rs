@@ -90,6 +90,9 @@ impl KeyWindow {
         };
         // A panel hides when its app deactivates. The wallpaper must stay.
         this.setHidesOnDeactivate(false);
+        // AppKit makes a window that can become key the key window by itself,
+        // as `[NSApp run]` does at launch. This one waits for a click.
+        this.setBecomesKeyOnlyIfNeeded(true);
         Retained::into_super(Retained::into_super(this))
     }
 }
