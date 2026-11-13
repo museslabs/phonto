@@ -1,0 +1,13 @@
+# Your battery as the tide in a glass. The water level is the charge.
+# Bubbles rise while the battery charges, and the water turns terracotta
+# when the charge is low. The colors follow the light or dark mode of your
+# desktop, as museslabs.org does.
+#
+#   phonto examples/procedural/battery
+
+name = "Battery"
+fps = 30
+
+[image]
+shader = "image.glsl"
+channels = [{ texture = "labels.png", filter = "mipmap", wrap = "clamp" }]
