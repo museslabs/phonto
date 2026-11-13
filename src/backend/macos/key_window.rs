@@ -11,13 +11,46 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadOnly, define_class, extern_methods, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSEvent, NSPanel, NSResponder, NSWindow, NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSEventType, NSPanel,
+    NSResponder, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSRect};
 
 use super::keyboard::Keyboard;
+
+define_class!(
+    /// The application. AppKit gives the key window no key-up while Command
+    /// is down. The key would stay down in the wallpaper. This sends it on,
+    /// as SDL and winit do.
+    #[unsafe(super(NSApplication, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    pub struct Application;
+
+    impl Application {
+        #[unsafe(method(sendEvent:))]
+        fn send_event(&self, event: &NSEvent) {
+            if event.r#type() == NSEventType::KeyUp
+                && event.modifierFlags().contains(NSEventModifierFlags::Command)
+                && let Some(window) = self.keyWindow()
+            {
+                window.sendEvent(event);
+            } else {
+                // SAFETY: `sendEvent:` takes an event and returns nothing.
+                let _: () = unsafe { msg_send![super(self), sendEvent: event] };
+            }
+        }
+    }
+);
+
+impl Application {
+    extern_methods!(
+        /// The application, an `Application` if no other call made it first.
+        #[unsafe(method(sharedApplication))]
+        pub fn shared(mtm: MainThreadMarker) -> Retained<NSApplication>;
+    );
+}
 
 pub struct KeyWindowIvars {
     keyboard: Rc<RefCell<Keyboard>>,

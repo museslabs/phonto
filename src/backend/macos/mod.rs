@@ -21,9 +21,9 @@ use anyhow::Context;
 use objc2::rc::Retained;
 use objc2::sel;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSColor, NSScreen,
-    NSView, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
+    NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification,
+    NSBackingStoreType, NSColor, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowSharingType, NSWindowStyleMask,
 };
 use objc2_av_foundation::{
     AVLayerVideoGravity, AVLayerVideoGravityResize, AVLayerVideoGravityResizeAspect,
@@ -35,7 +35,7 @@ use objc2_quartz_core::CAAutoresizingMask;
 
 use self::audio::AudioCapture;
 use self::battery_observer::BatteryObserver;
-use self::key_window::KeyWindow;
+use self::key_window::{Application, KeyWindow};
 use self::loop_observer::LoopObserver;
 use self::procedural::Gpu;
 use self::procedural_surface::{ProceduralSource, ProceduralSurface};
@@ -186,7 +186,7 @@ impl Backend for MacosBackend {
         let mtm = self.mtm;
         let scale = options.scale;
 
-        let app = NSApplication::sharedApplication(mtm);
+        let app = Application::shared(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         app.finishLaunching();
 
