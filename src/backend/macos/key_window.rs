@@ -71,12 +71,14 @@ define_class!(
 
         #[unsafe(method(becomeKeyWindow))]
         fn become_key_window(&self) {
+            // SAFETY: `becomeKeyWindow` takes nothing and returns nothing.
             let _: () = unsafe { msg_send![super(self), becomeKeyWindow] };
             log::info!("the wallpaper has the keyboard");
         }
 
         #[unsafe(method(resignKeyWindow))]
         fn resign_key_window(&self) {
+            // SAFETY: `resignKeyWindow` takes nothing and returns nothing.
             let _: () = unsafe { msg_send![super(self), resignKeyWindow] };
             self.ivars().keyboard.borrow_mut().release_all();
             log::info!("the wallpaper gave back the keyboard");
@@ -118,6 +120,8 @@ impl KeyWindow {
         keyboard: Rc<RefCell<Keyboard>>,
     ) -> Retained<NSWindow> {
         let this = Self::alloc(mtm).set_ivars(KeyWindowIvars { keyboard });
+        // SAFETY: These are the argument types of NSWindow's designated
+        // initializer.
         let this: Retained<Self> = unsafe {
             msg_send![
                 super(this),
