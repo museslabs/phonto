@@ -45,8 +45,11 @@ impl Keyboard {
             self.rows[1][i] = 255;
             self.rows[2][i] ^= 255;
         }
-        self.rows[0][i] = if down { 255 } else { 0 };
-        self.changed = true;
+        let held = if down { 255 } else { 0 };
+        if self.rows[0][i] != held {
+            self.rows[0][i] = held;
+            self.changed = true;
+        }
     }
 
     /// A modifier key changed. macOS reports the key and the new flags, not
@@ -78,20 +81,17 @@ impl Keyboard {
         }
     }
 
-    /// The texture for the next frame, if it changed since the last call.
-    /// A press shows on that frame only.
-    pub fn take_frame(&mut self) -> Option<[u8; KEYS * 3]> {
+    /// The rows for the next frame, if they changed since the last call. A
+    /// press shows on that frame only.
+    pub fn take_frame(&mut self) -> Option<[[u8; KEYS]; 3]> {
         if !self.changed {
             return None;
         }
-        let mut texture = [0u8; KEYS * 3];
-        for (row, out) in self.rows.iter().zip(texture.as_chunks_mut::<KEYS>().0) {
-            *out = *row;
-        }
+        let rows = self.rows;
         // The next frame needs a new texture only to clear the presses.
         self.changed = self.rows[1].iter().any(|&v| v != 0);
         self.rows[1] = [0; KEYS];
-        Some(texture)
+        Some(rows)
     }
 }
 
@@ -208,8 +208,8 @@ mod tests {
 
     const W: u16 = 0x0D;
 
-    fn texel(texture: &[u8; KEYS * 3], code: u8, row: usize) -> u8 {
-        texture[row * KEYS + usize::from(code)]
+    fn texel(rows: &[[u8; KEYS]; 3], code: u8, row: usize) -> u8 {
+        rows[row][usize::from(code)]
     }
 
     #[test]
@@ -229,10 +229,9 @@ mod tests {
         assert_eq!((texel(&t, b'W', 0), texel(&t, b'W', 1)), (255, 0));
         assert!(k.take_frame().is_none());
 
-        // Key repeat does not press again.
+        // Key repeat changes no texel.
         k.key(W, true, true);
-        let t = k.take_frame().unwrap();
-        assert_eq!(texel(&t, b'W', 1), 0);
+        assert!(k.take_frame().is_none());
 
         k.key(W, false, false);
         let t = k.take_frame().unwrap();
