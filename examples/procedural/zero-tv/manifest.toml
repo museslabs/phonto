@@ -1,4 +1,4 @@
-# Zero TV: the tape menu of zerotv.mkv, as a launcher. The tape under the
+# Zero TV: the tape menu of zerotv.mp4, as a launcher. The tape under the
 # pointer comes out of its stack. A click on tape N sends it into the VCR and
 # runs the action `tapeN`. Give each tape a command and a label with an
 # [[action]] entry in ~/.config/phonto/config.toml:
@@ -45,7 +45,7 @@ channels = [{ buffer = "state", filter = "nearest" }]
 [image]
 shader = "image.glsl"
 channels = [
-    { video = "zerotv.mkv" },
+    { video = "zerotv.mp4" },
     { buffer = "tapes", filter = "linear" },
     { buffer = "state", filter = "nearest" },
     { texture = "back.png", filter = "nearest" },
