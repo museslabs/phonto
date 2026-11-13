@@ -7,8 +7,10 @@ use objc2_quartz_core::CADisplayLink;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use super::displays::{assigned, display_id};
+use super::keyboard::Keyboard;
 use super::procedural::Gpu;
 use super::procedural_surface::{ProceduralSource, ProceduralSurface};
 use crate::scale::ScaleMode;
@@ -35,6 +37,8 @@ pub enum Content {
     Procedural {
         /// The index of a procedural source of the observer.
         source: usize,
+        /// The keys of the source, if it reads the keyboard.
+        keyboard: Option<Rc<RefCell<Keyboard>>>,
     },
 }
 
@@ -162,8 +166,14 @@ impl ScreenObserver {
         };
         let mut sources = self.ivars().sources.borrow_mut();
         let source = &mut sources[p.source];
-        if let Err(e) = p.draw(mtm, gpu, source, frame, link) {
-            log::warn!("procedural frame on {}: {e:#}", surface.name);
+        match p.draw(mtm, gpu, source, frame, link) {
+            // A click on the desktop gives a wallpaper with a keyboard
+            // channel the keys, as a click on a canvas does on Shadertoy.
+            Ok(true) if source.keyboard.is_some() && !surface.window.isKeyWindow() => {
+                surface.window.makeKeyWindow();
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("procedural frame on {}: {e:#}", surface.name),
         }
     }
 

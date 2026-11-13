@@ -1,5 +1,7 @@
 mod battery_observer;
 mod displays;
+mod key_window;
+mod keyboard;
 pub mod live_lockscreen;
 mod loop_observer;
 mod msl;
@@ -28,6 +30,7 @@ use objc2_foundation::{MainThreadMarker, NSNotificationCenter, NSString, NSURL};
 use objc2_quartz_core::CAAutoresizingMask;
 
 use self::battery_observer::BatteryObserver;
+use self::key_window::KeyWindow;
 use self::loop_observer::LoopObserver;
 use self::procedural::Gpu;
 use self::procedural_surface::{ProceduralSource, ProceduralSurface};
@@ -299,9 +302,11 @@ impl Sources {
                 gpu => gpu.insert(Gpu::new()?),
             };
             let source = ProceduralSource::load(gpu, path, options.location, &options.inputs)?;
+            let keyboard = source.keyboard.clone();
             self.procedural.push(source);
             return Ok(Content::Procedural {
                 source: self.procedural.len() - 1,
+                keyboard,
             });
         }
         let (item, player) = make_player(mtm, path)?;
@@ -368,14 +373,21 @@ pub(super) fn build_surface(
     let frame = screen.frame();
     let backing_scale = screen.backingScaleFactor();
 
-    let window = unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            mtm.alloc::<NSWindow>(),
-            frame,
-            NSWindowStyleMask::Borderless,
-            NSBackingStoreType::Buffered,
-            false,
-        )
+    let window = match content {
+        // A wallpaper that reads the keyboard needs a window that can take it.
+        Content::Procedural {
+            keyboard: Some(keyboard),
+            ..
+        } => KeyWindow::create(mtm, frame, keyboard.clone()),
+        _ => unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                mtm.alloc::<NSWindow>(),
+                frame,
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        },
     };
     window.setLevel(WALLPAPER_LEVEL);
     window.setCollectionBehavior(

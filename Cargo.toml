@@ -68,6 +68,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSColor",
     "NSGraphics",
     "NSEvent",
+    "NSPanel",
 ] }
 objc2-quartz-core = { version = "0.3", features = ["CALayer"] }
 objc2-core-foundation = { version = "0.3", features = ["CFNumber", "CFUUID"] }

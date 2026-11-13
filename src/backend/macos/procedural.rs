@@ -30,6 +30,7 @@ use objc2_metal::{
     MTLTextureDescriptor, MTLTextureUsage,
 };
 
+use super::keyboard::KEYS;
 use super::msl::{self, Translated};
 use crate::backend::DumpRequest;
 use crate::procedural::{
@@ -230,6 +231,7 @@ struct UniformLayout {
 struct Frame<'a> {
     target: &'a Target,
     inputs: &'a FrameInputs,
+    keyboard: Option<&'a ProtocolObject<dyn MTLTexture>>,
 }
 
 /// The render targets and the frame count of one screen.
@@ -367,8 +369,14 @@ impl Program {
     }
 
     /// Encodes every pass of one frame. The image of `target` then holds the
-    /// frame.
-    pub fn encode(&self, cmd: &CommandBuffer, target: &mut Target, inputs: &FrameInputs) {
+    /// frame. `keyboard` is the keyboard texture, if the wallpaper has one.
+    pub fn encode(
+        &self,
+        cmd: &CommandBuffer,
+        target: &mut Target,
+        inputs: &FrameInputs,
+        keyboard: Option<&ProtocolObject<dyn MTLTexture>>,
+    ) {
         let buffer_count = self.buffers.len();
         for i in 0..buffer_count {
             // A `once` buffer keeps what it drew on the first frame.
@@ -378,11 +386,19 @@ impl Program {
             }
             let pp = &target.buffers[i];
             let output = pp.slots[1 - pp.current].clone();
-            let frame = Frame { target, inputs };
+            let frame = Frame {
+                target,
+                inputs,
+                keyboard,
+            };
             self.draw_pass(cmd, &self.passes[i], &output, pp.dims, &frame);
             target.buffers[i].current ^= 1;
         }
-        let frame = Frame { target, inputs };
+        let frame = Frame {
+            target,
+            inputs,
+            keyboard,
+        };
         let pass = &self.passes[buffer_count];
         self.draw_pass(cmd, pass, &target.image, target.dims, &frame);
         target.frame = target.frame.wrapping_add(1);
@@ -397,7 +413,11 @@ impl Program {
         dims: (u32, u32),
         frame: &Frame,
     ) {
-        let Frame { target, inputs } = *frame;
+        let Frame {
+            target,
+            inputs,
+            keyboard,
+        } = *frame;
         let descriptor = MTLRenderPassDescriptor::new();
         let color = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
         color.setTexture(Some(output));
@@ -422,6 +442,10 @@ impl Program {
                             Input::Texture(i) => {
                                 let t = &self.textures[i];
                                 (&t.texture, (t.width, t.height))
+                            }
+                            Input::Keyboard => {
+                                let dims = (KEYS as u32, 3);
+                                (keyboard.unwrap_or(&self.black), dims)
                             }
                         };
                     resolutions[unit] = [w as f32, h as f32, 1.0];
@@ -804,6 +828,11 @@ fn black_texture(gpu: &Gpu) -> anyhow::Result<GpuTexture> {
     )
 }
 
+/// The keyboard texture, from the rows of `Keyboard::take_frame`.
+pub fn keyboard_texture(gpu: &Gpu, rows: &[u8; KEYS * 3]) -> anyhow::Result<GpuTexture> {
+    upload(gpu, MTLPixelFormat::R8Unorm, (KEYS as u32, 3), rows, false)
+}
+
 /// A texture of `format` that holds `data`, rows packed without padding.
 fn upload(
     gpu: &Gpu,
@@ -929,7 +958,7 @@ pub fn dump(request: DumpRequest) -> anyhow::Result<()> {
         };
         previous = time;
         let cmd = gpu.command_buffer()?;
-        program.encode(&cmd, &mut target, &inputs);
+        program.encode(&cmd, &mut target, &inputs, None);
         cmd.commit();
         last = Some(cmd);
     }
