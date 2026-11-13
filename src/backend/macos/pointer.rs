@@ -10,35 +10,15 @@
 //! 1 only where the window under the pointer is the desktop. Only a click
 //! there presses the button of `iMouse`.
 
-use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSEvent, NSWindow};
-use objc2_foundation::{
-    MainThreadMarker, NSArray, NSDictionary, NSNumber, NSPoint, NSRect, NSString,
+use objc2_core_foundation::{CFDictionary, CFNumber, CFString, CFType};
+use objc2_core_graphics::{
+    CGEventSource, CGEventSourceStateID, CGEventType, CGWindowLevelForKey, CGWindowLevelKey,
+    CGWindowListCopyWindowInfo, CGWindowListOption, kCGWindowLayer,
 };
+use objc2_foundation::{MainThreadMarker, NSPoint, NSRect};
 
 use crate::procedural::{BTN_LEFT, Pointer};
-
-/// `kCGEventSourceStateCombinedSessionState`.
-const COMBINED_SESSION_STATE: i32 = 0;
-/// `kCGEventLeftMouseDown`.
-const LEFT_MOUSE_DOWN: u32 = 1;
-/// `kCGDesktopIconWindowLevelKey`.
-const DESKTOP_ICON_LEVEL_KEY: i32 = 18;
-/// `kCGWindowListOptionIncludingWindow`.
-const INCLUDING_WINDOW: u32 = 1 << 3;
-
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    safe fn CGEventSourceCounterForEventType(state: i32, event_type: u32) -> u32;
-    safe fn CGWindowLevelForKey(key: i32) -> i32;
-    /// Returns a CFArray of CFDictionary, which is an NSArray of
-    /// NSDictionary. The caller owns it.
-    fn CGWindowListCopyWindowInfo(
-        option: u32,
-        relative_to_window: u32,
-    ) -> *mut NSArray<NSDictionary<NSString, AnyObject>>;
-}
 
 /// The pointer state of one screen.
 pub struct DesktopPointer {
@@ -118,15 +98,19 @@ impl DesktopPointer {
         {
             return desktop;
         }
-        let desktop = window_level(number)
-            .is_none_or(|level| level <= CGWindowLevelForKey(DESKTOP_ICON_LEVEL_KEY));
+        let desktop = window_level(number).is_none_or(|level| {
+            level <= CGWindowLevelForKey(CGWindowLevelKey::DesktopIconWindowLevelKey)
+        });
         self.last_hit = Some((number, desktop));
         desktop
     }
 }
 
 fn left_clicks() -> u32 {
-    CGEventSourceCounterForEventType(COMBINED_SESSION_STATE, LEFT_MOUSE_DOWN)
+    CGEventSource::counter_for_event_type(
+        CGEventSourceStateID::CombinedSessionState,
+        CGEventType::LeftMouseDown,
+    )
 }
 
 /// The window level of window `number`, or `None` if there is no such window.
@@ -134,12 +118,11 @@ fn left_clicks() -> u32 {
 /// permission. Only the titles are not.
 fn window_level(number: isize) -> Option<i32> {
     let number = u32::try_from(number).ok().filter(|&n| n != 0)?;
-    // SAFETY: The function follows the Create Rule. The array is ours.
-    let windows =
-        unsafe { Retained::from_raw(CGWindowListCopyWindowInfo(INCLUDING_WINDOW, number)) }?;
-    let window = windows.firstObject()?;
-    let level = window.objectForKey(&NSString::from_str("kCGWindowLayer"))?;
-    Some(level.downcast::<NSNumber>().ok()?.intValue())
+    let windows = CGWindowListCopyWindowInfo(CGWindowListOption::OptionIncludingWindow, number)?;
+    // SAFETY: The list holds a dictionary for each window, with string keys.
+    let windows = unsafe { windows.cast_unchecked::<CFDictionary<CFString, CFType>>() };
+    let level = windows.get(0)?.get(unsafe { kCGWindowLayer })?;
+    level.downcast::<CFNumber>().ok()?.as_i32()
 }
 
 /// True if `point` is in `rect`, with the top and right edges outside, so
