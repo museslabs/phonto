@@ -937,6 +937,8 @@ pub fn dump(request: DumpRequest, color_scheme: f32) -> anyhow::Result<()> {
     let (width, height) = request.size.unwrap_or(DEFAULT_DUMP_SIZE);
     let dims = program.target_dims((width, height));
     let mut target = program.create_target(&gpu, dims, true)?;
+    // No key is down. Only a keyboard channel binds it.
+    let keyboard = keyboard_texture(&gpu, &[[0; KEYS]; 3])?;
 
     let fps = pack.fps.map_or(UNCAPPED_DUMP_FPS, f64::from);
     let frames = (request.at * fps).floor() as u64;
@@ -970,7 +972,7 @@ pub fn dump(request: DumpRequest, color_scheme: f32) -> anyhow::Result<()> {
         };
         previous = time;
         let cmd = gpu.command_buffer()?;
-        program.encode(&cmd, &mut target, &inputs, None);
+        program.encode(&cmd, &mut target, &inputs, Some(&keyboard));
         cmd.commit();
         last = Some(cmd);
     }
