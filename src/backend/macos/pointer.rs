@@ -125,8 +125,10 @@ fn window_level(number: isize) -> Option<i32> {
     level.downcast::<CFNumber>().ok()?.as_i32()
 }
 
-/// True if `point` is in `rect`, with the top and right edges outside, so
-/// that a point on the edge of two screens is in one of them.
+/// True if `point` is in `rect`, with the left and top edges inside and the
+/// right and bottom edges outside. A point on the edge of two screens is then
+/// in one of them. `NSEvent::mouseLocation` puts the pointer of a screen
+/// above its bottom edge and at most on its top edge.
 pub fn contains(rect: NSRect, point: NSPoint) -> bool {
     point.x >= rect.origin.x
         && point.x < rect.origin.x + rect.size.width
