@@ -33,7 +33,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // A click: food lands on the water. One small drop, and a few crumbs next
     // to it.
     if (iMouse.w > 0.0) {
-        vec2 c = iMouse.zw / iImageResolution.y;
+        vec2 c = abs(iMouse.zw) / iImageResolution.y;
         push -= 0.6 * gauss(p - c, 0.008);
         for (int k = 0; k < 3; k++) {
             float fk = float(k);
