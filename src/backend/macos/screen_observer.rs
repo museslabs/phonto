@@ -146,7 +146,7 @@ impl ScreenObserver {
     }
 
     fn frame(&self, link: &CADisplayLink) {
-        let Some(gpu) = &self.ivars().gpu else {
+        let (Some(mtm), Some(gpu)) = (MainThreadMarker::new(), &self.ivars().gpu) else {
             return;
         };
         let mut surfaces = self.ivars().surfaces.borrow_mut();
@@ -162,7 +162,7 @@ impl ScreenObserver {
         };
         let mut sources = self.ivars().sources.borrow_mut();
         let source = &mut sources[p.source];
-        if let Err(e) = p.draw(gpu, source, frame, link) {
+        if let Err(e) = p.draw(mtm, gpu, source, frame, link) {
             log::warn!("procedural frame on {}: {e:#}", surface.name);
         }
     }
