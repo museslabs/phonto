@@ -1,7 +1,6 @@
 use std::ffi::c_void;
 
 use objc2::rc::Retained;
-use objc2_av_foundation::AVPlayer;
 use objc2_core_foundation::{
     CFBoolean, CFDictionary, CFNumber, CFRetained, CFRunLoop, CFRunLoopSource, CFString, CFType,
     ConcreteType, kCFRunLoopDefaultMode,
@@ -25,7 +24,8 @@ const IS_CHARGING: &str = "Is Charging";
 const TYPE: &str = "Type";
 const INTERNAL_BATTERY: &str = "InternalBattery";
 
-/// Pauses the players and the procedural wallpapers based on power source.
+/// Tells the screen observer the power source, and whether the power pause
+/// holds.
 ///
 /// Owns a heap-allocated context handed to IOKit by raw pointer. The run loop
 /// retains the source independently of our `CFRetained` handle, so `Drop`
@@ -36,24 +36,14 @@ pub struct BatteryObserver {
 }
 
 struct Context {
-    players: Vec<Retained<AVPlayer>>,
-    /// Pauses the procedural wallpapers.
     screens: Retained<ScreenObserver>,
     mode: PauseMode,
 }
 
 impl BatteryObserver {
     /// Returns `None` only on IOKit setup failure (already logged).
-    pub fn install(
-        players: Vec<Retained<AVPlayer>>,
-        screens: Retained<ScreenObserver>,
-        mode: PauseMode,
-    ) -> Option<Self> {
-        let mut ctx = Box::new(Context {
-            players,
-            screens,
-            mode,
-        });
+    pub fn install(screens: Retained<ScreenObserver>, mode: PauseMode) -> Option<Self> {
+        let mut ctx = Box::new(Context { screens, mode });
         let ctx_ptr: *mut Context = &raw mut *ctx;
 
         let Some(source) = (unsafe {
@@ -95,11 +85,7 @@ unsafe extern "C-unwind" fn power_changed(context: *mut c_void) {
 }
 
 fn apply_state(ctx: &Context) {
-    let Context {
-        players,
-        screens,
-        mode,
-    } = ctx;
+    let Context { screens, mode } = ctx;
     let info = IOPSCopyPowerSourcesInfo();
     let on_batt = info.as_deref().is_some_and(on_battery);
     let pct = info.as_deref().and_then(battery_percent);
@@ -110,18 +96,8 @@ fn apply_state(ctx: &Context) {
         PauseMode::BelowPercent(threshold) => on_batt && pct.is_some_and(|p| p < *threshold),
     };
 
-    if should_pause {
-        log::info!("pausing wallpaper (on_battery={on_batt}, charge={pct:?}%)");
-        for player in players {
-            unsafe { player.pause() };
-        }
-    } else {
-        log::info!("playing wallpaper (on_battery={on_batt}, charge={pct:?}%)");
-        for player in players {
-            unsafe { player.play() };
-        }
-    }
-    screens.set_power_paused(should_pause);
+    log::info!("power changed (on_battery={on_batt}, charge={pct:?}%, pause={should_pause})");
+    screens.set_power(on_batt, should_pause);
 }
 
 /// `iBattery`: the charge from 0 to 1, 1 while charging, 1 on AC power, and

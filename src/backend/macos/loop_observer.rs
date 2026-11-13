@@ -13,12 +13,10 @@ define_class!(
     pub struct LoopObserver;
 
     impl LoopObserver {
+        /// Only the screen observer plays and pauses the player.
         #[unsafe(method(itemEnded:))]
         fn _item_ended(&self, _notif: &NSNotification) {
-            unsafe {
-                self.ivars().player.seekToTime(kCMTimeZero);
-                self.ivars().player.play();
-            }
+            unsafe { self.ivars().player.seekToTime(kCMTimeZero) };
         }
     }
 );

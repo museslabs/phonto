@@ -80,6 +80,8 @@ pub struct ProceduralSource {
     polls_pointer: bool,
     /// Set with `--span`.
     span: Option<Span>,
+    /// True while none of its surfaces runs.
+    paused: bool,
 }
 
 /// The desktop, with `--span`. The first surface that draws a frame of the
@@ -168,6 +170,7 @@ impl ProceduralSource {
                 screens: Vec::new(),
                 scene: Scene::new(polls_pointer),
             }),
+            paused: false,
         })
     }
 
@@ -180,6 +183,11 @@ impl ProceduralSource {
         if self.reads_audio {
             self.audio = Some(Rc::clone(capture));
         }
+    }
+
+    /// The system audio, if the wallpaper reads it.
+    pub fn audio(&self) -> Option<&AudioCapture> {
+        self.audio.as_deref()
     }
 
     pub fn spans(&self) -> bool {
@@ -271,14 +279,13 @@ impl ProceduralSource {
         Ok(())
     }
 
-    /// Stops running the input commands and reading the audio while the
-    /// wallpaper is paused. A spanned wallpaper also forgets the clicks of
-    /// the pause.
+    /// Stops running the input commands while the wallpaper is paused. A
+    /// spanned wallpaper also forgets the clicks of the pause.
     pub fn set_paused(&mut self, paused: bool) {
-        self.commands.set_paused(paused);
-        if let Some(audio) = &self.audio {
-            audio.set_paused(paused);
+        if std::mem::replace(&mut self.paused, paused) == paused {
+            return;
         }
+        self.commands.set_paused(paused);
         if !paused && let Some(span) = &mut self.span {
             span.scene.forget_clicks();
         }
@@ -359,9 +366,13 @@ impl ProceduralSurface {
     }
 
     pub fn set_paused(&mut self, paused: bool) {
-        if let Some(link) = &self.link {
-            link.setPaused(paused);
+        let Some(link) = &self.link else {
+            return;
+        };
+        if link.isPaused() == paused {
+            return;
         }
+        link.setPaused(paused);
         if !paused && let Some(scene) = &mut self.scene {
             scene.forget_clicks();
         }

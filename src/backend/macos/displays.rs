@@ -46,11 +46,14 @@ pub fn assigned<'a, T>(screen: &NSScreen, assignments: &'a HashMap<String, T>) -
     let by_uuid = uuid(screen).and_then(|uuid| assignments.get(&uuid));
     let by_name = assignments.get(&name);
     if by_uuid.is_some() && by_name.is_some() {
-        log::warn!(
-            "display {name:?} is assigned by both its UUID and its name. Playing the UUID's video."
-        );
+        log::warn!("display {name:?} is assigned by both its UUID and its name. The UUID wins.");
     }
     by_uuid.or(by_name)
+}
+
+/// True if `id` is the UUID or the name of the screen.
+pub fn is_named(screen: &NSScreen, id: &str) -> bool {
+    uuid(screen).as_deref() == Some(id) || screen.localizedName().to_string() == id
 }
 
 pub fn list_displays() -> anyhow::Result<Vec<DisplayInfo>> {

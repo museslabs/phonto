@@ -1,25 +1,35 @@
 use objc2::runtime::AnyObject;
 use objc2::{
-    DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained, runtime::NSObject,
+    DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained, runtime::NSObject, sel,
 };
-use objc2_app_kit::{NSEvent, NSScreen, NSWindow};
+use objc2_app_kit::{
+    NSEvent, NSScreen, NSWindow, NSWindowDidChangeOcclusionStateNotification, NSWorkspace,
+    NSWorkspaceActiveSpaceDidChangeNotification, NSWorkspaceDidActivateApplicationNotification,
+    NSWorkspaceScreensDidSleepNotification, NSWorkspaceScreensDidWakeNotification,
+    NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
+};
 use objc2_av_foundation::{AVPlayer, AVPlayerLayer};
+use objc2_core_graphics::CGDisplayIsAsleep;
 use objc2_foundation::{
-    MainThreadMarker, NSDictionary, NSKeyValueChangeKey, NSNotification, NSRect, NSString,
+    MainThreadMarker, NSDictionary, NSKeyValueChangeKey, NSNotification, NSNotificationCenter,
+    NSRect, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer,
 };
 use objc2_quartz_core::CADisplayLink;
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use super::color_scheme;
+use super::cover::{self, Cover};
 use super::displays::{assigned, display_id};
 use super::keyboard::Keyboard;
 use super::pointer::contains;
 use super::procedural::Gpu;
 use super::procedural_surface::{ProceduralSource, ProceduralSurface};
+use crate::plan::PauseBehindPlan;
 use crate::scale::ScaleMode;
 
 pub struct MirrorSurface {
@@ -29,6 +39,7 @@ pub struct MirrorSurface {
     pub display_id: u32,
     pub window: Retained<NSWindow>,
     pub layer: SurfaceLayer,
+    pub cover: Cover,
 }
 
 /// What a surface draws with.
@@ -65,7 +76,16 @@ pub struct ScreenObserverIvars {
     /// Only set if a screen shows a procedural wallpaper.
     gpu: Option<Gpu>,
     sources: RefCell<Vec<ProceduralSource>>,
+    /// Each video player, and whether it plays.
+    players: Vec<(Retained<AVPlayer>, Cell<bool>)>,
+    pause_behind: PauseBehindPlan,
+    on_battery: Cell<bool>,
+    /// True if `--pause-on-battery` or `--pause-below` pauses everything.
     power_paused: Cell<bool>,
+    /// True while another user's session is in front.
+    switched_out: Cell<bool>,
+    /// The next read of the cover.
+    timer: RefCell<Option<Retained<NSTimer>>>,
     /// `iColorScheme`. It changes only when the appearance does.
     color_scheme: Cell<f32>,
 }
@@ -86,6 +106,30 @@ define_class!(
         #[unsafe(method(frame:))]
         fn _frame(&self, link: &CADisplayLink) {
             self.frame(link);
+        }
+
+        #[unsafe(method(poll:))]
+        fn _poll(&self, _timer: &NSTimer) {
+            self.update_cover();
+        }
+
+        /// A window of ours changed its occlusion, another app or Space
+        /// came to the front, or the screens slept or woke.
+        #[unsafe(method(coverChanged:))]
+        fn _cover_changed(&self, _notif: &NSNotification) {
+            self.update_cover();
+        }
+
+        #[unsafe(method(sessionDidResignActive:))]
+        fn _session_did_resign_active(&self, _notif: &NSNotification) {
+            self.ivars().switched_out.set(true);
+            self.update_cover();
+        }
+
+        #[unsafe(method(sessionDidBecomeActive:))]
+        fn _session_did_become_active(&self, _notif: &NSNotification) {
+            self.ivars().switched_out.set(false);
+            self.update_cover();
         }
 
         /// The appearance of the app changed. It is the only key path that
@@ -117,19 +161,37 @@ impl ScreenObserver {
         scale: ScaleMode,
         gpu: Option<Gpu>,
         sources: Vec<ProceduralSource>,
+        pause_behind: PauseBehindPlan,
     ) -> Retained<Self> {
+        let contents = match &policy {
+            AttachPolicy::Mirror(content) => vec![content],
+            AttachPolicy::PerDisplay(map) => map.values().collect(),
+        };
+        let players = contents
+            .into_iter()
+            .filter_map(|content| match content {
+                Content::Video(player) => Some((player.clone(), Cell::new(false))),
+                Content::Procedural { .. } => None,
+            })
+            .collect();
         let ivars = ScreenObserverIvars {
             surfaces: RefCell::new(surfaces),
             policy,
             scale,
             gpu,
             sources: RefCell::new(sources),
+            players,
+            pause_behind,
+            on_battery: Cell::new(false),
             power_paused: Cell::new(false),
+            switched_out: Cell::new(false),
+            timer: RefCell::new(None),
             color_scheme: Cell::new(color_scheme::uniform(mtm)),
         };
         let this = Self::alloc(mtm).set_ivars(ivars);
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         color_scheme::observe(&this);
+        this.observe_cover();
         this.update_span(mtm);
         for surface in this.ivars().surfaces.borrow_mut().iter_mut() {
             this.start(surface);
@@ -137,21 +199,155 @@ impl ScreenObserver {
         this
     }
 
-    /// Pauses or resumes the procedural wallpapers. Their time stops during
-    /// the pause.
-    pub fn set_power_paused(&self, paused: bool) {
-        // The power source reports every change of the charge.
-        if self.ivars().power_paused.replace(paused) == paused {
-            return;
-        }
-        for surface in self.ivars().surfaces.borrow_mut().iter_mut() {
-            if let SurfaceLayer::Procedural(p) = &mut surface.layer {
-                p.set_paused(paused);
+    /// Reads the cover again on the events that can change it.
+    fn observe_cover(&self) {
+        let center = NSNotificationCenter::defaultCenter();
+        let workspace = NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: Each selector takes the notification.
+        unsafe {
+            // Fires for each window of ours, the sentinels too.
+            center.addObserver_selector_name_object(
+                self,
+                sel!(coverChanged:),
+                Some(NSWindowDidChangeOcclusionStateNotification),
+                None,
+            );
+            for (selector, name) in [
+                (
+                    sel!(coverChanged:),
+                    NSWorkspaceDidActivateApplicationNotification,
+                ),
+                (
+                    sel!(coverChanged:),
+                    NSWorkspaceActiveSpaceDidChangeNotification,
+                ),
+                (sel!(coverChanged:), NSWorkspaceScreensDidSleepNotification),
+                (sel!(coverChanged:), NSWorkspaceScreensDidWakeNotification),
+                (
+                    sel!(sessionDidResignActive:),
+                    NSWorkspaceSessionDidResignActiveNotification,
+                ),
+                (
+                    sel!(sessionDidBecomeActive:),
+                    NSWorkspaceSessionDidBecomeActiveNotification,
+                ),
+            ] {
+                workspace.addObserver_selector_name_object(self, selector, Some(name), None);
             }
         }
-        for source in self.ivars().sources.borrow_mut().iter_mut() {
-            source.set_paused(paused);
+    }
+
+    /// Takes the power source, and whether `--pause-on-battery` or
+    /// `--pause-below` pauses everything. Time stops during the pause.
+    pub fn set_power(&self, on_battery: bool, paused: bool) {
+        // The power source reports every change of the charge.
+        let switched = self.ivars().on_battery.replace(on_battery) != on_battery;
+        let toggled = self.ivars().power_paused.replace(paused) != paused;
+        if switched || toggled {
+            self.update_cover();
         }
+    }
+
+    /// Reads which screens are covered, runs and pauses what that changes,
+    /// and plans the next read. Without power pausing everything, `any`
+    /// reads its screen on a timer, and a screen that has just been covered
+    /// is read again until it pauses.
+    pub fn update_cover(&self) {
+        let ivars = self.ivars();
+        let switched_out = ivars.switched_out.get();
+        let on_battery = ivars.on_battery.get();
+        let now = Instant::now();
+        let screens = NSScreen::screens(self.mtm());
+        let windows = OnceCell::new();
+        let next = ivars
+            .surfaces
+            .borrow_mut()
+            .iter_mut()
+            .filter_map(|surface| {
+                let screen = screens
+                    .iter()
+                    .find(|screen| display_id(screen) == surface.display_id)?;
+                let hidden = switched_out
+                    || CGDisplayIsAsleep(surface.display_id)
+                    || !cover::shows(&surface.window);
+                surface
+                    .cover
+                    .read(&screen, hidden, on_battery, &windows, now)
+            })
+            .min();
+        self.apply();
+        self.schedule(next.filter(|_| !ivars.power_paused.get()));
+    }
+
+    /// Runs each surface that power and its cover let run, and each source
+    /// and player that a running surface shows. Pauses the rest. Only a
+    /// change reaches a display link, a source or a player.
+    fn apply(&self) {
+        let ivars = self.ivars();
+        let power_paused = ivars.power_paused.get();
+        let mut sources = ivars.sources.borrow_mut();
+        let mut sources_run = vec![false; sources.len()];
+        let mut players_run = Vec::new();
+        for surface in ivars.surfaces.borrow_mut().iter_mut() {
+            let runs = !power_paused && !surface.cover.covered();
+            match &mut surface.layer {
+                SurfaceLayer::Procedural(p) => {
+                    p.set_paused(!runs);
+                    sources_run[p.source] |= runs;
+                }
+                SurfaceLayer::Video(layer) => {
+                    if runs && let Some(player) = unsafe { layer.player(self.mtm()) } {
+                        players_run.push(player);
+                    }
+                }
+            }
+        }
+        for (source, runs) in sources.iter_mut().zip(&sources_run) {
+            source.set_paused(!runs);
+        }
+        // The sources share one capture of the audio.
+        let audio_runs = sources
+            .iter()
+            .zip(&sources_run)
+            .any(|(source, runs)| *runs && source.audio().is_some());
+        if let Some(audio) = sources.iter().find_map(ProceduralSource::audio) {
+            audio.set_paused(!audio_runs);
+        }
+        for (player, playing) in &ivars.players {
+            let runs = players_run.contains(player);
+            if playing.replace(runs) != runs {
+                if runs {
+                    unsafe { player.play() };
+                } else {
+                    unsafe { player.pause() };
+                }
+            }
+        }
+    }
+
+    /// Reads the cover again `after` this long, or not until an event.
+    fn schedule(&self, after: Option<Duration>) {
+        if let Some(timer) = self.ivars().timer.take() {
+            timer.invalidate();
+        }
+        let Some(after) = after else {
+            return;
+        };
+        let seconds = after.as_secs_f64();
+        // SAFETY: `ScreenObserver` answers `poll:`, which takes the timer.
+        let timer = unsafe {
+            NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
+                seconds,
+                self,
+                sel!(poll:),
+                None,
+                false,
+            )
+        };
+        // The slack lets macOS fire the timer with others.
+        timer.setTolerance(seconds / 10.0);
+        unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
+        self.ivars().timer.replace(Some(timer));
     }
 
     fn appearance_changed(&self) {
@@ -187,7 +383,9 @@ impl ScreenObserver {
         content: &Content,
     ) -> anyhow::Result<MirrorSurface> {
         let gpu = self.ivars().gpu.as_ref();
-        let mut surface = super::build_surface(mtm, screen, content, self.ivars().scale, gpu)?;
+        let pause_behind = cover::pause_behind(screen, &self.ivars().pause_behind);
+        let mut surface =
+            super::build_surface(mtm, screen, content, self.ivars().scale, gpu, pause_behind)?;
         self.start(&mut surface);
         Ok(surface)
     }
@@ -293,6 +491,10 @@ impl ScreenObserver {
                     self.switch(mtm, surface, screen, content);
                 }
             }
+            // The sentinel follows the visible frame, and a new name can
+            // match another entry.
+            let pause_behind = cover::pause_behind(screen, &self.ivars().pause_behind);
+            surface.cover.place(mtm, screen, pause_behind);
             log::info!(
                 "display reconfigured: {} -> {}x{} @ {}x",
                 surface.name,
@@ -344,6 +546,7 @@ impl ScreenObserver {
 
         // The screens can move, appear, or go away.
         self.update_span(mtm);
+        self.update_cover();
     }
 
     /// Makes `surface` show `content`. A video layer only changes its player.
