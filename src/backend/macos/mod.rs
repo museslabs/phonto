@@ -456,7 +456,11 @@ pub(super) fn build_surface(
         // for videos.
         Content::Procedural { source, .. } => {
             let gpu = gpu.context("a procedural wallpaper needs the GPU")?;
-            SurfaceLayer::Procedural(ProceduralSurface::new(gpu, &content_view, *source)?)
+            SurfaceLayer::Procedural(Box::new(ProceduralSurface::new(
+                gpu,
+                &content_view,
+                *source,
+            )?))
         }
     };
 

@@ -316,6 +316,7 @@ phonto examples/procedural/museslabs     # the Muses Labs lyre plays your system
 phonto examples/procedural/battery       # your battery as the tide in a glass
 phonto examples/procedural/system        # the load of your computer, from input commands
 phonto examples/procedural/album         # the cover of the music that plays, as a live image
+phonto examples/procedural/zero-tv       # a menu of tapes: a click on a tape opens a program
 phonto --span examples/procedural/koi    # one pond across all your displays
 ```
 
@@ -330,6 +331,7 @@ Each example shows some of the features:
 | battery | `iBattery`, the dark mode setting, a text atlas |
 | system | input commands, buffers, the dark mode setting |
 | album | a live image, an input command, audio |
+| zero-tv | a video, actions with labels, the pointer, buffers |
 
 The koi pond shows the most features. If you click the water, food drops, and
 the koi swim to it and feed. If you hold the button and drag, a wake follows
@@ -393,6 +395,23 @@ music plays and how far the track is, and it keeps the cover in
 cp examples/procedural/album/now-playing.sh ~/.config/phonto/
 cat examples/procedural/album/inputs.toml >> ~/.config/phonto/config.toml
 ```
+
+The zero-tv example is a shelf of VHS tapes under a TV, as a menu. The room
+and the TV are a video. The tapes are graphics: when the pointer is on a
+tape, the tape slides out of its stack. A click on tape N sends it into the
+VCR and runs the action `tapeN`. Give a tape a label and a command in your
+configuration:
+
+```toml
+[[action]]
+name = "tape1"
+label = "Firefox"
+command = "firefox"
+```
+
+A tape without a label shows its own name. To preview a tape that is out or
+clicked, for example with `dump`, set `DEMO_TAPE` and `DEMO_CLICK` at the top
+of `examples/procedural/zero-tv/common.glsl`.
 
 On Linux, a pack that sets `audio = true` reads the monitor of your default
 output. A monitor is a copy of the sound that goes to your speakers. phonto
@@ -478,7 +497,7 @@ Uniforms are the inputs that phonto sets before each frame:
 | `iFrameRate` | `float` | Frames per second, smoothed. |
 | `iFrame` | `int` | The number of frames drawn on this display. It starts at 0 again when the display changes size. |
 | `iDate` | `vec4` | Year, month (0 to 11), day (1 to 31), and seconds since local midnight. |
-| `iMouse` | `vec4` | The same as on Shadertoy. `xy` is the drag position and `zw` is the click position. `z` is positive while the left button is pressed. `w` is positive only on the frame of the click. |
+| `iMouse` | `vec4` | The same as on Shadertoy. `xy` is the drag position and `zw` is the click position. `z` is positive while the left button is pressed. `w` is positive only on the frame of the click. A short click can end before that frame, so use `abs(iMouse.zw)` for the place of the click. |
 | `iPointer` | `vec4` | Only in phonto. `xy` is the pointer position. `z` is 1 while the pointer is over the wallpaper. `w` is 1 while the left button is pressed. Use it for hover effects. |
 | `iAudio` | `vec4` | Only in phonto. The smoothed bass, midrange, treble, and overall volume, each from 0 to 1. If the pack does not set `audio = true`, the values are zero. |
 | `iSpectrum[32]` | `float[32]` | Only in phonto. 32 smoothed frequency bands from 40 Hz to 11 kHz, with a logarithmic spacing. Each value is from 0 to 1. If the pack does not set `audio = true`, the values are zero. |
@@ -523,6 +542,7 @@ and with the default setting macOS moves all windows away to show the desktop.
 For wallpapers that you click, such as the koi pond, set System Settings >
 Desktop & Dock > Click wallpaper to reveal desktop to "Only in Stage Manager".
 
+A click on the wallpaper can also run a command (see [Actions](#actions)).
 phonto reads the keyboard only on macOS, through a keyboard channel (see
 [Packs](#packs)). `iChannelTime` and `iSampleRate` exist only so that shaders
 that declare sound inputs compile.
@@ -568,12 +588,13 @@ keys:
 `channels[n]` is the input of `iChannelN`, up to eight channels. A channel is
 a string or a table. A string is a buffer name, or else the path of an image
 in the pack. A table has exactly one of `buffer = "name"`,
-`texture = "file.png"` or `keyboard = true`, and optional sampling keys:
+`texture = "file.png"`, `video = "file.mp4"` (see [Videos](#videos)), or
+`keyboard = true`, and optional sampling keys:
 
 | Key | Values | Default |
 |---|---|---|
-| `filter` | `nearest`, `linear`, `mipmap` (only for textures) | `linear` for buffers, `mipmap` for textures, `nearest` for the keyboard |
-| `wrap` | `clamp`, `repeat`, `mirror` | `clamp` for buffers and the keyboard, `repeat` for textures |
+| `filter` | `nearest`, `linear`, `mipmap` (only for textures) | `linear` for buffers and videos, `mipmap` for textures, `nearest` for the keyboard |
+| `wrap` | `clamp`, `repeat`, `mirror` | `clamp` for buffers, videos, and the keyboard, `repeat` for textures |
 | `watch` | `true` loads the image again when its file changes (see [Live images](#live-images)) | `false` |
 
 The keyboard channel works only on macOS so far. It is the keyboard texture
@@ -637,6 +658,82 @@ phonto writes one warning. A command that runs longer than its interval
 stops, with all the programs that it started. This limit is at least 1 second
 and at most 10 seconds. An input without a command keeps its default. `dump` runs each command once.
 
+### Actions
+
+A click on a pack can run a command, for example to open a program. The pack
+names its actions and draws where each action is. Your configuration gives
+the command of each action. As for inputs, commands come only from your
+configuration, never from a pack.
+
+The pack names its actions in `[actions]`, with the buffer that tells where
+they are:
+
+```toml
+[[buffer]]
+name = "pick"
+shader = "pick.glsl"
+format = "rgba8"           # an actions buffer must use rgba8
+once = true                # the actions do not move, so draw them once
+
+[actions]
+buffer = "pick"
+names = ["browser", "terminal"]
+```
+
+The actions buffer holds the number of the action at each pixel, in its red
+channel. The first name is 1, the second name is 2, and 0 is no action. Write
+the number divided by 255:
+
+```glsl
+// pick.glsl: the left half of the screen is the browser, the right half the terminal.
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    int action = fragCoord.x < iResolution.x * 0.5 ? 1 : 2;
+    fragColor = vec4(float(action) / 255.0, 0.0, 0.0, 1.0);
+}
+```
+
+When you press the left button, phonto reads the actions buffer under the
+pointer, in the last frame that you saw. Then it runs the command of that
+action. While the pointer is over an action, the cursor is a hand. The other
+passes get the same click in `iMouse`, so the image pass can show it.
+
+Give each action a command in your configuration. The optional `label` is
+the text that the pack shows for the action, for example in a menu:
+
+```toml
+# ~/.config/phonto/config.toml
+[[action]]
+name = "browser"
+label = "Firefox"
+command = "firefox"
+
+[[action]]
+name = "terminal"
+label = "Terminal"
+command = "ghostty"
+```
+
+phonto runs the command with `sh`, in your home directory, in a new session.
+The program continues when phonto stops. A click on an action without a
+command does nothing. phonto writes the names of these actions in the log
+when the wallpaper starts. A pack can name 255 actions at most. An action
+name has letters, digits, `_`, and `-`.
+
+phonto does not draw text. It gives the labels to the shaders of a pack with
+actions, and the pack draws the characters, for example from a font image.
+These functions read the labels. Action 1 is the first name in `names`:
+
+| Function | Result |
+|---|---|
+| `int iActionLabel(int action, int index)` | The Unicode code point at `index` of the label, from 0. It is 0 after the end of the label. |
+| `int iActionLabelLength(int action)` | The number of characters of the label. It is 0 if the action has no label. |
+| `bool iActionHasCommand(int action)` | True if the configuration gives the action a command. |
+
+A label has 32 characters at most, and phonto cuts a longer label. A
+character after U+FFFF shows as `?`. phonto reads the labels when it starts,
+so a buffer with `once = true` can draw them. The functions read the uniforms
+`iActionLabels` and `iActionCount`, so do not declare these names.
+
 ### Live images
 
 A texture channel with `watch = true` loads its image again when the file
@@ -659,6 +756,28 @@ text, render it to an image, for example with ImageMagick:
 magick -background none -fill white -pointsize 64 label:"3 unread" /tmp/mail.png &&
   mv /tmp/mail.png ~/.cache/phonto/mail.png
 ```
+
+### Videos
+
+A channel can show a video file. The GPU decodes it, as for a video
+wallpaper, and the video starts again at its end. The path can be absolute,
+or it can start with `~/`:
+
+```toml
+[image]
+shader = "image.glsl"
+channels = [{ video = "~/Videos/rain.mp4" }]
+```
+
+The video plays at the speed of `iTime`. It stops when time stops, for
+example during a battery pause. As for images, `uv = (0, 0)` is the
+bottom-left corner of the video, and `iChannelResolution` gives its size. The
+channel is black until the first frame comes. The audio of the file does not
+play. `dump` plays the video during the frames before `--at`, as on screen.
+So a buffer that keeps its last frame sees each frame of the video, and the
+image shows the frame at `--at` seconds. If `--at` is longer than the video,
+the video loops. A long `--at` takes more time, because `dump` decodes the
+video up to it.
 
 ### Performance
 
@@ -759,6 +878,13 @@ Commands that give procedural wallpapers values, as `iInput.<name>`. Each
 entry has a `name`, a shell `command` that prints one to four numbers, and
 `every`, the seconds between two runs. See
 [Your own inputs](#your-own-inputs).
+
+### `action`
+
+Commands that a click on a procedural wallpaper runs. Each entry has a
+`name`, the name of an action of the wallpaper. It can have a shell
+`command`, and a `label` that the wallpaper shows. Two entries cannot have
+the same name. See [Actions](#actions).
 
 ### Path expansion
 

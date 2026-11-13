@@ -16,6 +16,9 @@ pub const MAX_CHANNELS: usize = 8;
 pub const MAX_INPUTS: usize = 16;
 /// The largest `size` or `height` of a buffer.
 pub const MAX_BUFFER_SIZE: u32 = 8192;
+/// The most actions that a pack can name. The actions buffer stores the
+/// number of an action in one 8-bit channel, and 0 is no action.
+pub const MAX_ACTIONS: usize = 255;
 const DEFAULT_FPS: f32 = 60.0;
 
 /// A procedural wallpaper, loaded and validated. A backend can compile it.
@@ -41,6 +44,22 @@ pub struct Pack {
     /// The values that the pack reads from the `[[input]]` commands of the
     /// configuration, as `iInput.<name>`.
     pub inputs: Vec<NamedInput>,
+    /// Video files that channels use. Each video decodes once, and loops.
+    pub videos: Vec<PathBuf>,
+    /// The actions that a click can run, if the pack has an `[actions]`
+    /// table.
+    pub actions: Option<Actions>,
+}
+
+/// The actions of a pack. A click on the wallpaper runs the action under the
+/// pointer. The command of each action comes from the `[[action]]` entries of
+/// the configuration, never from the pack.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Actions {
+    /// The buffer that holds the number of the action at each pixel, in its
+    /// red channel. `names[0]` is number 1, and 0 is no action.
+    pub buffer: usize,
+    pub names: Vec<String>,
 }
 
 /// An input that a pack reads, with its value when no command gives one.
@@ -131,6 +150,8 @@ pub enum Input {
     Buffer(usize),
     /// `Pack::textures[i]`.
     Texture(usize),
+    /// The current frame of `Pack::videos[i]`.
+    Video(usize),
     /// The keyboard, as on Shadertoy: a texture 256 key codes wide and 3
     /// rows high.
     #[cfg(target_os = "macos")]
@@ -191,6 +212,14 @@ struct Manifest {
     image: ImageManifest,
     #[serde(default)]
     inputs: toml::Table,
+    actions: Option<ActionsManifest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionsManifest {
+    buffer: String,
+    names: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,6 +258,7 @@ enum ChannelManifest {
 struct ChannelTable {
     buffer: Option<String>,
     texture: Option<String>,
+    video: Option<String>,
     #[cfg(target_os = "macos")]
     #[serde(default)]
     keyboard: bool,
@@ -287,6 +317,8 @@ impl Pack {
             },
             textures: Vec::new(),
             inputs: Vec::new(),
+            videos: Vec::new(),
+            actions: None,
         })
     }
 
@@ -335,10 +367,10 @@ impl Pack {
             .map(|p| read_source(&dir.join(p)))
             .transpose()?;
 
-        let mut textures = TextureSet::default();
+        let mut sources = Sources::default();
         let mut buffers = Vec::with_capacity(m.buffers.len());
         for b in &m.buffers {
-            let buffer = build_buffer(b, dir, &buffer_index, &mut textures)
+            let buffer = build_buffer(b, dir, &buffer_index, &mut sources)
                 .with_context(|| format!("[[buffer]] `{}`", b.name))?;
             buffers.push(buffer);
         }
@@ -348,9 +380,14 @@ impl Pack {
             &m.image.channels,
             dir,
             &buffer_index,
-            &mut textures,
+            &mut sources,
         )
         .context("[image]")?;
+        let actions = m
+            .actions
+            .map(|a| parse_actions(a, &buffer_index, &buffers))
+            .transpose()
+            .context("[actions]")?;
 
         Ok(Self {
             name: m.name.unwrap_or_else(|| file_stem(dir)),
@@ -360,8 +397,10 @@ impl Pack {
             common,
             buffers,
             image,
-            textures: textures.list,
+            textures: sources.textures.list,
             inputs: parse_inputs(&m.inputs).context("[inputs]")?,
+            videos: sources.videos,
+            actions,
         })
     }
 }
@@ -370,7 +409,7 @@ fn build_buffer(
     b: &BufferManifest,
     dir: &Path,
     buffer_index: &HashMap<&str, usize>,
-    textures: &mut TextureSet,
+    sources: &mut Sources,
 ) -> anyhow::Result<Buffer> {
     let in_range = |v: u32| (1..=MAX_BUFFER_SIZE).contains(&v);
     let size = match (b.size, b.height) {
@@ -386,7 +425,7 @@ fn build_buffer(
         Some("rgba8") => BufferFormat::Rgba8,
         Some(f) => bail!("unknown format `{f}` (expected rgba8, rgba16f or rgba32f)"),
     };
-    let pass = build_pass(&b.name, &b.shader, &b.channels, dir, buffer_index, textures)?;
+    let pass = build_pass(&b.name, &b.shader, &b.channels, dir, buffer_index, sources)?;
     Ok(Buffer {
         pass,
         size,
@@ -401,7 +440,7 @@ fn build_pass(
     channels: &[ChannelManifest],
     dir: &Path,
     buffer_index: &HashMap<&str, usize>,
-    textures: &mut TextureSet,
+    sources: &mut Sources,
 ) -> anyhow::Result<Pass> {
     if channels.len() > MAX_CHANNELS {
         bail!(
@@ -420,7 +459,7 @@ fn build_pass(
         .iter()
         .enumerate()
         .map(|(n, c)| {
-            resolve_channel(c, dir, buffer_index, textures).with_context(|| format!("iChannel{n}"))
+            resolve_channel(c, dir, buffer_index, sources).with_context(|| format!("iChannel{n}"))
         })
         .collect::<anyhow::Result<_>>()?;
     Ok(Pass {
@@ -434,16 +473,17 @@ fn resolve_channel(
     c: &ChannelManifest,
     dir: &Path,
     buffer_index: &HashMap<&str, usize>,
-    textures: &mut TextureSet,
+    sources: &mut Sources,
 ) -> anyhow::Result<Channel> {
-    let (buffer, texture, keyboard, filter, wrap, watch) = match c {
+    let (buffer, texture, video, keyboard, filter, wrap, watch) = match c {
         ChannelManifest::Short(s) if buffer_index.contains_key(s.as_str()) => {
-            (Some(s.as_str()), None, false, None, None, false)
+            (Some(s.as_str()), None, None, false, None, None, false)
         }
-        ChannelManifest::Short(s) => (None, Some(s.as_str()), false, None, None, false),
+        ChannelManifest::Short(s) => (None, Some(s.as_str()), None, false, None, None, false),
         ChannelManifest::Full(t) => (
             t.buffer.as_deref(),
             t.texture.as_deref(),
+            t.video.as_deref(),
             #[cfg(target_os = "macos")]
             t.keyboard,
             #[cfg(not(target_os = "macos"))]
@@ -454,26 +494,34 @@ fn resolve_channel(
         ),
     };
 
-    let (input, default_filter, default_wrap) = match (buffer, texture, keyboard) {
-        (Some(_), None, false) | (None, None, true) if watch => {
+    let (input, default_filter, default_wrap) = match (buffer, texture, video, keyboard) {
+        (Some(_), None, None, false) | (None, None, Some(_), false) | (None, None, None, true)
+            if watch =>
+        {
             bail!("`watch` is only for textures")
         }
-        (Some(name), None, false) => {
+        (Some(name), None, None, false) => {
             let Some(&i) = buffer_index.get(name) else {
                 bail!("no [[buffer]] is named `{name}`");
             };
             (Input::Buffer(i), Filter::Linear, Wrap::Clamp)
         }
-        (None, Some(path), false) => {
-            let i = textures.load(&dir.join(crate::config::expand_tilde(path)), watch)?;
+        (None, Some(path), None, false) => {
+            let i = sources
+                .textures
+                .load(&dir.join(crate::config::expand_tilde(path)), watch)?;
             (Input::Texture(i), Filter::Mipmap, Wrap::Repeat)
         }
+        (None, None, Some(path), false) => {
+            let i = sources.video(&dir.join(crate::config::expand_tilde(path)))?;
+            (Input::Video(i), Filter::Linear, Wrap::Clamp)
+        }
         #[cfg(target_os = "macos")]
-        (None, None, true) => (Input::Keyboard, Filter::Nearest, Wrap::Clamp),
+        (None, None, None, true) => (Input::Keyboard, Filter::Nearest, Wrap::Clamp),
         #[cfg(target_os = "macos")]
-        _ => bail!("set exactly one of `buffer`, `texture` or `keyboard`"),
+        _ => bail!("set exactly one of `buffer`, `texture`, `video`, or `keyboard`"),
         #[cfg(not(target_os = "macos"))]
-        _ => bail!("set exactly one of `buffer` or `texture`"),
+        _ => bail!("set exactly one of `buffer`, `texture`, or `video`"),
     };
 
     let filter = filter
@@ -481,13 +529,54 @@ fn resolve_channel(
         .transpose()?
         .unwrap_or(default_filter);
     let wrap = wrap.map(parse_wrap).transpose()?.unwrap_or(default_wrap);
-    if filter == Filter::Mipmap && matches!(input, Input::Buffer(_)) {
-        bail!("filter = \"mipmap\" is only supported for textures, not buffers");
+    if filter == Filter::Mipmap && !matches!(input, Input::Texture(_)) {
+        bail!("filter = \"mipmap\" is only supported for textures, not buffers or videos");
     }
     Ok(Channel {
         input,
         filter,
         wrap,
+    })
+}
+
+fn parse_actions(
+    m: ActionsManifest,
+    buffer_index: &HashMap<&str, usize>,
+    buffers: &[Buffer],
+) -> anyhow::Result<Actions> {
+    let Some(&buffer) = buffer_index.get(m.buffer.as_str()) else {
+        bail!("no [[buffer]] is named `{}`", m.buffer);
+    };
+    // The number of an action must come back exactly when phonto reads the
+    // pixel under a click. A float buffer can change it, so the buffer
+    // stores 8-bit values.
+    if buffers[buffer].format != BufferFormat::Rgba8 {
+        bail!(
+            "the actions buffer `{}` must set format = \"rgba8\"",
+            m.buffer
+        );
+    }
+    if m.names.is_empty() || m.names.len() > MAX_ACTIONS {
+        bail!(
+            "`names` must have 1 to {MAX_ACTIONS} actions (got {})",
+            m.names.len()
+        );
+    }
+    for (i, name) in m.names.iter().enumerate() {
+        let valid = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !valid {
+            bail!("`{name}` is not a valid action name. Use letters, digits, _, and -");
+        }
+        if m.names[..i].contains(name) {
+            bail!("two actions are named `{name}`");
+        }
+    }
+    Ok(Actions {
+        buffer,
+        names: m.names,
     })
 }
 
@@ -554,6 +643,28 @@ fn parse_wrap(s: &str) -> anyhow::Result<Wrap> {
         "repeat" => Ok(Wrap::Repeat),
         "mirror" => Ok(Wrap::Mirror),
         _ => bail!("unknown wrap `{s}` (expected clamp, repeat or mirror)"),
+    }
+}
+
+/// The images and the videos that the channels of a pack use.
+#[derive(Default)]
+struct Sources {
+    textures: TextureSet,
+    videos: Vec<PathBuf>,
+}
+
+impl Sources {
+    /// The index of the video at `path`. Two channels that name the same
+    /// file share one decoder.
+    fn video(&mut self, path: &Path) -> anyhow::Result<usize> {
+        if let Some(i) = self.videos.iter().position(|v| v == path) {
+            return Ok(i);
+        }
+        if !path.is_file() {
+            bail!("video {} does not exist", path.display());
+        }
+        self.videos.push(path.to_path_buf());
+        Ok(self.videos.len() - 1)
     }
 }
 
@@ -885,6 +996,50 @@ mod tests {
     }
 
     #[test]
+    fn videos_and_actions() {
+        let dir = TempDir::new("videos-actions");
+        dir.write("i.glsl", SHADER);
+        dir.write("clip.mkv", "not decoded at load");
+        dir.write(
+            MANIFEST,
+            r#"
+            [[buffer]]
+            name = "pick"
+            shader = "i.glsl"
+            format = "rgba8"
+            once = true
+
+            [image]
+            shader = "i.glsl"
+            channels = [{ video = "clip.mkv" }, { video = "clip.mkv", filter = "nearest" }, "pick"]
+
+            [actions]
+            buffer = "pick"
+            names = ["tape1", "open-term"]
+            "#,
+        );
+        let pack = Pack::load(&dir.0).unwrap();
+        assert_eq!(pack.videos, [dir.0.join("clip.mkv")]);
+        assert_eq!(
+            pack.image.channels[0],
+            Channel {
+                input: Input::Video(0),
+                filter: Filter::Linear,
+                wrap: Wrap::Clamp
+            }
+        );
+        assert_eq!(pack.image.channels[1].input, Input::Video(0));
+        assert_eq!(pack.image.channels[1].filter, Filter::Nearest);
+        assert_eq!(
+            pack.actions,
+            Some(Actions {
+                buffer: 0,
+                names: vec!["tape1".into(), "open-term".into()],
+            })
+        );
+    }
+
+    #[test]
     fn rejects_invalid_manifests() {
         let cases = [
             ("fps = -1\n[image]\nshader = \"i.glsl\"", "fps"),
@@ -943,6 +1098,42 @@ mod tests {
             (
                 "[image]\nshader = \"i.glsl\"\n[inputs]\nrain = [1, 2, 3, 4, 5]",
                 "Use 1 to 4",
+            ),
+            (
+                "[image]\nshader = \"i.glsl\"\nchannels = [{ video = \"missing.mkv\" }]",
+                "does not exist",
+            ),
+            (
+                "[image]\nshader = \"i.glsl\"\nchannels = [{ video = \"i.glsl\", filter = \"mipmap\" }]",
+                "only supported for textures",
+            ),
+            (
+                "[image]\nshader = \"i.glsl\"\nchannels = [{ video = \"i.glsl\", watch = true }]",
+                "only for textures",
+            ),
+            (
+                "[image]\nshader = \"i.glsl\"\nchannels = [{ video = \"i.glsl\", texture = \"t.png\" }]",
+                "exactly one",
+            ),
+            (
+                "[image]\nshader = \"i.glsl\"\n[actions]\nbuffer = \"pick\"\nnames = [\"a\"]",
+                "no [[buffer]] is named `pick`",
+            ),
+            (
+                "[[buffer]]\nname = \"pick\"\nshader = \"i.glsl\"\n[image]\nshader = \"i.glsl\"\n[actions]\nbuffer = \"pick\"\nnames = [\"a\"]",
+                "must set format = \"rgba8\"",
+            ),
+            (
+                "[[buffer]]\nname = \"pick\"\nshader = \"i.glsl\"\nformat = \"rgba8\"\n[image]\nshader = \"i.glsl\"\n[actions]\nbuffer = \"pick\"\nnames = []",
+                "1 to 255 actions",
+            ),
+            (
+                "[[buffer]]\nname = \"pick\"\nshader = \"i.glsl\"\nformat = \"rgba8\"\n[image]\nshader = \"i.glsl\"\n[actions]\nbuffer = \"pick\"\nnames = [\"a\", \"a\"]",
+                "two actions are named `a`",
+            ),
+            (
+                "[[buffer]]\nname = \"pick\"\nshader = \"i.glsl\"\nformat = \"rgba8\"\n[image]\nshader = \"i.glsl\"\n[actions]\nbuffer = \"pick\"\nnames = [\"open term\"]",
+                "not a valid action name",
             ),
         ];
         for (i, (manifest, expected)) in cases.iter().enumerate() {

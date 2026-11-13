@@ -40,6 +40,7 @@ fn play(args: cli::PlayArgs, yt_dlp: cli::YtDlpArgs) -> anyhow::Result<()> {
         span: args.render.span,
         location: config.location,
         inputs: config.inputs,
+        actions: config.actions,
     };
     backend::create(args.render.backend_options())?.run(playback, options)
 }
@@ -59,6 +60,7 @@ fn dump(args: cli::DumpArgs, yt_dlp: cli::YtDlpArgs) -> anyhow::Result<()> {
         size: args.size,
         location: config.location,
         inputs: config.inputs,
+        actions: config.actions,
     })
 }
 

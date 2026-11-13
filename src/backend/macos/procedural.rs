@@ -276,6 +276,15 @@ impl Program {
     }
 
     fn build(gpu: &Gpu, pack: &Pack) -> anyhow::Result<Self> {
+        if pack.actions.is_some() {
+            bail!("actions don't work on macOS yet");
+        }
+        if let Some(video) = pack.videos.first() {
+            bail!(
+                "video channels don't work on macOS yet ({})",
+                video.display()
+            );
+        }
         let buffers: Vec<BufferTarget> = pack
             .buffers
             .iter()
@@ -476,6 +485,7 @@ impl Program {
                                 let t = &self.textures[i];
                                 (&t.texture, (t.width, t.height))
                             }
+                            Input::Video(_) => unreachable!("build rejects video channels"),
                             Input::Keyboard => {
                                 let dims = (KEYS as u32, 3);
                                 (keyboard.unwrap_or(&self.black), dims)
@@ -685,6 +695,7 @@ fn compile_pass(
         &pass.source.code,
         kind,
         &pack.inputs,
+        pack.actions.is_some(),
     );
     let translated = msl::translate(&glsl).with_context(|| {
         format!(
@@ -1069,7 +1080,7 @@ mod tests {
                          select(powr(p.x, 2.0), 0.0, false));
             }";
         let gpu = Gpu::new().unwrap();
-        let glsl = procedural::fragment_shader(None, code, PassKind::Image, &[]);
+        let glsl = procedural::fragment_shader(None, code, PassKind::Image, &[], false);
         let translated = msl::translate(&glsl).unwrap();
         library(&gpu.device, &translated.source).unwrap();
     }
@@ -1106,6 +1117,7 @@ mod tests {
                     command: "echo 0.25 1".into(),
                     every: 1.0,
                 }],
+                actions: Vec::new(),
             },
             0.0,
         )

@@ -94,7 +94,7 @@ impl DesktopPointer {
     /// screen in points.
     pub fn uniforms(&mut self, surface: (u32, u32), target: (u32, u32)) -> ([f32; 4], [f32; 4]) {
         let area = [0.0, 0.0, f64::from(surface.0), f64::from(surface.1)];
-        self.pointer.uniforms(area, target)
+        self.pointer.uniforms(area, target, true)
     }
 
     /// True if the window under `location` is the desktop: Finder's desktop

@@ -34,7 +34,7 @@ pub struct MirrorSurface {
 /// What a surface draws with.
 pub enum SurfaceLayer {
     Video(Retained<AVPlayerLayer>),
-    Procedural(ProceduralSurface),
+    Procedural(Box<ProceduralSurface>),
 }
 
 /// What a screen shows.

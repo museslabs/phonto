@@ -26,9 +26,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         if (start || food.z > iTime) {
             food = vec4(0.0, 0.0, -1e4, 0.0);
         }
-        // iMouse.w is positive only on the frame of a click.
+        // iMouse.w is positive only on the frame of a click. A short click
+        // can end before that frame, and then iMouse.z is negative.
         if (iMouse.w > 0.0) {
-            food = vec4(iMouse.zw / iImageResolution.y, iTime, 1.0);
+            food = vec4(abs(iMouse.zw) / iImageResolution.y, iTime, 1.0);
         }
         // Row 1: the position of the pressed button in the last frame and in
         // this frame. iMouse.z is positive while the button is pressed.

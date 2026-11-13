@@ -7,18 +7,24 @@
 //!
 //! This module does not depend on the platform. It loads packs, builds the
 //! shader source, keeps the clock and the pointer state, turns audio samples
-//! into levels, runs the input commands, and watches image files. Each
-//! backend does the drawing and reads the system.
+//! into levels, runs the input commands and the commands of actions, and
+//! watches image files. Each backend does the drawing and reads the system.
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod actions;
 mod audio;
 mod commands;
 mod glsl;
 mod inputs;
 mod pack;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod video;
 mod watch;
 
 use std::path::Path;
 
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
+pub use actions::{ActionRunner, MAX_LABEL, label_texels};
 pub use audio::{Analyzer, AudioFrame, SAMPLE_RATE};
 pub use commands::{CommandInputs, read_once as read_inputs_once};
 pub use glsl::{PassKind, fragment_shader, source_ids_help};
@@ -28,6 +34,8 @@ pub use inputs::{Clock, FrameInputs, FrameLimiter, MAX_DISPLAYS, Pointer, local_
 pub use pack::{
     BufferFormat, BufferSize, Filter, Input, MANIFEST, MAX_CHANNELS, Pack, Pass, Texture, Wrap,
 };
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
+pub use video::{Decoded, VideoQueue};
 pub use watch::TextureWatcher;
 
 /// True if the backend of this platform can draw procedural wallpapers.

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use anyhow::Context;
 
-use crate::config::{InputCommand, Location};
+use crate::config::{ActionCommand, InputCommand, Location};
 use crate::displays::DisplayInfo;
 use crate::plan::Playback;
 use crate::scale::ScaleMode;
@@ -20,6 +20,9 @@ pub struct RunOptions {
     pub location: Option<Location>,
     /// The `[[input]]` commands of the configuration.
     pub inputs: Vec<InputCommand>,
+    /// The `[[action]]` commands of the configuration.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub actions: Vec<ActionCommand>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -43,6 +46,9 @@ pub struct DumpRequest {
     pub location: Option<Location>,
     /// The `[[input]]` commands of the configuration.
     pub inputs: Vec<InputCommand>,
+    /// The `[[action]]` entries of the configuration, for their labels.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub actions: Vec<ActionCommand>,
 }
 
 pub trait Backend {

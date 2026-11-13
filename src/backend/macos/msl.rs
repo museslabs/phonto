@@ -428,6 +428,7 @@ mod tests {
             }",
             PassKind::Image,
             &[],
+            false,
         );
         let t = translate(&glsl).unwrap();
         assert!(
@@ -459,6 +460,7 @@ mod tests {
             "void mainImage(out vec4 c, in vec2 p) {\n    c = nope;\n}",
             PassKind::Image,
             &[],
+            false,
         );
         let err = format!("{:#}", translate(&glsl).err().unwrap());
         assert!(err.contains("0:2"), "{err}");
@@ -474,6 +476,7 @@ mod tests {
             void mainImage(out vec4 c, in vec2 p) { c = vec4(quad(complex(p).v)); }",
             PassKind::Image,
             &[],
+            false,
         );
         let t = translate(&glsl).unwrap();
         assert!(t.source.contains("phonto_quad("), "{}", t.source);
@@ -535,6 +538,7 @@ mod tests {
                 ),
                 PassKind::Image,
                 &[],
+                false,
             )
         };
         let err = format!("{:#}", translate(&code("k")).err().unwrap());
