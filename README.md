@@ -694,8 +694,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
 When you press the left button, phonto reads the actions buffer under the
 pointer, in the last frame that you saw. Then it runs the command of that
-action. While the pointer is over an action, the cursor is a hand. The other
-passes get the same click in `iMouse`, so the image pass can show it.
+action. The other passes get the same click in `iMouse`, so the image pass
+can show it. On Wayland, the cursor is a hand while the pointer is over an
+action.
+
+On macOS, only a click on the desktop runs an action, as only such a click
+presses the button of `iMouse`. The cursor stays an arrow over an action,
+because macOS lets only the app in front change the cursor, and phonto runs
+in the background.
 
 Give each action a command in your configuration. The optional `label` is
 the text that the pack shows for the action, for example in a menu:
@@ -712,6 +718,9 @@ name = "terminal"
 label = "Terminal"
 command = "ghostty"
 ```
+
+On macOS, `open -a` starts an app by its name, for example
+`command = "open -a Safari"`.
 
 phonto runs the command with `sh`, in your home directory, in a new session.
 The program continues when phonto stops. A click on an action without a
@@ -778,6 +787,17 @@ So a buffer that keeps its last frame sees each frame of the video, and the
 image shows the frame at `--at` seconds. If `--at` is longer than the video,
 the video loops. A long `--at` takes more time, because `dump` decodes the
 video up to it.
+
+On macOS, AVFoundation reads the video. It opens MP4 and QuickTime (`.mov`)
+files, but not Matroska (`.mkv`) or WebM. If it cannot open a video, the
+wallpaper and `dump` stop with its reason. A Matroska file with H.264 video
+works after a copy of the stream into MP4, which does not encode it again.
+For HEVC, add `-tag:v hvc1`, because AVFoundation does not decode HEVC that
+is tagged `hev1`:
+
+```bash
+ffmpeg -i rain.mkv -map 0:v -c copy -movflags +faststart rain.mp4
+```
 
 ### Performance
 
