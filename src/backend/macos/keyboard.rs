@@ -33,13 +33,15 @@ impl Default for Keyboard {
 }
 
 impl Keyboard {
-    /// A key with macOS key code `code` went down or up.
-    pub fn key(&mut self, code: u16, down: bool) {
+    /// A key with macOS key code `code` went down or up. A key that was down
+    /// when the wallpaper took the keyboard arrives only as repeats. A
+    /// `repeat` holds the key down without a press.
+    pub fn key(&mut self, code: u16, down: bool, repeat: bool) {
         let Some(js) = js_key_code(code) else {
             return;
         };
         let i = usize::from(js);
-        if down && self.rows[0][i] == 0 {
+        if down && !repeat && self.rows[0][i] == 0 {
             self.rows[1][i] = 255;
             self.rows[2][i] ^= 255;
         }
@@ -63,7 +65,7 @@ impl Keyboard {
             0x39 => NSEventModifierFlags::CapsLock,
             _ => return,
         };
-        self.key(code, flags.contains(flag));
+        self.key(code, flags.contains(flag), false);
     }
 
     /// Releases every key, for when the wallpaper loses the keyboard. Keys
@@ -216,7 +218,7 @@ mod tests {
         assert!(k.take_frame().is_some(), "the first frame gets a texture");
         assert!(k.take_frame().is_none());
 
-        k.key(W, true);
+        k.key(W, true, false);
         let t = k.take_frame().unwrap();
         assert_eq!(
             (texel(&t, b'W', 0), texel(&t, b'W', 1), texel(&t, b'W', 2)),
@@ -228,18 +230,18 @@ mod tests {
         assert!(k.take_frame().is_none());
 
         // Key repeat does not press again.
-        k.key(W, true);
+        k.key(W, true, true);
         let t = k.take_frame().unwrap();
         assert_eq!(texel(&t, b'W', 1), 0);
 
-        k.key(W, false);
+        k.key(W, false, false);
         let t = k.take_frame().unwrap();
         assert_eq!(
             (texel(&t, b'W', 0), texel(&t, b'W', 2)),
             (0, 255),
             "the toggle stays"
         );
-        k.key(W, true);
+        k.key(W, true, false);
         assert_eq!(texel(&k.take_frame().unwrap(), b'W', 2), 0);
     }
 
@@ -252,10 +254,28 @@ mod tests {
         k.modifier(0x38, NSEventModifierFlags::empty());
         assert_eq!(texel(&k.take_frame().unwrap(), 16, 0), 0);
 
-        k.key(0x31, true);
+        k.key(0x31, true, false);
         k.take_frame();
         k.release_all();
         assert_eq!(texel(&k.take_frame().unwrap(), 32, 0), 0);
+    }
+
+    /// Finder has the keyboard for a moment during a click on the desktop.
+    /// A key held through the click comes back as repeats, without a press.
+    #[test]
+    fn a_repeat_after_focus_loss_is_no_press() {
+        let mut k = Keyboard::default();
+        k.key(W, true, false);
+        k.take_frame();
+        k.take_frame();
+        k.release_all();
+        k.take_frame();
+        k.key(W, true, true);
+        let t = k.take_frame().unwrap();
+        assert_eq!(
+            (texel(&t, b'W', 0), texel(&t, b'W', 1), texel(&t, b'W', 2)),
+            (255, 0, 255)
+        );
     }
 
     #[test]
@@ -287,7 +307,7 @@ mod tests {
     fn unknown_keys_are_ignored() {
         let mut k = Keyboard::default();
         k.take_frame();
-        k.key(0x3F, true); // Fn
+        k.key(0x3F, true, false); // Fn
         assert!(k.take_frame().is_none());
     }
 }
