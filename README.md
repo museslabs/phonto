@@ -5,7 +5,7 @@
 
 > phonto (/'fon.to/) — from Greek φόντο: background
 
-GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust. Also supports live lockscreen wallpapers on macOS, and interactive procedural (shader) wallpapers on Wayland.
+GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust. Also supports live lockscreen wallpapers on macOS, and interactive procedural (shader) wallpapers.
 
 
 ![example](./mac-example.gif)
@@ -94,8 +94,8 @@ phonto https://example.com/stream.m3u8
 phonto rtsp://camera.local/stream
 ```
 
-Play a procedural wallpaper, a GLSL shader that phonto draws live (Wayland
-only, see [Procedural wallpapers](#procedural-wallpapers-wayland)):
+Play a procedural wallpaper, a GLSL shader that phonto draws live (see
+[Procedural wallpapers](#procedural-wallpapers)):
 ```bash
 phonto examples/procedural/plasma.glsl
 phonto examples/procedural/life        # a pack directory with a manifest.toml
@@ -294,7 +294,7 @@ Run `phonto displays` on each OS once to copy the right native ID into the
 alias. The same dotfile then works on both. Either field is optional, so a
 laptop-only alias can leave the other one out.
 
-## Procedural wallpapers (Wayland)
+## Procedural wallpapers
 
 phonto can also draw a GLSL shader as your wallpaper, live, instead of a
 video. The shaders use the conventions of [Shadertoy](https://www.shadertoy.com),
@@ -401,11 +401,12 @@ phonto reads the monitor, the sound server keeps your output device awake. A
 battery pause stops the reading.
 
 You can use a procedural wallpaper everywhere that you can use a video path:
-`--display ID PATH`, `[[display]].path`, the hyprlock recipe, `--shader`
-post-processing, and `dump`. `--rand` also picks pack directories, and `.glsl`
-files that have a `mainImage` function. A procedural wallpaper always fills the
-screen, so `--scale` has no effect. macOS support is planned, with the same
-format.
+`--display ID PATH`, `[[display]].path`, and `dump`, and on Wayland also the
+hyprlock recipe and `--shader` post-processing. `--rand` also picks pack
+directories, and `.glsl` files that have a `mainImage` function. A procedural
+wallpaper always fills the screen, so `--scale` has no effect. The same
+wallpapers run on Wayland and macOS. macOS does not have `--span` yet, and it
+does not read the audio, the dark mode setting, or the battery.
 
 ### One scene across all displays
 
@@ -431,6 +432,8 @@ display its own vignette, as the koi pond does.
 `--span` does not work with `--display`, or with the `[[display]]` entries of
 the configuration, because they give each display its own wallpaper. A video
 still plays on each display.
+
+`--span` works only on Wayland so far.
 
 ### Single-file wallpapers
 
@@ -492,9 +495,24 @@ your pack. Without a `[location]`, `iLocation` is the equator at the middle
 of your time zone, so the sun rises near 06:00 and sets near 18:00. `dump`
 uses the system inputs of the moment that it runs, as it does for `iDate`.
 
-The wallpaper gets the pointer only where no window covers it, because
-Wayland does not tell other clients where the pointer is. phonto does not use
-keyboard input. `iChannelTime` and `iSampleRate` exist only so that shaders
+On Wayland, the wallpaper gets the pointer only where no window covers it,
+because Wayland does not tell other clients where the pointer is.
+
+On macOS, `iPointer.xy` follows the pointer everywhere on the screen, also
+under windows, because a translucent window shows the wallpaper. `iPointer.z`
+is 1 only where the pointer is over the desktop. A click there presses the
+button of `iMouse`. A click on a window does not. phonto needs no permission
+for this. Finder still gets the click too, so it deselects your desktop icons,
+and with the default setting macOS moves all windows away to show the desktop.
+For wallpapers that you click, such as the koi pond, set System Settings >
+Desktop & Dock > Click wallpaper to reveal desktop to "Only in Stage Manager".
+
+On macOS, phonto does not read the system audio, the dark mode setting, or
+the battery yet. `iAudio`, `iSpectrum`, `iChroma`, `iColorScheme`, and
+`iBattery` are 0 there.
+
+phonto reads the keyboard only on macOS, through a keyboard channel (see
+[Packs](#packs)). `iChannelTime` and `iSampleRate` exist only so that shaders
 that declare sound inputs compile.
 
 ### Packs
@@ -537,14 +555,25 @@ keys:
 
 `channels[n]` is the input of `iChannelN`, up to eight channels. A channel is
 a string or a table. A string is a buffer name, or else the path of an image
-in the pack. A table has exactly one of `buffer = "name"` or
-`texture = "file.png"`, and optional sampling keys:
+in the pack. A table has exactly one of `buffer = "name"`,
+`texture = "file.png"` or `keyboard = true`, and optional sampling keys:
 
 | Key | Values | Default |
 |---|---|---|
-| `filter` | `nearest`, `linear`, `mipmap` (only for textures) | `linear` for buffers, `mipmap` for textures |
-| `wrap` | `clamp`, `repeat`, `mirror` | `clamp` for buffers, `repeat` for textures |
+| `filter` | `nearest`, `linear`, `mipmap` (only for textures) | `linear` for buffers, `mipmap` for textures, `nearest` for the keyboard |
+| `wrap` | `clamp`, `repeat`, `mirror` | `clamp` for buffers and the keyboard, `repeat` for textures |
 | `watch` | `true` loads the image again when its file changes (see [Live images](#live-images)) | `false` |
+
+The keyboard channel works only on macOS so far. It is the keyboard texture
+of Shadertoy: 256 texels wide, one for each JavaScript key code, and 3 rows
+high. Row 0 is 1 while a key is down, row 1 is 1 on the frame after a press,
+and row 2 flips on each press. Read it with
+`texelFetch(iChannelN, ivec2(code, row), 0).x`. A wallpaper only gets the
+keyboard after you click the desktop, as a Shadertoy canvas gets it after a
+click. A click on a window, or a switch to another app, gives the keyboard
+back. While the wallpaper has it, Finder's desktop shortcuts, such as
+<kbd>⇧⌘N</kbd> for a new folder, do not work. phonto needs no permission for
+this.
 
 If a buffer already drew in this frame, a pass that reads it gets the output
 of this frame. If a pass reads itself, or a buffer that draws later, it gets
@@ -632,6 +661,10 @@ keep the GPU busy. To make a wallpaper cheaper:
   a `once = true` buffer.
 - Use `--pause-on-battery` or `--pause-below`. Time stops during the pause and
   continues after it.
+
+On macOS, the output size is the size of the screen in points, not in pixels.
+On a Retina display that looks like 2560x1440, a pass draws 2560x1440 pixels,
+the same as Wayland at that size, and macOS scales them up to the screen.
 
 ## Lock screen backgrounds with hyprlock (Wayland)
 
