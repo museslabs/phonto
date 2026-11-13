@@ -15,10 +15,11 @@ use objc2::sel;
 use objc2_app_kit::NSView;
 use objc2_core_foundation::CGSize;
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
-use objc2_foundation::{NSRect, NSRunLoop, NSRunLoopCommonModes};
+use objc2_foundation::{MainThreadMarker, NSRect, NSRunLoop, NSRunLoopCommonModes};
 use objc2_metal::{MTLCommandBuffer, MTLDrawable};
 use objc2_quartz_core::{CADisplayLink, CAFrameRateRange, CAMetalDrawable, CAMetalLayer};
 
+use super::pointer::DesktopPointer;
 use super::procedural::{self, Gpu, Program, SCREEN_FORMAT, Target};
 use crate::config::{InputCommand, Location};
 use crate::procedural::{
@@ -32,7 +33,7 @@ pub struct ProceduralSource {
     clock: Clock,
     limiter: FrameLimiter,
     /// The inputs of the current frame that all screens share. Each surface
-    /// adds its display.
+    /// adds its pointer and its display.
     inputs: FrameInputs,
     location: Option<Location>,
     /// The values of the inputs that the pack reads.
@@ -118,6 +119,7 @@ pub struct ProceduralSurface {
     pub source: usize,
     link: Option<Retained<CADisplayLink>>,
     target: Option<Target>,
+    pointer: DesktopPointer,
     /// The last frame of the source that this surface drew.
     frame: u64,
 }
@@ -147,6 +149,7 @@ impl ProceduralSurface {
             source,
             link: None,
             target: None,
+            pointer: DesktopPointer::new(),
             frame: 0,
         })
     }
@@ -186,18 +189,20 @@ impl ProceduralSurface {
     }
 
     /// Draws the next frame of `source`, if there is one. `frame` is the
-    /// frame of the screen in global coordinates.
+    /// frame of the screen in global coordinates. Returns true if the user
+    /// clicked the desktop on this screen since the last frame.
     pub fn draw(
         &mut self,
+        mtm: MainThreadMarker,
         gpu: &Gpu,
         source: &mut ProceduralSource,
         frame: NSRect,
         link: &CADisplayLink,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         let slack = Duration::from_secs_f64(link.duration() / 2.0);
         source.advance(gpu, Instant::now(), slack)?;
         if self.frame == source.frame {
-            return Ok(());
+            return Ok(false);
         }
         self.frame = source.frame;
 
@@ -214,8 +219,12 @@ impl ProceduralSurface {
         }
         let target = self.target.as_mut().expect("target created above");
 
+        let clicked_desktop = self.pointer.poll(mtm, frame);
+        let (mouse, pointer) = self.pointer.uniforms(surface, dims);
         let (displays, display_count) = procedural::one_display(dims);
         let inputs = FrameInputs {
+            mouse,
+            pointer,
             displays,
             display_count,
             ..source.inputs
@@ -229,7 +238,7 @@ impl ProceduralSurface {
             cmd.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable));
         }
         cmd.commit();
-        Ok(())
+        Ok(clicked_desktop)
     }
 }
 

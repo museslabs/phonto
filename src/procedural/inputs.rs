@@ -300,6 +300,7 @@ impl Pointer {
     /// The places of the presses that no one took yet, oldest first, as
     /// fractions of `area` from the bottom left. `area` is the same as for
     /// `uniforms`. A press outside `area` is left out.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn take_presses(&mut self, area: [f64; 4]) -> Vec<[f64; 2]> {
         self.presses
             .drain(..)
@@ -309,6 +310,7 @@ impl Pointer {
 
     /// The place of the pointer while it is over the wallpaper, as a
     /// fraction of `area` from the bottom left.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn hover(&self, area: [f64; 4]) -> Option<[f64; 2]> {
         if !self.inside {
             return None;
@@ -319,6 +321,7 @@ impl Pointer {
 
 /// `pos` in surface coordinates, as a fraction of `area` from the bottom
 /// left. `None` if `pos` is outside `area`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn fraction([x, y]: [f64; 2], [left, top, width, height]: [f64; 4]) -> Option<[f64; 2]> {
     let fx = (x - left) / width.max(1.0);
     let fy = (top + height - y) / height.max(1.0);

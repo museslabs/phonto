@@ -3,6 +3,7 @@ mod displays;
 pub mod live_lockscreen;
 mod loop_observer;
 mod msl;
+mod pointer;
 mod procedural;
 mod procedural_surface;
 mod screen_observer;
