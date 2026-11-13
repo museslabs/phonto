@@ -12,7 +12,7 @@
 
 use std::path::Path;
 use std::ptr::NonNull;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, anyhow, bail};
 use objc2::available;
@@ -32,6 +32,7 @@ use objc2_metal::{
 use super::keyboard::KEYS;
 use super::msl::{self, Translated};
 use super::span;
+use super::video_channel::VideoChannel;
 use crate::backend::DumpRequest;
 use crate::config::ActionCommand;
 use crate::procedural::{
@@ -69,6 +70,9 @@ const DEFAULT_DUMP_SIZE: (u32, u32) = (1920, 1080);
 /// screen.
 const UNCAPPED_DUMP_FPS: f64 = 60.0;
 
+/// The longest wait of `dump` for the next frame of a video, as on Wayland.
+const DUMP_VIDEO_WAIT: Duration = Duration::from_secs(10);
+
 /// The shaders that every pack uses: a triangle that covers the target, and
 /// the copy of the image to the screen.
 const SHARED_SHADERS: &str = r#"
@@ -104,6 +108,16 @@ fragment float4 phonto_present_fragment(
 ) {
     return image.sample(s, crop.xy + in.uv * crop.zw);
 }
+
+// Copies a decoded video frame with its rows turned over. Row 0 of the frame
+// is the top of the picture. Row 0 of a channel is the bottom, as for images.
+fragment float4 phonto_flip_fragment(
+    float4 position [[position]],
+    texture2d<float> frame [[texture(0)]]
+) {
+    uint2 p = uint2(position.xy);
+    return frame.read(uint2(p.x, frame.get_height() - 1 - p.y));
+}
 "#;
 
 /// The Metal device, and what every program shares.
@@ -113,6 +127,8 @@ pub struct Gpu {
     fullscreen: Retained<ProtocolObject<dyn MTLFunction>>,
     present: Pipeline,
     present_sampler: Sampler,
+    /// Copies a video frame into its channel.
+    flip: Pipeline,
 }
 
 impl Gpu {
@@ -125,9 +141,13 @@ impl Gpu {
         let vertex = function(&library, "phonto_present_vertex")?;
         let fragment = function(&library, "phonto_present_fragment")?;
         let present = pipeline(&device, &vertex, &fragment, SCREEN_FORMAT)?;
+        let fullscreen = function(&library, "phonto_fullscreen")?;
+        let flip = function(&library, "phonto_flip_fragment")?;
+        let flip = pipeline(&device, &fullscreen, &flip, IMAGE_FORMAT)?;
         Ok(Self {
-            fullscreen: function(&library, "phonto_fullscreen")?,
+            fullscreen,
             present,
+            flip,
             present_sampler: sampler(&device, Filter::Nearest, Wrap::Clamp)?,
             device,
             queue,
@@ -173,6 +193,31 @@ impl Gpu {
         encoder.endEncoding();
         Ok(())
     }
+
+    /// Copies a decoded video `frame` into `channel`, which has its size,
+    /// with its rows turned over.
+    fn encode_flip(
+        &self,
+        cmd: &CommandBuffer,
+        frame: &ProtocolObject<dyn MTLTexture>,
+        channel: &ProtocolObject<dyn MTLTexture>,
+    ) -> anyhow::Result<()> {
+        let pass = MTLRenderPassDescriptor::new();
+        let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
+        color.setTexture(Some(channel));
+        color.setLoadAction(MTLLoadAction::DontCare);
+        color.setStoreAction(MTLStoreAction::Store);
+        let encoder = cmd
+            .renderCommandEncoderWithDescriptor(&pass)
+            .context("Metal could not start the copy of a video frame")?;
+        encoder.setRenderPipelineState(&self.flip);
+        unsafe {
+            encoder.setFragmentTexture_atIndex(Some(frame), 0);
+            encoder.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
+        }
+        encoder.endEncoding();
+        Ok(())
+    }
 }
 
 pub struct Program {
@@ -180,6 +225,9 @@ pub struct Program {
     passes: Vec<CompiledPass>,
     buffers: Vec<BufferTarget>,
     textures: Vec<UploadedTexture>,
+    /// The last frame of each video, with its rows turned over. `None` until
+    /// the first frame.
+    videos: Vec<Option<UploadedTexture>>,
     /// What a pass reads from a channel without an input.
     black: GpuTexture,
     default_sampler: Sampler,
@@ -289,12 +337,6 @@ impl Program {
     }
 
     fn build(gpu: &Gpu, pack: &Pack, actions: &[ActionCommand]) -> anyhow::Result<Self> {
-        if let Some(video) = pack.videos.first() {
-            bail!(
-                "video channels don't work on macOS yet ({})",
-                video.display()
-            );
-        }
         let buffers: Vec<BufferTarget> = pack
             .buffers
             .iter()
@@ -350,6 +392,7 @@ impl Program {
             passes,
             buffers,
             textures,
+            videos: pack.videos.iter().map(|_| None).collect(),
             black: black_texture(gpu)?,
             default_sampler: samplers.get(&gpu.device, Filter::Linear, Wrap::Clamp)?,
             render_scale: pack.render_scale,
@@ -406,6 +449,28 @@ impl Program {
         }
         blit.endEncoding();
         Ok(Some(texels))
+    }
+
+    /// Encodes the copy of a decoded `frame` of `Pack::videos[index]` into the
+    /// texture of its channels. The frame must stay until `cmd` completes.
+    pub fn encode_video_frame(
+        &mut self,
+        gpu: &Gpu,
+        cmd: &CommandBuffer,
+        index: usize,
+        frame: &ProtocolObject<dyn MTLTexture>,
+    ) -> anyhow::Result<()> {
+        let dims = (frame.width() as u32, frame.height() as u32);
+        let video = &mut self.videos[index];
+        if video.as_ref().map(|v| (v.width, v.height)) != Some(dims) {
+            *video = Some(UploadedTexture {
+                texture: render_target(gpu, IMAGE_FORMAT, dims, false)?,
+                width: dims.0,
+                height: dims.1,
+            });
+        }
+        let channel = &video.as_ref().expect("texture made above").texture;
+        gpu.encode_flip(cmd, frame, channel)
     }
 
     /// True if a pass reads `iMouse` or `iPointer`.
@@ -559,7 +624,11 @@ impl Program {
                                 let t = &self.textures[i];
                                 (&t.texture, (t.width, t.height))
                             }
-                            Input::Video(_) => unreachable!("build rejects video channels"),
+                            // Black until the first frame, as on Wayland.
+                            Input::Video(i) => match &self.videos[i] {
+                                Some(v) => (&v.texture, (v.width, v.height)),
+                                None => (&*self.black, (1, 1)),
+                            },
                             Input::Keyboard => {
                                 let dims = (KEYS as u32, 3);
                                 (keyboard.unwrap_or(&self.black), dims)
@@ -1087,7 +1156,15 @@ pub fn dump(request: DumpRequest, color_scheme: f32) -> anyhow::Result<()> {
     let user_inputs = read_inputs_once(&pack.inputs, &request.inputs);
     pack.reload_watched();
     let gpu = Gpu::new()?;
-    let program = Program::compile(&gpu, &pack, &request.actions)?;
+    let mut program = Program::compile(&gpu, &pack, &request.actions)?;
+    // The videos play during the frames before `--at`, as on screen. A
+    // buffer that keeps its last frame then sees each frame of the video.
+    let mut videos = pack
+        .videos
+        .iter()
+        .map(|path| VideoChannel::start(path, &gpu.device))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut shown = vec![false; videos.len()];
     let (width, height) = request.size.unwrap_or(DEFAULT_DUMP_SIZE);
     let dims = program.target_dims((width, height));
     let mut target = program.create_target(&gpu, dims, true)?;
@@ -1118,20 +1195,41 @@ pub fn dump(request: DumpRequest, color_scheme: f32) -> anyhow::Result<()> {
         } else {
             i as f64 / fps
         };
+        let delta = time - previous;
+        previous = time;
+        let cmd = gpu.command_buffer()?;
+        let mut copies = false;
+        for (index, video) in videos.iter_mut().enumerate() {
+            if let Some(frame) = video.advance(delta, DUMP_VIDEO_WAIT)? {
+                program.encode_video_frame(&gpu, &cmd, index, frame.texture())?;
+                video.hold(frame, &cmd);
+                shown[index] = true;
+                copies = true;
+            }
+        }
         let inputs = FrameInputs {
             time: time as f32,
-            time_delta: (time - previous) as f32,
+            time_delta: delta as f32,
             frame_rate: fps as f32,
             ..system
         };
-        previous = time;
-        let cmd = gpu.command_buffer()?;
         program.encode(&cmd, &mut target, &inputs, Some(&keyboard))?;
         if i == frames {
             target.encode_read_back(&cmd)?;
         }
         cmd.commit();
+        // A video shows every frame that is due, as on Wayland. Waiting for
+        // the copies keeps the GPU from falling behind, which would drop one.
+        if copies {
+            cmd.waitUntilCompleted();
+        }
         last = Some(cmd);
+    }
+    if let Some(index) = shown.iter().position(|shown| !shown) {
+        bail!(
+            "video {}: the decoder gave no frame",
+            pack.videos[index].display()
+        );
     }
     let cmd = last.expect("rendered at least one frame");
     cmd.waitUntilCompleted();

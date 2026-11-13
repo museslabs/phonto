@@ -12,6 +12,7 @@ mod procedural;
 mod procedural_surface;
 mod screen_observer;
 mod span;
+mod video_channel;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -67,19 +68,14 @@ impl Backend for MacosBackend {
 
     fn dump(self, request: DumpRequest) -> anyhow::Result<()> {
         use anyhow::anyhow;
-        use objc2::runtime::AnyObject;
-        use objc2_av_foundation::{
-            AVAssetReader, AVAssetReaderTrackOutput, AVMediaTypeVideo, AVURLAsset,
-        };
-        use objc2_core_foundation::CFString;
+        use objc2_av_foundation::{AVAssetReader, AVURLAsset};
         use objc2_core_media::{CMTime, CMTimeRange, kCMTimePositiveInfinity};
         use objc2_core_video::{
             CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
             CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-            CVPixelBufferUnlockBaseAddress, kCVPixelBufferPixelFormatTypeKey,
-            kCVPixelFormatType_32BGRA, kCVReturnSuccess,
+            CVPixelBufferUnlockBaseAddress, kCVReturnSuccess,
         };
-        use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
+        use objc2_foundation::{NSString, NSURL};
 
         if crate::procedural::is_procedural(&request.path) {
             return procedural::dump(request, color_scheme::uniform(self.mtm));
@@ -103,14 +99,7 @@ impl Backend for MacosBackend {
 
         let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) };
 
-        let video_type = unsafe { AVMediaTypeVideo }
-            .context("AVMediaTypeVideo constant unavailable")?
-            .to_string();
-        let all_tracks = unsafe { asset.tracks() };
-        let track = all_tracks
-            .iter()
-            .find(|t| unsafe { t.mediaType() }.to_string() == video_type)
-            .context("no video track in asset")?;
+        let track = video_channel::video_track(&asset)?;
 
         let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset) }
             .map_err(|e| anyhow!("AVAssetReader init: {e:?}"))?;
@@ -124,18 +113,7 @@ impl Backend for MacosBackend {
         let range = unsafe { CMTimeRange::new(start, inf) };
         unsafe { reader.setTimeRange(range) };
 
-        let key_cf: &'static CFString = unsafe { kCVPixelBufferPixelFormatTypeKey };
-        let key_ns: &NSString = unsafe { &*(key_cf as *const CFString as *const NSString) };
-        let val = NSNumber::new_u32(kCVPixelFormatType_32BGRA);
-        let val_obj: &AnyObject = &val;
-        let settings = NSDictionary::<NSString, AnyObject>::from_slices(&[key_ns], &[val_obj]);
-
-        let output = unsafe {
-            AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
-                &track,
-                Some(&settings),
-            )
-        };
+        let output = video_channel::bgra_output(&track);
         unsafe { reader.addOutput(&output) };
 
         if !unsafe { reader.startReading() } {
