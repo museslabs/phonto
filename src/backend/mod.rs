@@ -16,6 +16,9 @@ pub struct RunOptions {
     pub layer: wayland::LayerMode,
     /// Draw one procedural wallpaper across all outputs, as one desktop.
     pub span: bool,
+    /// The windows that pause the wallpaper of each display.
+    #[cfg(target_os = "macos")]
+    pub pause_behind: crate::plan::PauseBehindPlan,
     /// Where the user is, for the sun of procedural wallpapers.
     pub location: Option<Location>,
     /// The `[[input]]` commands of the configuration.

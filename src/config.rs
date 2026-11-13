@@ -24,7 +24,8 @@ const DEFAULT_CONFIG: &str = "\
 #
 # display: pin a video (or a random pick) to a specific display. `id` matches
 # an [[alias]].name OR a raw native ID as shown by `phonto displays`. Exactly
-# one of `path` or `random = true` per entry.
+# one of `path` or `random = true` per entry, unless it only sets
+# `pause_behind`.
 #
 # [[display]]
 # id = \"main\"
@@ -33,6 +34,25 @@ const DEFAULT_CONFIG: &str = "\
 # [[display]]
 # id = \"laptop\"
 # random = true
+#
+# pause_behind: the windows that pause the wallpaper while they cover it, on
+# battery and on power (macOS only). `any` pauses behind any windows over 95%
+# of the screen, translucent ones too. `opaque` pauses behind opaque windows
+# over the middle of the screen. `none` never pauses for windows. A hidden
+# wallpaper, as on the lock screen, pauses in every mode. Both keys default
+# to `any`.
+#
+# [pause_behind]
+# on_battery = \"any\"
+# on_power = \"opaque\"
+#
+# A display overrides it in its [[display]] entry, which holds everything
+# about one display and needs no wallpaper. A key it leaves out comes from
+# [pause_behind]:
+#
+# [[display]]
+# id = \"LG HDR 4K\"
+# pause_behind = { on_power = \"none\" }
 #
 # location: where you are, for the sunrise and sunset that procedural
 # wallpapers get in iSun. Degrees, with north and east positive. phonto does
@@ -85,6 +105,62 @@ pub struct Display {
     pub path: Option<String>,
     #[serde(default)]
     pub random: bool,
+    /// Overrides `[pause_behind]` for this display.
+    #[serde(default)]
+    pub pause_behind: Option<PauseBehind>,
+}
+
+impl Display {
+    /// True if the entry only sets `pause_behind`. It plays nothing.
+    pub fn only_pause_behind(&self) -> bool {
+        self.path.is_none() && !self.random && self.pause_behind.is_some()
+    }
+}
+
+/// `[pause_behind]`, or the `pause_behind` of a `[[display]]`: the windows
+/// that pause the wallpaper while they cover it. Only macOS reads it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub struct PauseBehind {
+    #[serde(default)]
+    pub on_battery: Option<Behind>,
+    #[serde(default)]
+    pub on_power: Option<Behind>,
+}
+
+#[cfg(target_os = "macos")]
+impl PauseBehind {
+    /// These keys, with the ones that are left out taken from `table`.
+    pub fn or(self, table: PauseBehind) -> PauseBehind {
+        PauseBehind {
+            on_battery: self.on_battery.or(table.on_battery),
+            on_power: self.on_power.or(table.on_power),
+        }
+    }
+
+    /// The mode for the power source. A key that is left out means `any`.
+    pub fn mode(self, on_battery: bool) -> Behind {
+        let mode = if on_battery {
+            self.on_battery
+        } else {
+            self.on_power
+        };
+        mode.unwrap_or(Behind::Any)
+    }
+}
+
+/// The windows that pause a wallpaper. A hidden wallpaper pauses in every
+/// mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Behind {
+    /// Any windows over 95% of the screen, translucent or not.
+    Any,
+    /// Opaque windows over the middle of the screen.
+    Opaque,
+    /// No windows.
+    None,
 }
 
 /// A place on Earth, in degrees. North and east are positive.
@@ -135,6 +211,9 @@ pub struct Config {
     pub inputs: Vec<InputCommand>,
     #[serde(default, rename = "action")]
     pub actions: Vec<ActionCommand>,
+    #[serde(default)]
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
+    pub pause_behind: PauseBehind,
 }
 
 fn config_path() -> PathBuf {
@@ -265,5 +344,35 @@ mod tests {
         assert_eq!(labelled.actions[0].command, None);
         let err = format!("{:#}", parse(&format!("{one}{one}")).unwrap_err());
         assert!(err.contains("two [[action]] entries"), "{err}");
+    }
+
+    #[test]
+    fn pause_behind_names_its_modes_and_keys() {
+        let err = format!(
+            "{:#}",
+            parse("[pause_behind]\non_power = \"translucent\"\n").unwrap_err()
+        );
+        assert!(err.contains("on_power = \"translucent\""), "{err}");
+        assert!(
+            err.contains("expected one of `any`, `opaque`, `none`"),
+            "{err}"
+        );
+        let err = format!(
+            "{:#}",
+            parse("[pause_behind]\non_ac = \"any\"\n").unwrap_err()
+        );
+        assert!(err.contains("expected `on_battery` or `on_power`"), "{err}");
+    }
+
+    #[test]
+    fn a_display_takes_pause_behind_inline_or_as_a_table() {
+        let inline = parse("[[display]]\nid = \"a\"\npause_behind = { on_power = \"none\" }\n");
+        let table = parse("[[display]]\nid = \"a\"\n[display.pause_behind]\non_power = \"none\"\n");
+        let expected = Some(PauseBehind {
+            on_battery: None,
+            on_power: Some(Behind::None),
+        });
+        assert_eq!(inline.unwrap().display[0].pause_behind, expected);
+        assert_eq!(table.unwrap().display[0].pause_behind, expected);
     }
 }

@@ -1,6 +1,7 @@
 mod audio;
 mod battery_observer;
 mod color_scheme;
+mod cover;
 mod displays;
 mod key_window;
 mod keyboard;
@@ -28,7 +29,7 @@ use objc2_app_kit::{
 };
 use objc2_av_foundation::{
     AVLayerVideoGravity, AVLayerVideoGravityResize, AVLayerVideoGravityResizeAspect,
-    AVLayerVideoGravityResizeAspectFill, AVPlayer, AVPlayerItem,
+    AVLayerVideoGravityResizeAspectFill, AVPlayer, AVPlayerActionAtItemEnd, AVPlayerItem,
     AVPlayerItemDidPlayToEndTimeNotification, AVPlayerLayer,
 };
 use objc2_foundation::{MainThreadMarker, NSNotificationCenter, NSString, NSURL};
@@ -36,12 +37,14 @@ use objc2_quartz_core::CAAutoresizingMask;
 
 use self::audio::AudioCapture;
 use self::battery_observer::BatteryObserver;
+use self::cover::Cover;
 use self::key_window::{Application, KeyWindow};
 use self::loop_observer::LoopObserver;
 use self::procedural::Gpu;
 use self::procedural_surface::{ProceduralSource, ProceduralSurface};
 use self::screen_observer::{AttachPolicy, Content, MirrorSurface, ScreenObserver, SurfaceLayer};
 use super::{Backend, DumpRequest, PauseMode, RunOptions};
+use crate::config::PauseBehind;
 use crate::displays::DisplayInfo;
 use crate::plan::Playback;
 use crate::scale::ScaleMode;
@@ -188,6 +191,7 @@ impl Backend for MacosBackend {
                         &content,
                         scale,
                         sources.gpu.as_ref(),
+                        cover::pause_behind(&screen, &options.pause_behind),
                     )?);
                 }
                 if surfaces.is_empty() {
@@ -211,6 +215,7 @@ impl Backend for MacosBackend {
                             content,
                             scale,
                             sources.gpu.as_ref(),
+                            cover::pause_behind(&screen, &options.pause_behind),
                         )?);
                     } else {
                         log::info!("display {name:?} not in assignments; leaving alone");
@@ -224,7 +229,6 @@ impl Backend for MacosBackend {
         };
 
         let Sources {
-            players,
             loop_observers,
             gpu,
             mut procedural,
@@ -246,10 +250,22 @@ impl Backend for MacosBackend {
             }
         }
 
+        cover::warn_unmatched(mtm, &options.pause_behind);
+        let follows_power = options.pause_behind.follows_power();
+
         // Re-apply geometry on display reconfiguration, and attach new
         // surfaces when a fresh display appears (respecting the policy).
-        // It also draws the procedural wallpapers.
-        let screen_observer = ScreenObserver::new(mtm, surfaces, policy, scale, gpu, procedural);
+        // It also draws the procedural wallpapers, and pauses what power
+        // and the windows over the screens don't let run.
+        let screen_observer = ScreenObserver::new(
+            mtm,
+            surfaces,
+            policy,
+            scale,
+            gpu,
+            procedural,
+            options.pause_behind,
+        );
         unsafe {
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
                 &screen_observer,
@@ -259,16 +275,12 @@ impl Backend for MacosBackend {
             );
         }
 
-        let battery_observer = if matches!(options.pause, PauseMode::Never) {
+        let battery_observer = if matches!(options.pause, PauseMode::Never) && !follows_power {
             None
         } else {
-            BatteryObserver::install(players.clone(), screen_observer.clone(), options.pause)
+            BatteryObserver::install(screen_observer.clone(), options.pause)
         };
-        if battery_observer.is_none() {
-            for player in &players {
-                unsafe { player.play() };
-            }
-        }
+        screen_observer.update_cover();
 
         log::info!("macOS backend ready at level {}", WALLPAPER_LEVEL);
 
@@ -284,7 +296,6 @@ impl Backend for MacosBackend {
 /// The videos and procedural wallpapers that the screens show.
 #[derive(Default)]
 struct Sources {
-    players: Vec<Retained<AVPlayer>>,
     loop_observers: Vec<Retained<LoopObserver>>,
     /// Made with the first procedural wallpaper.
     gpu: Option<Gpu>,
@@ -323,7 +334,6 @@ impl Sources {
         let (item, player) = make_player(mtm, path)?;
         self.loop_observers
             .push(install_loop_observer(player.clone(), &item));
-        self.players.push(player.clone());
         Ok(Content::Video(player))
     }
 }
@@ -351,6 +361,9 @@ fn make_player(
     let player = unsafe { AVPlayer::playerWithPlayerItem(Some(&item), mtm) };
     unsafe {
         player.setMuted(true);
+        // The player keeps its rate at the end. The loop observer's seek to
+        // the start then loops the video.
+        player.setActionAtItemEnd(AVPlayerActionAtItemEnd::None);
     }
     Ok((item, player))
 }
@@ -379,6 +392,7 @@ pub(super) fn build_surface(
     content: &Content,
     scale: ScaleMode,
     gpu: Option<&Gpu>,
+    pause_behind: PauseBehind,
 ) -> anyhow::Result<MirrorSurface> {
     let name = screen.localizedName().to_string();
     let frame = screen.frame();
@@ -400,19 +414,9 @@ pub(super) fn build_surface(
             )
         },
     };
-    window.setLevel(WALLPAPER_LEVEL);
-    window.setCollectionBehavior(
-        NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::FullScreenAuxiliary
-            | NSWindowCollectionBehavior::Stationary
-            | NSWindowCollectionBehavior::IgnoresCycle,
-    );
-    window.setOpaque(false);
-    window.setBackgroundColor(Some(&NSColor::clearColor()));
-    window.setHasShadow(false);
+    place_on_desktop(&window, WALLPAPER_LEVEL);
     // `ReadOnly` so screen-capture / screen-sharing can read us. `None` blocks them.
     window.setSharingType(NSWindowSharingType::ReadOnly);
-    window.setIgnoresMouseEvents(true);
 
     let content_view = NSView::initWithFrame(mtm.alloc::<NSView>(), frame);
     content_view.setWantsLayer(true);
@@ -464,7 +468,23 @@ pub(super) fn build_surface(
         display_id: displays::display_id(screen),
         window,
         layer,
+        cover: Cover::new(mtm, screen, pause_behind),
     })
+}
+
+/// Makes `window` a clear, click-through window at `level`, on every Space.
+fn place_on_desktop(window: &NSWindow, level: isize) {
+    window.setLevel(level);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::Stationary
+            | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
+    window.setHasShadow(false);
+    window.setIgnoresMouseEvents(true);
 }
 
 fn video_gravity_for(scale: ScaleMode) -> Option<&'static AVLayerVideoGravity> {

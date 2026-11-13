@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::{Context, anyhow, bail};
 
+#[cfg(target_os = "macos")]
+use crate::config::PauseBehind;
 use crate::config::{Alias, Config, Display, SearchPath};
 
 #[derive(Debug, Clone, Default)]
@@ -148,7 +150,7 @@ pub fn build(request: Request, config: &Config) -> anyhow::Result<Plan> {
         Request::PerDisplay { pinned, random } => {
             per_display_from_cli(pinned, random, &config.alias)
         }
-        Request::FromConfig if !config.display.is_empty() => {
+        Request::FromConfig if config.display.iter().any(|d| !d.only_pause_behind()) => {
             per_display_from_config(&config.display, &config.alias)
         }
         Request::FromConfig => bail!(
@@ -183,7 +185,7 @@ fn per_display_from_cli(
 
 fn per_display_from_config(displays: &[Display], aliases: &[Alias]) -> anyhow::Result<Plan> {
     let mut entries: Vec<DisplayAssignment> = Vec::new();
-    for d in displays {
+    for d in displays.iter().filter(|d| !d.only_pause_behind()) {
         let source = match (&d.path, d.random) {
             (Some(p), false) => Source::Path(p.clone()),
             (None, true) => Source::Random,
@@ -205,6 +207,48 @@ fn per_display_from_config(displays: &[Display], aliases: &[Alias]) -> anyhow::R
     }
     dedupe(&mut entries)?;
     Ok(Plan::PerDisplay(entries))
+}
+
+/// The windows that pause the wallpaper of each display.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+pub struct PauseBehindPlan {
+    /// `[pause_behind]`, for the displays without a `pause_behind` of their own.
+    pub table: PauseBehind,
+    /// The `pause_behind` of the `[[display]]` entries, by native ID. The keys
+    /// that an entry leaves out come from the table.
+    pub displays: HashMap<String, PauseBehind>,
+}
+
+#[cfg(target_os = "macos")]
+impl PauseBehindPlan {
+    /// True if a display pauses for other windows on battery than on power.
+    pub fn follows_power(&self) -> bool {
+        std::iter::once(&self.table)
+            .chain(self.displays.values())
+            .any(|p| p.mode(true) != p.mode(false))
+    }
+}
+
+/// Reads the `pause_behind` of the `[[display]]` entries. It applies whatever
+/// the command line plays.
+#[cfg(target_os = "macos")]
+pub fn pause_behind(config: &Config) -> anyhow::Result<PauseBehindPlan> {
+    let mut displays = HashMap::new();
+    for d in &config.display {
+        let Some(own) = d.pause_behind else {
+            continue;
+        };
+        let native_id = resolve_id(&d.id, &config.alias)?;
+        if displays.contains_key(&native_id) {
+            bail!("display `{native_id}` has `pause_behind` in two [[display]] entries");
+        }
+        displays.insert(native_id, own.or(config.pause_behind));
+    }
+    Ok(PauseBehindPlan {
+        table: config.pause_behind,
+        displays,
+    })
 }
 
 fn resolve_id(id: &str, aliases: &[Alias]) -> anyhow::Result<String> {
@@ -247,4 +291,70 @@ fn dedupe(entries: &mut [DisplayAssignment]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(toml: &str) -> Config {
+        toml::from_str(toml).unwrap()
+    }
+
+    const ONLY_PAUSE_BEHIND: &str =
+        "[[display]]\nid = \"b\"\npause_behind = { on_power = \"none\" }\n";
+
+    #[test]
+    fn an_entry_with_only_pause_behind_plays_nothing() {
+        let config = config(&format!(
+            "[[display]]\nid = \"a\"\npath = \"a.mp4\"\n{ONLY_PAUSE_BEHIND}"
+        ));
+        let Plan::PerDisplay(entries) = build(Request::FromConfig, &config).unwrap() else {
+            panic!("expected per-display entries");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].native_id, "a");
+    }
+
+    #[test]
+    fn entries_with_only_pause_behind_name_no_source() {
+        let err = build(Request::FromConfig, &config(ONLY_PAUSE_BEHIND)).unwrap_err();
+        assert!(format!("{err:#}").starts_with("no video source"), "{err:#}");
+        let empty = build(Request::FromConfig, &config("[[display]]\nid = \"b\"\n")).unwrap_err();
+        assert!(format!("{empty:#}").contains("needs either"), "{empty:#}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_display_falls_back_to_the_table_and_then_to_any() {
+        use crate::config::Behind;
+
+        let table = format!("[pause_behind]\non_battery = \"opaque\"\n{ONLY_PAUSE_BEHIND}");
+        let plan = pause_behind(&config(&table)).unwrap();
+        let b = plan.displays["b"];
+        assert_eq!(b.mode(false), Behind::None);
+        assert_eq!(b.mode(true), Behind::Opaque);
+        assert_eq!(plan.table.mode(true), Behind::Opaque);
+        assert_eq!(plan.table.mode(false), Behind::Any);
+        assert!(plan.follows_power());
+
+        let plan = pause_behind(&config(ONLY_PAUSE_BEHIND)).unwrap();
+        assert_eq!(plan.displays["b"].mode(true), Behind::Any);
+        assert_eq!(plan.table.mode(true), Behind::Any);
+        assert_eq!(plan.table.mode(false), Behind::Any);
+        assert!(plan.follows_power());
+        assert!(!pause_behind(&config("")).unwrap().follows_power());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn two_entries_for_one_display_fail_after_alias_resolution() {
+        let config = config(
+            "[[alias]]\nname = \"main\"\nmacos = \"LG\"\n\n\
+             [[display]]\nid = \"main\"\npath = \"a.mp4\"\npause_behind = { on_power = \"none\" }\n\n\
+             [[display]]\nid = \"LG\"\n\n[display.pause_behind]\non_battery = \"any\"\n",
+        );
+        let err = pause_behind(&config).unwrap_err();
+        assert!(format!("{err:#}").contains("display `LG`"), "{err:#}");
+    }
 }
