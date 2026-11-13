@@ -34,6 +34,7 @@ use super::pointer::DesktopPointer;
 use super::procedural::{self, Gpu, GpuBuffer, GpuTexture, Program, SCREEN_FORMAT, Target};
 use super::screen_observer::ScreenObserver;
 use super::span;
+use super::video_channel::{self, VideoChannel};
 use crate::config::{ActionCommand, InputCommand, Location};
 use crate::procedural::{
     ActionRunner, AudioFrame, Clock, CommandInputs, FrameInputs, FrameLimiter, Input, Pack,
@@ -63,6 +64,8 @@ pub struct ProceduralSource {
     battery: [f32; 4],
     battery_read: Instant,
     watcher: Option<TextureWatcher>,
+    /// The videos of the channels, in the order of `Pack::videos`.
+    videos: Vec<VideoChannel>,
     /// Counts the frames of the source. A surface draws when this changes.
     frame: u64,
     /// The keys, if a pass has a keyboard channel. The window of the screen
@@ -133,6 +136,11 @@ impl ProceduralSource {
             .flat_map(|pass| &pass.channels)
             .any(|c| c.input == Input::Keyboard);
         let program = Program::compile(gpu, &pack, actions)?;
+        let videos = pack
+            .videos
+            .iter()
+            .map(|path| VideoChannel::start(path, &gpu.device))
+            .collect::<anyhow::Result<_>>()?;
         let polls_pointer = reads_keys || program.reads_pointer() || pack.actions.is_some();
         Ok(Self {
             program,
@@ -147,6 +155,7 @@ impl ProceduralSource {
             battery: battery_observer::uniform(),
             battery_read: Instant::now(),
             watcher: TextureWatcher::start(&pack.textures),
+            videos,
             frame: 0,
             keyboard: reads_keys.then(Rc::default),
             keyboard_texture: None,
@@ -215,6 +224,7 @@ impl ProceduralSource {
             self.battery_read = now;
         }
         let tick = self.clock.tick(now);
+        self.advance_videos(gpu, f64::from(tick.delta))?;
         let wall = SystemTime::now();
         self.inputs = FrameInputs {
             time: tick.time,
@@ -233,6 +243,31 @@ impl ProceduralSource {
         };
         self.limiter.rendered(now);
         self.frame += 1;
+        Ok(())
+    }
+
+    /// Moves the videos `delta` seconds on, and copies their new frames into
+    /// their channels. With `--span`, this runs once for each frame of the
+    /// source, however many screens show it.
+    fn advance_videos(&mut self, gpu: &Gpu, delta: f64) -> anyhow::Result<()> {
+        let wait = video_channel::catch_up_wait(delta);
+        let mut cmd = None;
+        for (index, video) in self.videos.iter_mut().enumerate() {
+            let Some(frame) = video.advance(delta, wait)? else {
+                continue;
+            };
+            let cmd = match &mut cmd {
+                Some(cmd) => cmd,
+                cmd => cmd.insert(gpu.command_buffer()?),
+            };
+            self.program
+                .encode_video_frame(gpu, cmd, index, frame.texture())?;
+            video.hold(frame, cmd);
+        }
+        // The scene's passes run after the copies, on the same queue.
+        if let Some(cmd) = cmd {
+            cmd.commit();
+        }
         Ok(())
     }
 

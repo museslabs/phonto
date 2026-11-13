@@ -16,7 +16,6 @@ mod commands;
 mod glsl;
 mod inputs;
 mod pack;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod video;
 mod watch;
 
@@ -32,7 +31,6 @@ pub use inputs::{Clock, FrameInputs, FrameLimiter, MAX_DISPLAYS, Pointer, local_
 pub use pack::{
     BufferFormat, BufferSize, Filter, Input, MANIFEST, MAX_CHANNELS, Pack, Pass, Texture, Wrap,
 };
-#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
 pub use video::{Decoded, VideoQueue};
 pub use watch::TextureWatcher;
 

@@ -90,6 +90,7 @@ objc2-av-foundation = { version = "0.3", default-features = false, features = [
     "AVPlayer",
     "AVPlayerItem",
     "AVPlayerLayer",
+    "AVTime",
 ] }
 objc2-core-media = { version = "0.3", default-features = false, features = [
     "std",
@@ -104,8 +105,11 @@ objc2-core-video = { version = "0.3", default-features = false, features = [
     "CVBase",
     "CVBuffer",
     "CVImageBuffer",
+    "CVMetalTexture",
+    "CVMetalTextureCache",
     "CVPixelBuffer",
     "CVReturn",
+    "objc2-metal",
 ] }
 objc2-video-toolbox = { version = "0.3", default-features = false, features = [
     "std",
