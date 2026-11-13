@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use glslang::error::GlslangError;
 use spirv_cross2::compile::msl::{AutomaticResourceBindingTier, CompilerOptions, MslVersion};
 use spirv_cross2::reflect::{ResourceType, TypeInner};
@@ -230,15 +230,27 @@ fn to_msl(spirv: &[u32]) -> anyhow::Result<Translated> {
         .resources_for_type(ResourceType::UniformBuffer)
         .map_err(spirv_cross_error)?
     {
+        let read = compiler
+            .active_buffer_ranges(r.id)
+            .map_err(spirv_cross_error)?;
+        // `prefix_names` renamed the structs of the blocks too.
+        let name = r.name.strip_prefix(NAME_PREFIX).unwrap_or(&r.name);
+        if name != UNIFORM_BLOCK {
+            // glslang binds a block of the shader where phonto's block is.
+            // Metal would then read both from the same bytes.
+            if !read.is_empty() {
+                bail!(
+                    "uniform block `{name}`: phonto sets only its own uniforms. Use an input of the pack instead"
+                );
+            }
+            continue;
+        }
         let ty = compiler
             .type_description(r.base_type_id)
             .map_err(spirv_cross_error)?;
         if let TypeInner::Struct(s) = ty.inner {
             uniform_size = s.size;
             // The block declares every uniform of the header.
-            let read = compiler
-                .active_buffer_ranges(r.id)
-                .map_err(spirv_cross_error)?;
             for m in s.members {
                 if !read.iter().any(|range| range.index as usize == m.index) {
                     continue;
@@ -510,6 +522,27 @@ mod tests {
         let t = translate(glsl).unwrap();
         assert!(t.uniforms.iter().any(|m| m.name == "iInput.buffer"));
         assert!(t.channels[0].is_some());
+    }
+
+    #[test]
+    fn rejects_a_uniform_block_that_a_pass_reads() {
+        let code = |k: &str| {
+            fragment_shader(
+                None,
+                &format!(
+                    "uniform Params {{ float k; }};
+                    void mainImage(out vec4 c, in vec2 p) {{ c = vec4({k}, iTime, 0.0, 1.0); }}"
+                ),
+                PassKind::Image,
+                &[],
+            )
+        };
+        let err = format!("{:#}", translate(&code("k")).err().unwrap());
+        assert!(err.contains("`Params`"), "{err}");
+        // A block that no pass reads takes no buffer.
+        let t = translate(&code("0.0")).unwrap();
+        assert!(t.uniform_buffer.is_some());
+        assert!(t.uniforms.iter().any(|m| m.name == "iTime"));
     }
 
     #[test]

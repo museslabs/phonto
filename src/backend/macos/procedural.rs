@@ -636,17 +636,13 @@ fn put(b: &mut [u8], at: Option<usize>, values: &[f32]) {
         return;
     };
     for (k, v) in values.iter().enumerate() {
-        if let Some(dst) = b.get_mut(at + 4 * k..at + 4 * k + 4) {
-            dst.copy_from_slice(&v.to_ne_bytes());
-        }
+        b[at + 4 * k..at + 4 * k + 4].copy_from_slice(&v.to_ne_bytes());
     }
 }
 
 fn put_int(b: &mut [u8], at: Option<usize>, value: i32) {
-    if let Some(at) = at
-        && let Some(dst) = b.get_mut(at..at + 4)
-    {
-        dst.copy_from_slice(&value.to_ne_bytes());
+    if let Some(at) = at {
+        b[at..at + 4].copy_from_slice(&value.to_ne_bytes());
     }
 }
 
