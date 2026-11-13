@@ -50,6 +50,15 @@ const DEFAULT_CONFIG: &str = "\
 # name = \"workspace\"
 # command = \"hyprctl activeworkspace -j | jq .id\"
 # every = 1
+#
+# action: a command that a click on a procedural wallpaper runs. The wallpaper
+# names its actions. A click on an action runs the command with the same name,
+# with sh. A wallpaper can also show the label, for example as a menu.
+#
+# [[action]]
+# name = \"tape1\"
+# label = \"Firefox\"
+# command = \"firefox\"
 ";
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +106,21 @@ pub struct InputCommand {
     pub every: f64,
 }
 
+/// A command that a click on a procedural wallpaper runs, and the label that
+/// the wallpaper can show for it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionCommand {
+    /// The name of an action of the wallpaper.
+    pub name: String,
+    /// A shell command. Without it, a click does nothing.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// The text that the wallpaper shows for the action.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -109,6 +133,8 @@ pub struct Config {
     pub location: Option<Location>,
     #[serde(default, rename = "input")]
     pub inputs: Vec<InputCommand>,
+    #[serde(default, rename = "action")]
+    pub actions: Vec<ActionCommand>,
 }
 
 fn config_path() -> PathBuf {
@@ -201,6 +227,11 @@ fn parse(contents: &str) -> anyhow::Result<Config> {
             );
         }
     }
+    for (i, action) in config.actions.iter().enumerate() {
+        if config.actions[..i].iter().any(|a| a.name == action.name) {
+            bail!("two [[action]] entries are named `{}`", action.name);
+        }
+    }
     Ok(config)
 }
 
@@ -220,5 +251,19 @@ mod tests {
             let err = format!("{:#}", config(bad).unwrap_err());
             assert!(err.contains("`every` must be"), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn actions_have_unique_names() {
+        let one = "[[action]]\nname = \"tape1\"\ncommand = \"firefox\"\n";
+        let config = parse(one).unwrap();
+        assert_eq!(config.actions[0].name, "tape1");
+        assert_eq!(config.actions[0].command.as_deref(), Some("firefox"));
+        assert_eq!(config.actions[0].label, None);
+        let labelled = parse("[[action]]\nname = \"tape2\"\nlabel = \"Soon\"\n").unwrap();
+        assert_eq!(labelled.actions[0].label.as_deref(), Some("Soon"));
+        assert_eq!(labelled.actions[0].command, None);
+        let err = format!("{:#}", parse(&format!("{one}{one}")).unwrap_err());
+        assert!(err.contains("two [[action]] entries"), "{err}");
     }
 }

@@ -6,10 +6,10 @@ mod gl_renderer;
 mod procedural;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::Path,
-    sync::{atomic::Ordering, mpsc},
-    time::{Instant, SystemTime},
+    sync::{Arc, atomic::Ordering, mpsc},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Context, bail};
@@ -31,12 +31,12 @@ use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_l
 use self::battery_observer::Battery;
 use self::gl_renderer::{GlRenderer, TextureRef};
 use super::{Backend, DumpRequest, PauseMode, RunOptions};
-use crate::config::InputCommand;
+use crate::config::{ActionCommand, InputCommand};
 use crate::displays::DisplayInfo;
 use crate::plan::Playback;
 use crate::procedural::{
-    AudioFrame, Clock, CommandInputs, FrameInputs, FrameLimiter, MAX_DISPLAYS, Pack, Pointer,
-    TextureWatcher, local_date, location, read_inputs_once,
+    ActionRunner, AudioFrame, Clock, CommandInputs, FrameInputs, FrameLimiter, MAX_DISPLAYS, Pack,
+    Pointer, TextureWatcher, VideoQueue, label_texels, local_date, location, read_inputs_once,
 };
 use crate::scale::ScaleMode;
 use clap::ValueEnum;
@@ -85,6 +85,9 @@ const DEFAULT_DUMP_SIZE: (u32, u32) = (1920, 1080);
 /// wallpaper steps at its cap, so its buffers change as they do on screen.
 const UNCAPPED_DUMP_FPS: f64 = 60.0;
 
+/// The longest wait of `dump` for the next frame of a video.
+const DUMP_VIDEO_WAIT: Duration = Duration::from_secs(10);
+
 impl WaylandBackend {
     fn dump_procedural(self, request: DumpRequest) -> anyhow::Result<()> {
         let mut pack = Pack::load(Path::new(&request.path))?;
@@ -101,10 +104,21 @@ impl WaylandBackend {
         let renderer =
             GlRenderer::new(&self.state.conn, &wl_surface, 1, 1, self.shader.as_deref())?;
         let gl = renderer.gl();
-        let program = procedural::Program::compile(gl, &pack)?;
+        let mut program = procedural::Program::compile(gl, &pack)?;
+        if let Some(actions) = &pack.actions {
+            program.set_action_labels(gl, &label_texels(&actions.names, &request.actions))?;
+        }
         let (width, height) = request.size.unwrap_or(DEFAULT_DUMP_SIZE);
 
         let result = (|| {
+            // The videos play during the frames before `--at`, as on screen,
+            // so a buffer that keeps its last frame sees each video frame.
+            let mut videos = pack
+                .videos
+                .iter()
+                .map(|path| VideoChannel::start(path, &renderer))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let mut shown = vec![false; videos.len()];
             let dims = program.target_dims((width, height));
             let mut target = program.create_target(gl, dims)?;
             let whole = [0, 0, width as i32, height as i32];
@@ -131,14 +145,28 @@ impl WaylandBackend {
                 } else {
                     i as f64 / fps
                 };
+                let delta = time - previous;
+                previous = time;
+                for (index, video) in videos.iter_mut().enumerate() {
+                    if let Some(sample) = video.queue.advance(delta, DUMP_VIDEO_WAIT) {
+                        video.upload(gl, &mut program, index, sample);
+                        video.release_copied(gl, 0);
+                        shown[index] = true;
+                    }
+                }
                 let inputs = FrameInputs {
                     time: time as f32,
-                    time_delta: (time - previous) as f32,
+                    time_delta: delta as f32,
                     frame_rate: fps as f32,
                     ..system
                 };
-                previous = time;
                 texture = Some(program.render(gl, &mut target, &inputs));
+            }
+            if let Some(index) = shown.iter().position(|shown| !shown) {
+                bail!(
+                    "video {}: the decoder gave no frame",
+                    pack.videos[index].display()
+                );
             }
             let texture = texture.expect("rendered at least one frame");
             let rgba = renderer.render_texture_to_rgba(texture, width, height);
@@ -338,7 +366,7 @@ impl Backend for WaylandBackend {
             sources.push(match spec {
                 SourceSpec::Video(path) => Source::Video(spawn_decoder(path, &renderer)?),
                 SourceSpec::Procedural(pack) => Source::Procedural(Box::new(
-                    ProceduralSource::new(renderer.gl(), &pack, &options.inputs)?,
+                    ProceduralSource::new(&renderer, &pack, &options.inputs, &options.actions)?,
                 )),
             });
         }
@@ -503,31 +531,26 @@ impl Backend for WaylandBackend {
                 Some(dark) if dark.load(Ordering::Relaxed) => 1.0,
                 _ => 0.0,
             };
+            // Some(true) if the pointer moved onto an action, and Some(false)
+            // if it moved off.
+            let mut hand = None;
             for (source_idx, output_names) in groups {
                 let source = &mut sources[source_idx];
                 let first_surface = output_names
                     .iter()
                     .find_map(|n| self.state.outputs.get(n)?.surface_idx)
                     .expect("a group has an output");
-                // Upload the new images of watched files.
-                if let Source::Procedural(p) = source
-                    && let Some(watcher) = &p.watcher
-                {
-                    let updates = watcher.take();
-                    if !updates.is_empty() {
-                        renderer.make_current(first_surface)?;
-                    }
-                    for (index, texture) in updates {
-                        if let Err(err) = p.program.replace_texture(renderer.gl(), index, &texture)
-                        {
-                            log::warn!("{err:#}");
-                        }
-                    }
-                }
-                // The inputs that all outputs of a procedural source share.
-                let shared = match source {
+                let tick = match source {
                     Source::Procedural(p) => {
                         let tick = p.clock.tick(now);
+                        p.upload(&mut renderer, first_surface, f64::from(tick.delta))?;
+                        Some(tick)
+                    }
+                    Source::Video(_) => None,
+                };
+                // The inputs that all outputs of a procedural source share.
+                let shared = match (&*source, tick) {
+                    (Source::Procedural(p), Some(tick)) => {
                         let wall = SystemTime::now();
                         Some(FrameInputs {
                             time: tick.time,
@@ -546,7 +569,7 @@ impl Backend for WaylandBackend {
                             ..FrameInputs::default()
                         })
                     }
-                    Source::Video(_) => None,
+                    _ => None,
                 };
                 // A spanned wallpaper draws once for the whole desktop. Each
                 // output then shows its own part.
@@ -567,11 +590,18 @@ impl Backend for WaylandBackend {
                                 old.destroy(gl);
                             }
                             p.span_target = Some(p.program.create_target(gl, dims)?);
+                            // Read the action under the pointer again.
+                            self.state.desktop_hover = None;
                         }
-                        let (mouse, pointer) = self
-                            .state
-                            .desktop_pointer
-                            .uniforms(desktop.map(f64::from), dims);
+                        let area = desktop.map(f64::from);
+                        // The first frame of a new target leaves the click
+                        // for the next frame, as `handle_actions` does.
+                        let drawn = p
+                            .span_target
+                            .as_ref()
+                            .is_some_and(procedural::Target::has_drawn);
+                        let (mouse, pointer) =
+                            self.state.desktop_pointer.uniforms(area, dims, drawn);
                         let (displays, display_count) = display_rects(desktop, &rects, dims);
                         let inputs = FrameInputs {
                             mouse,
@@ -581,6 +611,18 @@ impl Backend for WaylandBackend {
                             ..shared
                         };
                         let target = p.span_target.as_mut().expect("target created above");
+                        let over = handle_actions(
+                            gl,
+                            &p.program,
+                            p.actions.as_ref(),
+                            target,
+                            &mut self.state.desktop_pointer,
+                            area,
+                            &mut self.state.desktop_hover,
+                        );
+                        if over.is_some() {
+                            hand = over;
+                        }
                         Some((p.program.render(gl, target, &inputs), desktop))
                     }
                     _ => None,
@@ -615,6 +657,8 @@ impl Backend for WaylandBackend {
                                     old.destroy(gl);
                                 }
                                 o.target = Some(p.program.create_target(gl, dims)?);
+                                // Read the action under the pointer again.
+                                o.hover = None;
                             }
                             let area = [
                                 0.0,
@@ -622,7 +666,12 @@ impl Backend for WaylandBackend {
                                 f64::from(surface_dims.0),
                                 f64::from(surface_dims.1),
                             ];
-                            let (mouse, pointer) = o.pointer.uniforms(area, dims);
+                            // The first frame of a new target leaves the
+                            // click for the next frame, as `handle_actions`
+                            // does.
+                            let drawn =
+                                o.target.as_ref().is_some_and(procedural::Target::has_drawn);
+                            let (mouse, pointer) = o.pointer.uniforms(area, dims, drawn);
                             let whole = [0, 0, surface_dims.0 as i32, surface_dims.1 as i32];
                             let (displays, display_count) = display_rects(whole, &[whole], dims);
                             let inputs = FrameInputs {
@@ -633,6 +682,20 @@ impl Backend for WaylandBackend {
                                 ..shared
                             };
                             let target = o.target.as_mut().expect("target created above");
+                            let over = handle_actions(
+                                gl,
+                                &p.program,
+                                p.actions.as_ref(),
+                                target,
+                                &mut o.pointer,
+                                area,
+                                &mut o.hover,
+                            );
+                            // Only the output under the pointer sets the
+                            // cursor.
+                            if over.is_some() && self.state.pointer_focus == Some(name) {
+                                hand = over;
+                            }
                             let texture = p.program.render(gl, target, &inputs);
                             // Procedural output always fills the surface.
                             // `--scale` is only for videos.
@@ -643,6 +706,9 @@ impl Backend for WaylandBackend {
                 if let Source::Procedural(p) = source {
                     p.limiter.rendered(now);
                 }
+            }
+            if let Some(hand) = hand {
+                self.state.set_hand(hand);
             }
 
             self.eq
@@ -708,19 +774,276 @@ struct ProceduralSource {
     /// The values of the inputs that the pack reads.
     commands: CommandInputs,
     watcher: Option<TextureWatcher>,
+    /// The videos of the channels, in the order of `Pack::videos`.
+    videos: Vec<VideoChannel>,
+    /// The actions that a click runs, if the pack has any.
+    actions: Option<ActionRunner>,
 }
 
 impl ProceduralSource {
-    fn new(gl: &glow::Context, pack: &Pack, commands: &[InputCommand]) -> anyhow::Result<Self> {
+    fn new(
+        renderer: &GlRenderer,
+        pack: &Pack,
+        commands: &[InputCommand],
+        actions: &[ActionCommand],
+    ) -> anyhow::Result<Self> {
+        let videos = pack
+            .videos
+            .iter()
+            .map(|path| VideoChannel::start(path, renderer))
+            .collect::<anyhow::Result<_>>()?;
+        let mut program = procedural::Program::compile(renderer.gl(), pack)?;
+        if let Some(a) = &pack.actions {
+            program.set_action_labels(renderer.gl(), &label_texels(&a.names, actions))?;
+        }
         Ok(Self {
-            program: procedural::Program::compile(gl, pack)?,
+            program,
             audio: pack.audio,
             clock: Clock::new(pack.fps),
             limiter: FrameLimiter::new(pack.fps),
             span_target: None,
             commands: CommandInputs::start(&pack.inputs, commands),
             watcher: TextureWatcher::start(&pack.textures),
+            videos,
+            actions: pack
+                .actions
+                .as_ref()
+                .map(|a| ActionRunner::new(&a.names, actions)),
         })
+    }
+
+    /// Uploads the new images of watched files, and the video frames that
+    /// are due after `delta` more seconds of playback. The context becomes
+    /// current on `surface` if there is something to upload.
+    fn upload(
+        &mut self,
+        renderer: &mut GlRenderer,
+        surface: usize,
+        delta: f64,
+    ) -> anyhow::Result<()> {
+        let updates = self
+            .watcher
+            .as_ref()
+            .map(TextureWatcher::take)
+            .unwrap_or_default();
+        let frames: Vec<(usize, gst::Sample)> = self
+            .videos
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, v)| Some((i, v.advance(delta)?)))
+            .collect();
+        if updates.is_empty()
+            && frames.is_empty()
+            && self.videos.iter().all(|v| v.copying.is_empty())
+        {
+            return Ok(());
+        }
+        renderer.make_current(surface)?;
+        let gl = renderer.gl();
+        for video in &mut self.videos {
+            video.release_copied(gl, MAX_COPYING);
+        }
+        for (index, texture) in updates {
+            if let Err(err) = self.program.replace_texture(gl, index, &texture) {
+                log::warn!("{err:#}");
+            }
+        }
+        for (index, sample) in frames {
+            self.videos[index].upload(gl, &mut self.program, index, sample);
+        }
+        Ok(())
+    }
+}
+
+/// Runs the action under each click since the last frame, and finds the
+/// action under the pointer. Returns `Some(true)` if the pointer is over an
+/// action, `Some(false)` if it is not, and `None` if nothing changed or the
+/// pack has no actions.
+///
+/// phonto reads the actions from `target`, which holds the last frame, so a
+/// click runs the action that the user saw. A new target has no frame yet. Its
+/// clicks wait for its first frame. `iMouse` also gives them to the frame
+/// after it, so the action and the shader see a click on the same frame.
+///
+/// `hover` is where phonto last read the action under the pointer. If the
+/// actions buffer draws only once, the actions do not move, so phonto reads
+/// again only when the pointer moves.
+fn handle_actions(
+    gl: &glow::Context,
+    program: &procedural::Program,
+    actions: Option<&ActionRunner>,
+    target: &procedural::Target,
+    pointer: &mut Pointer,
+    area: [f64; 4],
+    hover: &mut Option<[f64; 2]>,
+) -> Option<bool> {
+    let actions = actions?;
+    if !target.has_drawn() {
+        return None;
+    }
+    let action_at = |at: [f64; 2]| {
+        program
+            .read_action(gl, target, at)
+            .and_then(|value| actions.index(value))
+    };
+    for at in pointer.take_presses(area) {
+        if let Some(index) = action_at(at) {
+            actions.run(index);
+        }
+    }
+    let now = pointer.hover(area);
+    if now == *hover && program.actions_are_static() {
+        return None;
+    }
+    *hover = now;
+    Some(now.and_then(action_at).is_some())
+}
+
+/// A video that a channel of a procedural wallpaper shows. It plays at the
+/// speed of the playback clock of the wallpaper, so it stops while time
+/// stops.
+struct VideoChannel {
+    queue: Arc<VideoQueue<gst::Sample>>,
+    gl_context: gst_gl::GLContext,
+    pipeline: gst::Pipeline,
+    /// Decoded frames that the GPU still copies, with the fence that tells
+    /// when the copy is done. A sample keeps its texture from the decoder
+    /// until its fence signals.
+    copying: VecDeque<(gst::Sample, glow::Fence)>,
+    /// True after a frame did not upload, until one works again.
+    failing: bool,
+    /// True while more copies wait than the last release allowed, because
+    /// the GPU did not finish the oldest one in time.
+    stalled: bool,
+}
+
+/// The most frames that wait for their copy. If the GPU falls behind, phonto
+/// waits for the oldest copy, so the decoder does not run out of buffers.
+const MAX_COPYING: usize = 3;
+
+/// Takes the copies that are done off the front of `copying`. `done(fence,
+/// wait)` tells if a copy is done, and with `wait` it first waits for it a
+/// short time. If more than `max` copies wait, this waits for the oldest
+/// ones. A copy that is not done stays, and so do the copies after it.
+fn take_done<S, F>(
+    copying: &mut VecDeque<(S, F)>,
+    max: usize,
+    mut done: impl FnMut(&F, bool) -> bool,
+) -> Vec<(S, F)> {
+    let mut taken = Vec::new();
+    while let Some((_, fence)) = copying.front() {
+        if !done(fence, copying.len() > max) {
+            break;
+        }
+        taken.extend(copying.pop_front());
+    }
+    taken
+}
+
+/// The longest wait for a video that is behind, as a part of the time since
+/// the last frame of the wallpaper. It is never more than `MAX_CATCH_UP_WAIT`
+/// seconds.
+const CATCH_UP_SHARE: f64 = 0.25;
+const MAX_CATCH_UP_WAIT: f64 = 0.025;
+
+impl VideoChannel {
+    fn start(path: &Path, renderer: &GlRenderer) -> anyhow::Result<Self> {
+        let (gl_display, gl_context) =
+            decoder::wrap_gl(renderer.egl_display(), renderer.egl_context())?;
+        let queue = Arc::new(VideoQueue::new());
+        let pipeline = decoder::start_channel(
+            &path.to_string_lossy(),
+            &gl_display,
+            &gl_context,
+            Arc::clone(&queue),
+        )
+        .with_context(|| format!("video {}", path.display()))?;
+        Ok(Self {
+            queue,
+            gl_context,
+            pipeline,
+            copying: VecDeque::new(),
+            failing: false,
+            stalled: false,
+        })
+    }
+
+    /// Moves the video `delta` seconds on, and returns the newest frame that
+    /// is due, if a new one is.
+    ///
+    /// Between two frames of the wallpaper, the decoder catches up with the
+    /// time of the last frame. Then phonto waits a short time until the
+    /// decoder gives a frame that is not due yet, so that the frame of this
+    /// moment shows. If the decoder is too slow, its newest frame shows.
+    fn advance(&self, delta: f64) -> Option<gst::Sample> {
+        let wait = (delta * CATCH_UP_SHARE).min(MAX_CATCH_UP_WAIT);
+        self.queue.advance(delta, Duration::from_secs_f64(wait))
+    }
+
+    /// Copies `sample` into video `index` of `program`. The sample stays until
+    /// the copy is done. The context must be current.
+    fn upload(
+        &mut self,
+        gl: &glow::Context,
+        program: &mut procedural::Program,
+        index: usize,
+        sample: gst::Sample,
+    ) {
+        // While the GPU did not finish the old copies, a new frame does not
+        // show, so that the copies do not pile up. The GPU never read this
+        // sample, so it can go.
+        if self.stalled {
+            return;
+        }
+        let copied = decoder::with_frame(&sample, &self.gl_context, |frame| {
+            program.update_video(gl, index, &TextureRef::from_frame(frame)?)
+        });
+        // Warn once until a frame works again.
+        match copied.and_then(|r| r) {
+            Ok(fence) => {
+                self.copying.push_back((sample, fence));
+                self.failing = false;
+            }
+            Err(err) if !self.failing => {
+                log::warn!("video channel: {err:#}");
+                self.failing = true;
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Gives back to the decoder the samples whose copy is done. If more
+    /// than `max` copies run, this waits for the oldest ones. The context
+    /// must be current.
+    ///
+    /// The decoder uses the texture of a sample again after the sample goes.
+    /// So a sample stays until its copy is done, however long the GPU takes.
+    fn release_copied(&mut self, gl: &glow::Context, max: usize) {
+        let done = take_done(&mut self.copying, max, |fence, wait| {
+            procedural::fence_signaled(gl, *fence, wait)
+        });
+        for (sample, fence) in done {
+            procedural::delete_fence(gl, fence);
+            drop(sample);
+        }
+        let stalled = self.copying.len() > max;
+        if stalled && !self.stalled {
+            log::warn!("video channel: the GPU did not finish a copy in time");
+        }
+        self.stalled = stalled;
+    }
+}
+
+impl Drop for VideoChannel {
+    fn drop(&mut self) {
+        // The decoder can wait to give a frame. Close the queue first, so
+        // that the wait ends and the pipeline can stop.
+        self.queue.close();
+        // A copy can still run on the GPU. Once the pipeline stops, the
+        // decoder does not write to its texture again. GL keeps a texture
+        // until the work that reads it is done. The fences need a current
+        // context to go, so they stay: this happens only when phonto stops.
+        let _ = self.pipeline.set_state(gst::State::Null);
     }
 }
 
@@ -835,6 +1158,13 @@ struct State {
     pointer_focus: Option<u32>,
     /// The pointer in desktop coordinates, for `--span`.
     desktop_pointer: Pointer,
+    /// Where phonto last read the action under `desktop_pointer`.
+    desktop_hover: Option<[f64; 2]>,
+    /// The seat and the serial of the last time the pointer entered a
+    /// wallpaper. A new cursor shape needs them.
+    pointer_enter: Option<(u32, u32)>,
+    /// True while the cursor is a hand, over an action.
+    hand: bool,
     detached_surface_idxs: Vec<usize>,
     detached_targets: Vec<procedural::Target>,
 }
@@ -865,6 +1195,8 @@ struct OutputState {
     /// The render targets, if a procedural source feeds this output.
     target: Option<procedural::Target>,
     pointer: Pointer,
+    /// Where phonto last read the action under `pointer`.
+    hover: Option<[f64; 2]>,
 }
 
 impl OutputState {
@@ -886,6 +1218,7 @@ impl OutputState {
             source_idx: None,
             target: None,
             pointer: Pointer::default(),
+            hover: None,
         }
     }
 
@@ -947,6 +1280,9 @@ impl State {
             pointer_enabled: false,
             pointer_focus: None,
             desktop_pointer: Pointer::default(),
+            desktop_hover: None,
+            pointer_enter: None,
+            hand: false,
             detached_surface_idxs: Vec::new(),
             detached_targets: Vec::new(),
         }
@@ -975,6 +1311,25 @@ impl State {
         } else if !seat.has_pointer {
             seat.release_pointer();
         }
+    }
+
+    /// Shows a hand over an action, and the normal arrow elsewhere.
+    fn set_hand(&mut self, hand: bool) {
+        if self.hand == hand {
+            return;
+        }
+        let Some((seat, serial)) = self.pointer_enter else {
+            return;
+        };
+        if let Some(cursor) = self.seats.get(&seat).and_then(|s| s.cursor.as_ref()) {
+            let shape = if hand {
+                wp_cursor_shape_device_v1::Shape::Pointer
+            } else {
+                wp_cursor_shape_device_v1::Shape::Default
+            };
+            cursor.set_shape(serial, shape);
+        }
+        self.hand = hand;
     }
 
     fn focused_output(&mut self) -> Option<&mut OutputState> {
@@ -1274,21 +1629,26 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 // A client that binds a pointer sets the cursor image over its
                 // surfaces. Ask for the normal arrow, so that the cursor does
                 // not disappear or keep the shape of the last window.
-                if let Some(cursor) = state
+                let seat = state
                     .seats
-                    .values()
-                    .find(|s| s.pointer.as_ref() == Some(pointer))
-                    .and_then(|s| s.cursor.as_ref())
-                {
+                    .iter()
+                    .find(|(_, s)| s.pointer.as_ref() == Some(pointer));
+                if let Some(cursor) = seat.and_then(|(_, s)| s.cursor.as_ref()) {
                     cursor.set_shape(serial, wp_cursor_shape_device_v1::Shape::Default);
                 }
+                state.pointer_enter = seat.map(|(name, _)| (*name, serial));
+                state.hand = false;
                 state.pointer_focus = state
                     .outputs
                     .iter()
                     .find(|(_, o)| o.wl_surface.as_ref() == Some(&surface))
                     .map(|(name, _)| *name);
+                // The cursor is the arrow again, so read the action under
+                // the pointer on the next frame.
+                state.desktop_hover = None;
                 if let Some(o) = state.focused_output() {
                     o.pointer.enter(surface_x, surface_y);
+                    o.hover = None;
                 }
                 let (x, y) = state.focus_offset();
                 state.desktop_pointer.enter(surface_x + x, surface_y + y);
@@ -1299,6 +1659,8 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 }
                 state.desktop_pointer.leave();
                 state.pointer_focus = None;
+                state.pointer_enter = None;
+                state.hand = false;
             }
             wl_pointer::Event::Motion {
                 surface_x,
@@ -1338,6 +1700,27 @@ delegate_noop!(State: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copy_that_is_not_done_keeps_its_sample() {
+        // Five copies, each a sample with its fence. Copy 1 does not finish,
+        // also after a wait.
+        let mut copying: VecDeque<(usize, usize)> = (0..5).map(|n| (n, n)).collect();
+        let mut waited = Vec::new();
+        let done = take_done(&mut copying, 2, |fence, wait| {
+            if wait {
+                waited.push(*fence);
+            }
+            *fence != 1
+        });
+        assert_eq!(done, [(0, 0)]);
+        assert_eq!(waited, [0, 1], "more than 2 copies wait, so it waits");
+        assert_eq!(copying.front(), Some(&(1, 1)), "copy 1 and its sample stay");
+        assert_eq!(copying.len(), 4);
+        // Copy 1 finishes later, and the copies after it go with it.
+        let done = take_done(&mut copying, 2, |_, _| true);
+        assert_eq!(done.len(), 4);
+    }
 
     #[test]
     fn desktop_covers_all_outputs() {
