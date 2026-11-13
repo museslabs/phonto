@@ -5,7 +5,9 @@
 //! The source keeps the clock. All surfaces of a source draw the same moment,
 //! so mirrored screens stay in sync.
 
+use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
@@ -19,11 +21,13 @@ use objc2_foundation::{MainThreadMarker, NSRect, NSRunLoop, NSRunLoopCommonModes
 use objc2_metal::{MTLCommandBuffer, MTLDrawable};
 use objc2_quartz_core::{CADisplayLink, CAFrameRateRange, CAMetalDrawable, CAMetalLayer};
 
+use super::keyboard::Keyboard;
 use super::pointer::DesktopPointer;
-use super::procedural::{self, Gpu, Program, SCREEN_FORMAT, Target};
+use super::procedural::{self, Gpu, GpuTexture, Program, SCREEN_FORMAT, Target};
 use crate::config::{InputCommand, Location};
 use crate::procedural::{
-    Clock, CommandInputs, FrameInputs, FrameLimiter, Pack, TextureWatcher, local_date, location,
+    Clock, CommandInputs, FrameInputs, FrameLimiter, Input, Pack, TextureWatcher, local_date,
+    location,
 };
 
 /// A procedural wallpaper, compiled, with its clock.
@@ -41,6 +45,10 @@ pub struct ProceduralSource {
     watcher: Option<TextureWatcher>,
     /// Counts the frames of the source. A surface draws when this changes.
     frame: u64,
+    /// The keys, if a pass has a keyboard channel. The window of the screen
+    /// that has the keyboard fills it.
+    pub keyboard: Option<Rc<RefCell<Keyboard>>>,
+    keyboard_texture: Option<GpuTexture>,
 }
 
 impl ProceduralSource {
@@ -64,6 +72,13 @@ impl ProceduralSource {
                 pack.name
             );
         }
+        let reads_keys = pack
+            .buffers
+            .iter()
+            .map(|b| &b.pass)
+            .chain([&pack.image])
+            .flat_map(|pass| &pass.channels)
+            .any(|c| c.input == Input::Keyboard);
         Ok(Self {
             program: Program::compile(gpu, &pack)?,
             fps: pack.fps,
@@ -74,6 +89,8 @@ impl ProceduralSource {
             commands: CommandInputs::start(&pack.inputs, commands),
             watcher: TextureWatcher::start(&pack.textures),
             frame: 0,
+            keyboard: reads_keys.then(Rc::default),
+            keyboard_texture: None,
         })
     }
 
@@ -83,6 +100,11 @@ impl ProceduralSource {
     fn advance(&mut self, gpu: &Gpu, now: Instant, slack: Duration) -> anyhow::Result<()> {
         if self.limiter.next_frame().is_some_and(|t| t > now + slack) {
             return Ok(());
+        }
+        if let Some(keyboard) = &self.keyboard
+            && let Some(rows) = keyboard.borrow_mut().take_frame()
+        {
+            self.keyboard_texture = Some(procedural::keyboard_texture(gpu, &rows)?);
         }
         // Upload the new images of watched files.
         for (index, texture) in self.watcher.iter().flat_map(TextureWatcher::take) {
@@ -231,7 +253,8 @@ impl ProceduralSurface {
         };
 
         let cmd = gpu.command_buffer()?;
-        source.program.encode(&cmd, target, &inputs);
+        let keyboard = source.keyboard_texture.as_deref();
+        source.program.encode(&cmd, target, &inputs, keyboard);
         // Take the drawable last. It can wait until the screen frees one.
         if let Some(drawable) = self.layer.nextDrawable() {
             gpu.encode_present(&cmd, target, &drawable.texture());

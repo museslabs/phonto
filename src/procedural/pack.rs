@@ -152,6 +152,10 @@ pub enum Input {
     Texture(usize),
     /// The current frame of `Pack::videos[i]`.
     Video(usize),
+    /// The keyboard, as on Shadertoy: a texture 256 key codes wide and 3
+    /// rows high.
+    #[cfg(target_os = "macos")]
+    Keyboard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -255,6 +259,8 @@ struct ChannelTable {
     buffer: Option<String>,
     texture: Option<String>,
     video: Option<String>,
+    #[serde(default)]
+    keyboard: bool,
     filter: Option<String>,
     wrap: Option<String>,
     #[serde(default)]
@@ -468,42 +474,46 @@ fn resolve_channel(
     buffer_index: &HashMap<&str, usize>,
     sources: &mut Sources,
 ) -> anyhow::Result<Channel> {
-    let (buffer, texture, video, filter, wrap, watch) = match c {
+    let (buffer, texture, video, keyboard, filter, wrap, watch) = match c {
         ChannelManifest::Short(s) if buffer_index.contains_key(s.as_str()) => {
-            (Some(s.as_str()), None, None, None, None, false)
+            (Some(s.as_str()), None, None, false, None, None, false)
         }
-        ChannelManifest::Short(s) => (None, Some(s.as_str()), None, None, None, false),
+        ChannelManifest::Short(s) => (None, Some(s.as_str()), None, false, None, None, false),
         ChannelManifest::Full(t) => (
             t.buffer.as_deref(),
             t.texture.as_deref(),
             t.video.as_deref(),
+            t.keyboard,
             t.filter.as_deref(),
             t.wrap.as_deref(),
             t.watch,
         ),
     };
 
-    let (input, default_filter, default_wrap) = match (buffer, texture, video) {
-        (Some(_), None, None) | (None, None, Some(_)) if watch => {
+    let (input, default_filter, default_wrap) = match (buffer, texture, video, keyboard) {
+        (Some(_), None, None, false) | (None, None, Some(_), false) | (None, None, None, true)
+            if watch =>
+        {
             bail!("`watch` is only for textures")
         }
-        (Some(name), None, None) => {
+        (Some(name), None, None, false) => {
             let Some(&i) = buffer_index.get(name) else {
                 bail!("no [[buffer]] is named `{name}`");
             };
             (Input::Buffer(i), Filter::Linear, Wrap::Clamp)
         }
-        (None, Some(path), None) => {
+        (None, Some(path), None, false) => {
             let i = sources
                 .textures
                 .load(&dir.join(crate::config::expand_tilde(path)), watch)?;
             (Input::Texture(i), Filter::Mipmap, Wrap::Repeat)
         }
-        (None, None, Some(path)) => {
+        (None, None, Some(path), false) => {
             let i = sources.video(&dir.join(crate::config::expand_tilde(path)))?;
             (Input::Video(i), Filter::Linear, Wrap::Clamp)
         }
-        _ => bail!("set exactly one of `buffer`, `texture`, or `video`"),
+        (None, None, None, true) => keyboard_input()?,
+        _ => bail!("set exactly one of `buffer`, `texture`, `video`, or `keyboard`"),
     };
 
     let filter = filter
@@ -608,6 +618,18 @@ fn is_glsl_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !name.starts_with("gl_")
         && !name.contains("__")
+}
+
+/// The input, filter and wrap of a keyboard channel. Shaders read it with
+/// `texelFetch`, as on Shadertoy.
+#[cfg(target_os = "macos")]
+fn keyboard_input() -> anyhow::Result<(Input, Filter, Wrap)> {
+    Ok((Input::Keyboard, Filter::Nearest, Wrap::Clamp))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keyboard_input() -> anyhow::Result<(Input, Filter, Wrap)> {
+    bail!("keyboard channels only work on macOS so far")
 }
 
 fn parse_filter(s: &str) -> anyhow::Result<Filter> {
@@ -904,6 +926,26 @@ mod tests {
         assert_eq!(pack.image.channels[1].filter, Filter::Linear);
         // The first stored row is the bottom row of the image.
         assert_eq!(&pack.textures[0].rgba[..4], &[0, 0, 255, 255]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keyboard_channel() {
+        let dir = TempDir::new("keyboard");
+        dir.write("i.glsl", SHADER);
+        dir.write(
+            MANIFEST,
+            "[image]\nshader = \"i.glsl\"\nchannels = [{ keyboard = true }]",
+        );
+        let pack = Pack::load(&dir.0).unwrap();
+        assert_eq!(
+            pack.image.channels[0],
+            Channel {
+                input: Input::Keyboard,
+                filter: Filter::Nearest,
+                wrap: Wrap::Clamp
+            }
+        );
     }
 
     #[test]
