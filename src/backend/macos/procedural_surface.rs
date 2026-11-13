@@ -375,13 +375,17 @@ impl ProceduralSurface {
             self.layer.setDrawableSize(drawable_size);
         }
         // Take the drawable last. It can wait until the screen frees one.
+        let mut copied = Ok(());
         if let Some(drawable) = self.layer.nextDrawable() {
-            gpu.encode_present(&cmd, target, &drawable.texture(), crop);
-            cmd.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable));
+            copied = gpu.encode_present(&cmd, target, &drawable.texture(), crop);
+            if copied.is_ok() {
+                cmd.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable));
+            }
         }
+        // The passes run without the copy too. The scene has counted them.
         cmd.commit();
         self.frame = source.frame;
-        Ok(clicked_desktop)
+        copied.map(|()| clicked_desktop)
     }
 }
 
@@ -434,7 +438,10 @@ impl Scene {
             display_count,
             ..*shared
         };
-        program.encode(cmd, target, &inputs, keyboard);
+        // The next frame starts the buffers again from zero.
+        program
+            .encode(cmd, target, &inputs, keyboard)
+            .inspect_err(|_| self.target = None)?;
         Ok(clicked)
     }
 
