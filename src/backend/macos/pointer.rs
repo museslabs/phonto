@@ -45,6 +45,8 @@ pub struct DesktopPointer {
     pointer: Pointer,
     /// The count of left clicks at the last frame.
     clicks: u32,
+    /// True from a click on the desktop until its button comes up.
+    desktop_click: bool,
     /// The window that was last under the pointer, and if it is the desktop.
     last_hit: Option<(isize, bool)>,
 }
@@ -54,21 +56,27 @@ impl DesktopPointer {
         Self {
             pointer: Pointer::default(),
             clicks: left_clicks(),
+            desktop_click: false,
             last_hit: None,
         }
     }
 
     /// Reads the pointer for a screen with `frame` in global coordinates.
-    /// Returns true if the user clicked the desktop on this screen since the
-    /// last call.
+    /// Returns true on the first call after a click on the desktop of this
+    /// screen ends. Finder takes the key window during the click, at the
+    /// latest when the button comes up. The wallpaper takes it after that.
     pub fn poll(&mut self, mtm: MainThreadMarker, frame: NSRect) -> bool {
         let location = NSEvent::mouseLocation();
         let clicks = left_clicks();
         let clicked = clicks != self.clicks;
         self.clicks = clicks;
+        // A click elsewhere ends a click on the desktop that waits for its
+        // button.
+        if clicked {
+            self.desktop_click = false;
+        }
         let pressed = NSEvent::pressedMouseButtons() & 1 != 0;
 
-        let mut clicked_desktop = false;
         if contains(frame, location) {
             // Global coordinates start at the bottom left. Pointer wants the
             // top left of the screen.
@@ -78,7 +86,7 @@ impl DesktopPointer {
                 self.pointer.enter(x, y);
                 if clicked {
                     self.pointer.button(BTN_LEFT, true);
-                    clicked_desktop = true;
+                    self.desktop_click = true;
                 }
             } else {
                 self.pointer.motion(x, y);
@@ -87,10 +95,11 @@ impl DesktopPointer {
         } else {
             self.pointer.leave();
         }
-        if !pressed {
-            self.pointer.button(BTN_LEFT, false);
+        if pressed {
+            return false;
         }
-        clicked_desktop
+        self.pointer.button(BTN_LEFT, false);
+        std::mem::take(&mut self.desktop_click)
     }
 
     /// `(iMouse, iPointer)` for the next frame. `surface` is the size of the

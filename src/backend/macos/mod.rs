@@ -467,7 +467,8 @@ pub(super) fn build_surface(
         }
     };
 
-    window.makeKeyAndOrderFront(None);
+    // A wallpaper takes the keyboard only on a click.
+    window.orderFront(None);
 
     log::info!(
         "surface ready on {}: {}x{} @ {}x",

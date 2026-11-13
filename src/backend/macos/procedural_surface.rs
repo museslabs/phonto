@@ -302,8 +302,8 @@ impl ProceduralSurface {
     }
 
     /// Draws the next frame of `source`, if there is one. `frame` is the
-    /// frame of the screen in global coordinates. Returns true if the user
-    /// clicked the desktop since the last frame: on this screen, or with
+    /// frame of the screen in global coordinates. Returns true if a click on
+    /// the desktop ended since the last frame: on this screen, or with
     /// `--span` on any screen.
     pub fn draw(
         &mut self,
@@ -381,8 +381,8 @@ impl Scene {
         }
     }
 
-    /// Encodes the next frame of the screens into `cmd`. Returns true if the
-    /// user clicked the desktop on them since the last frame.
+    /// Encodes the next frame of the screens into `cmd`. Returns true if a
+    /// click on their desktop ended since the last frame.
     fn encode(
         &mut self,
         mtm: MainThreadMarker,

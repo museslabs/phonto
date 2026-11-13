@@ -276,7 +276,7 @@ impl ScreenObserver {
                 // macOS renames a screen when a monitor of the same model
                 // connects or disconnects. It then stops drawing our window on
                 // it until it's ordered front again.
-                surface.window.makeKeyAndOrderFront(None);
+                surface.window.orderFront(None);
                 surface.name = name;
                 // Show what the screen is now assigned, as a restart would.
                 // With no assignment it keeps its wallpaper.
