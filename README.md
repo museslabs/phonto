@@ -420,8 +420,9 @@ reads it through the GStreamer PulseAudio plugin, which also works with
 PipeWire through `pipewire-pulse`. On Debian or Ubuntu, install
 `gstreamer1.0-pulseaudio`. Arch and Fedora include the plugin in their
 GStreamer good plugins package.
-phonto selects the default output when it starts. If you change outputs,
-restart phonto. If the monitor is not available, phonto logs a warning and
+phonto asks the sound server for the default output every 2 seconds. When
+you change the default output, phonto reads the monitor of the new output.
+If the monitor is not available, phonto logs a warning and
 draws the scene without audio. `dump` always draws without audio. While
 phonto reads the monitor, the sound server keeps your output device awake. A
 battery pause stops the reading.
