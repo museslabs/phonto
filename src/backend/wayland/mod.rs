@@ -405,6 +405,7 @@ impl Backend for WaylandBackend {
         let mut last_battery_check = Instant::now();
         log_pause_state(paused, &options.pause);
         pause_readers(paused, audio.as_ref(), &sources);
+        self.state.set_paused(paused);
 
         loop {
             if last_battery_check.elapsed() >= BATTERY_POLL_INTERVAL {
@@ -414,6 +415,7 @@ impl Backend for WaylandBackend {
                     paused = new_paused;
                     log_pause_state(paused, &options.pause);
                     pause_readers(paused, audio.as_ref(), &sources);
+                    self.state.set_paused(paused);
                 }
                 last_battery_check = Instant::now();
             }
@@ -1165,6 +1167,8 @@ struct State {
     pointer_enter: Option<(u32, u32)>,
     /// True while the cursor is a hand, over an action.
     hand: bool,
+    /// True during a battery pause. A click then does nothing.
+    paused: bool,
     detached_surface_idxs: Vec<usize>,
     detached_targets: Vec<procedural::Target>,
 }
@@ -1283,6 +1287,7 @@ impl State {
             desktop_hover: None,
             pointer_enter: None,
             hand: false,
+            paused: false,
             detached_surface_idxs: Vec::new(),
             detached_targets: Vec::new(),
         }
@@ -1311,6 +1316,20 @@ impl State {
         } else if !seat.has_pointer {
             seat.release_pointer();
         }
+    }
+
+    /// Starts or ends a battery pause. A click during the pause does
+    /// nothing. When the pause ends, the clicks that still wait for a frame
+    /// go.
+    fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        if paused {
+            return;
+        }
+        for o in self.outputs.values_mut() {
+            o.pointer.forget_clicks();
+        }
+        self.desktop_pointer.forget_clicks();
     }
 
     /// Shows a hand over an action, and the normal arrow elsewhere.
@@ -1680,6 +1699,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
             } => {
                 let pressed =
                     matches!(button_state, WEnum::Value(wl_pointer::ButtonState::Pressed));
+                // A click during a battery pause does nothing, because its
+                // action can only run when the pause ends, minutes later.
+                if pressed && state.paused {
+                    return;
+                }
                 if let Some(o) = state.focused_output() {
                     o.pointer.button(button, pressed);
                 }
