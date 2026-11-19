@@ -8,6 +8,7 @@ use anyhow::{Context, anyhow, bail};
 use glow::HasContext;
 
 use super::gl_renderer::{GlRenderer, TextureRef};
+use super::keyboard::{KEYS, Rows};
 use crate::procedural::{
     self, BufferFormat, BufferSize, Filter, FrameInputs, Input, MAX_CHANNELS, Pack, Pass, PassKind,
     Texture, Wrap,
@@ -32,6 +33,8 @@ pub struct Program {
     action_buffer: Option<usize>,
     /// The labels of the actions, if the pack has actions.
     labels: Option<ActionLabels>,
+    /// The keyboard texture, if a pass has a keyboard channel.
+    keyboard: Option<glow::Texture>,
 }
 
 /// The `iActionLabels` texture, on the texture unit after the channels.
@@ -152,6 +155,7 @@ impl Program {
             render_scale: pack.render_scale,
             action_buffer: pack.actions.as_ref().map(|a| a.buffer),
             labels: None,
+            keyboard: None,
         };
         if let Err(e) = program.build(gl, pack) {
             program.destroy(gl);
@@ -178,6 +182,9 @@ impl Program {
                 texture: upload_labels(gl, &texels, count)?,
                 count,
             });
+        }
+        if reads_keyboard(pack) {
+            self.keyboard = Some(upload_keyboard(gl)?);
         }
         for buffer in &pack.buffers {
             let compiled = self.compile_pass(gl, pack, &buffer.pass, PassKind::Buffer)?;
@@ -489,6 +496,12 @@ impl Program {
                         let v = &self.videos[i];
                         (v.texture, v.width, v.height)
                     }
+                    Input::Keyboard => {
+                        let texture = self
+                            .keyboard
+                            .expect("`build` makes the texture for a keyboard channel");
+                        (texture, KEYS as u32, 3)
+                    }
                 };
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                 gl.bind_sampler(unit as u32, Some(channel.sampler));
@@ -623,6 +636,30 @@ impl Program {
         Ok(())
     }
 
+    /// Writes the rows of `Keyboard::take_frame` into the keyboard texture.
+    /// The context must be current.
+    pub fn update_keyboard(&self, gl: &glow::Context, rows: &Rows) {
+        let Some(texture) = self.keyboard else {
+            return;
+        };
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                KEYS as i32,
+                3,
+                glow::RED,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(rows.as_flattened())),
+            );
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+    }
+
     /// True if the actions buffer draws only once, so the actions do not move
     /// until the target changes.
     pub fn actions_are_static(&self) -> bool {
@@ -677,6 +714,9 @@ impl Program {
             }
             if let Some(labels) = self.labels {
                 gl.delete_texture(labels.texture);
+            }
+            if let Some(keyboard) = self.keyboard {
+                gl.delete_texture(keyboard);
             }
             for (_, s) in self.samplers {
                 gl.delete_sampler(s);
@@ -896,6 +936,44 @@ fn upload_labels(gl: &glow::Context, texels: &[u8], count: usize) -> anyhow::Res
             glow::TEXTURE_MAG_FILTER,
             glow::NEAREST as i32,
         );
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        Ok(texture)
+    }
+}
+
+/// True if a pass of `pack` has a keyboard channel.
+pub fn reads_keyboard(pack: &Pack) -> bool {
+    pack.buffers
+        .iter()
+        .map(|b| &b.pass)
+        .chain([&pack.image])
+        .flat_map(|pass| &pass.channels)
+        .any(|c| c.input == Input::Keyboard)
+}
+
+/// Makes the keyboard texture with no key down. Each texel is one byte, in
+/// the red channel. Unlike the images, the rows are not turned over: row 0
+/// of the data is the row that `texelFetch(iChannelN, ivec2(code, 0), 0)`
+/// reads.
+fn upload_keyboard(gl: &glow::Context) -> anyhow::Result<glow::Texture> {
+    let rows: Rows = [[0; KEYS]; 3];
+    unsafe {
+        let texture = gl.create_texture().map_err(|e| anyhow!(e))?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::R8 as i32,
+            KEYS as i32,
+            3,
+            0,
+            glow::RED,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(rows.as_flattened())),
+        );
+        // One level and no mipmaps, so the texture is complete.
+        set_texture_params(gl, glow::NEAREST);
         gl.bind_texture(glow::TEXTURE_2D, None);
         Ok(texture)
     }

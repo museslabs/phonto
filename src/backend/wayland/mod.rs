@@ -3,6 +3,7 @@ mod battery_observer;
 mod color_scheme;
 mod decoder;
 mod gl_renderer;
+mod keyboard;
 mod procedural;
 
 use std::{
@@ -19,7 +20,8 @@ use gstreamer_gl as gst_gl;
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum, delegate_noop,
     protocol::{
-        wl_callback, wl_compositor, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface,
+        wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat,
+        wl_surface,
     },
 };
 use wayland_protocols::wp::cursor_shape::v1::client::{
@@ -30,6 +32,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_l
 
 use self::battery_observer::Battery;
 use self::gl_renderer::{GlRenderer, TextureRef};
+use self::keyboard::{Keyboards, Rows};
 use super::{Backend, DumpRequest, PauseMode, RunOptions};
 use crate::config::{ActionCommand, InputCommand};
 use crate::displays::DisplayInfo;
@@ -77,6 +80,10 @@ impl WaylandBackend {
 }
 
 const BATTERY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The first version of the layer shell protocol that has `OnDemand`
+/// keyboard interactivity. Older versions can only take all the keys.
+const KEYBOARD_LAYER_SHELL_VERSION: u32 = 4;
 
 /// The image size of `dump` for a procedural wallpaper without `--size`.
 const DEFAULT_DUMP_SIZE: (u32, u32) = (1920, 1080);
@@ -304,6 +311,34 @@ impl Backend for WaylandBackend {
             .clone()
             .context("zwlr_layer_shell_v1 missing")?;
 
+        let reads_keys: Vec<bool> = specs
+            .iter()
+            .map(|s| matches!(s, SourceSpec::Procedural(p) if procedural::reads_keyboard(p)))
+            .collect();
+        if reads_keys.contains(&true) {
+            self.state.enable_keyboard(&self.qh);
+        }
+
+        // Gives an output its source and its layer surface.
+        let keyboard_enabled = self.state.keyboard_enabled;
+        let qh = self.qh.clone();
+        let attach = |name: u32, o: &mut OutputState| {
+            o.source_idx = if mirror {
+                Some(0)
+            } else {
+                source_for.get(&o.name).copied()
+            };
+            let reads_keyboard = keyboard_enabled && o.source_idx.is_some_and(|i| reads_keys[i]);
+            o.create_layer_surface(
+                name,
+                &compositor,
+                &layer_shell,
+                options.layer,
+                reads_keyboard,
+                &qh,
+            );
+        };
+
         // Pick the outputs to render on, in stable order by name.
         let mut chosen: Vec<u32> = self
             .state
@@ -317,15 +352,8 @@ impl Backend for WaylandBackend {
             bail!("no matching wl_outputs to render on");
         }
 
-        // Create one layer surface per chosen output.
         for &name in &chosen {
-            let o = self.state.outputs.get_mut(&name).unwrap();
-            o.create_layer_surface(name, &compositor, &layer_shell, options.layer, &self.qh);
-            o.source_idx = if mirror {
-                Some(0)
-            } else {
-                source_for.get(&o.name).copied()
-            };
+            attach(name, self.state.outputs.get_mut(&name).unwrap());
         }
 
         // Block until every chosen output has configured, dropping outputs
@@ -370,6 +398,7 @@ impl Backend for WaylandBackend {
                 )),
             });
         }
+        self.state.keyboards = Keyboards::new((0..sources.len()).filter(|&i| reads_keys[i]));
 
         // One capture gives audio to all the sources that use it, on all
         // outputs.
@@ -440,13 +469,7 @@ impl Backend for WaylandBackend {
                 .map(|(name, _)| *name)
                 .collect();
             for &name in &new_outputs {
-                let o = self.state.outputs.get_mut(&name).unwrap();
-                o.create_layer_surface(name, &compositor, &layer_shell, options.layer, &self.qh);
-                o.source_idx = if mirror {
-                    Some(0)
-                } else {
-                    source_for.get(&o.name).copied()
-                };
+                attach(name, self.state.outputs.get_mut(&name).unwrap());
             }
             while self.state.any_unconfigured(&mut new_outputs) {
                 self.eq
@@ -545,7 +568,13 @@ impl Backend for WaylandBackend {
                 let tick = match source {
                     Source::Procedural(p) => {
                         let tick = p.clock.tick(now);
-                        p.upload(&mut renderer, first_surface, f64::from(tick.delta))?;
+                        let keys = self.state.keyboards.take_frame(source_idx);
+                        p.upload(
+                            &mut renderer,
+                            first_surface,
+                            f64::from(tick.delta),
+                            keys.as_ref(),
+                        )?;
                         Some(tick)
                     }
                     Source::Video(_) => None,
@@ -704,6 +733,12 @@ impl Backend for WaylandBackend {
                             renderer.present(surface_idx, texture, ScaleMode::Stretch)?;
                         }
                     }
+                    // A new surface that asks for the keyboard can get it at
+                    // once, as on Hyprland. So a surface asks only after its
+                    // first frame.
+                    if !self.state.ask_keyboard_on_click {
+                        o.ask_for_keyboard(true);
+                    }
                 }
                 if let Source::Procedural(p) = source {
                     p.limiter.rendered(now);
@@ -814,14 +849,16 @@ impl ProceduralSource {
         })
     }
 
-    /// Uploads the new images of watched files, and the video frames that
-    /// are due after `delta` more seconds of playback. The context becomes
-    /// current on `surface` if there is something to upload.
+    /// Uploads the new images of watched files, the video frames that are
+    /// due after `delta` more seconds of playback, and the keys if they
+    /// changed. The context becomes current on `surface` if there is
+    /// something to upload.
     fn upload(
         &mut self,
         renderer: &mut GlRenderer,
         surface: usize,
         delta: f64,
+        keys: Option<&Rows>,
     ) -> anyhow::Result<()> {
         let updates = self
             .watcher
@@ -836,12 +873,16 @@ impl ProceduralSource {
             .collect();
         if updates.is_empty()
             && frames.is_empty()
+            && keys.is_none()
             && self.videos.iter().all(|v| v.copying.is_empty())
         {
             return Ok(());
         }
         renderer.make_current(surface)?;
         let gl = renderer.gl();
+        if let Some(keys) = keys {
+            self.program.update_keyboard(gl, keys);
+        }
         for video in &mut self.videos {
             video.release_copied(gl, MAX_COPYING);
         }
@@ -1167,6 +1208,13 @@ struct State {
     pointer_enter: Option<(u32, u32)>,
     /// True while the cursor is a hand, over an action.
     hand: bool,
+    /// If true, bind the keyboard of each seat that has one. It is false
+    /// unless a wallpaper has a keyboard channel.
+    keyboard_enabled: bool,
+    keyboards: Keyboards,
+    /// True if a surface asks for the keyboard only after a click on it. See
+    /// `State::new`.
+    ask_keyboard_on_click: bool,
     /// True during a battery pause. A click then does nothing.
     paused: bool,
     detached_surface_idxs: Vec<usize>,
@@ -1178,6 +1226,8 @@ struct SeatState {
     has_pointer: bool,
     pointer: Option<wl_pointer::WlPointer>,
     cursor: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
+    has_keyboard: bool,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
 }
 
 struct OutputState {
@@ -1201,6 +1251,11 @@ struct OutputState {
     pointer: Pointer,
     /// Where phonto last read the action under `pointer`.
     hover: Option<[f64; 2]>,
+    /// True if the wallpaper of this output has a keyboard channel.
+    reads_keyboard: bool,
+    /// True while the layer surface asks for the keyboard, with `OnDemand`
+    /// interactivity.
+    asks_keyboard: bool,
 }
 
 impl OutputState {
@@ -1223,6 +1278,8 @@ impl OutputState {
             target: None,
             pointer: Pointer::default(),
             hover: None,
+            reads_keyboard: false,
+            asks_keyboard: false,
         }
     }
 
@@ -1240,6 +1297,7 @@ impl OutputState {
         compositor: &wl_compositor::WlCompositor,
         layer_shell: &zwlr_layer_shell_v1::ZwlrLayerShellV1,
         layer: LayerMode,
+        reads_keyboard: bool,
         qh: &QueueHandle<State>,
     ) {
         let wlr_layer = match layer {
@@ -1268,6 +1326,29 @@ impl OutputState {
 
         self.wl_surface = Some(wl_surface);
         self.layer_surface = Some(layer_surface);
+        self.reads_keyboard = reads_keyboard;
+        self.asks_keyboard = false;
+    }
+
+    /// Starts or stops asking for the keyboard. While the surface asks, the
+    /// compositor can give it the keyboard.
+    fn ask_for_keyboard(&mut self, ask: bool) {
+        if !self.reads_keyboard || self.asks_keyboard == ask {
+            return;
+        }
+        let (Some(layer_surface), Some(wl_surface)) = (&self.layer_surface, &self.wl_surface)
+        else {
+            return;
+        };
+        let interactivity = if ask {
+            zwlr_layer_surface_v1::KeyboardInteractivity::OnDemand
+        } else {
+            zwlr_layer_surface_v1::KeyboardInteractivity::None
+        };
+        layer_surface.set_keyboard_interactivity(interactivity);
+        // Without a commit, the request waits for the next frame.
+        wl_surface.commit();
+        self.asks_keyboard = ask;
     }
 }
 
@@ -1287,6 +1368,15 @@ impl State {
             desktop_hover: None,
             pointer_enter: None,
             hand: false,
+            keyboard_enabled: false,
+            keyboards: Keyboards::default(),
+            // Hyprland gives the keyboard to a surface that asks for it as
+            // soon as the pointer moves over the surface. So there, a
+            // wallpaper asks only after a click on it, to get the keyboard
+            // only after a click, as on macOS. Other compositors usually
+            // give the keyboard after a click, as the layer shell protocol
+            // suggests.
+            ask_keyboard_on_click: std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
             paused: false,
             detached_surface_idxs: Vec::new(),
             detached_targets: Vec::new(),
@@ -1315,6 +1405,57 @@ impl State {
             seat.pointer = Some(pointer);
         } else if !seat.has_pointer {
             seat.release_pointer();
+        }
+    }
+
+    /// Binds the keyboards, for a wallpaper with a keyboard channel. A
+    /// compositor with an older layer shell cannot give the keyboard to a
+    /// wallpaper.
+    fn enable_keyboard(&mut self, qh: &QueueHandle<Self>) {
+        let version = self.layer_shell.as_ref().map_or(0, Proxy::version);
+        if version < KEYBOARD_LAYER_SHELL_VERSION {
+            log::warn!(
+                "this compositor cannot give the keyboard to a wallpaper. It offers version \
+                 {version} of the layer shell protocol, and the keyboard needs version \
+                 {KEYBOARD_LAYER_SHELL_VERSION}. The keyboard channels stay empty."
+            );
+            return;
+        }
+        self.keyboard_enabled = true;
+        let seats: Vec<u32> = self.seats.keys().copied().collect();
+        for name in seats {
+            self.sync_keyboard(name, qh);
+        }
+    }
+
+    /// Binds or releases the keyboard of the seat to match its
+    /// capabilities.
+    fn sync_keyboard(&mut self, seat_name: u32, qh: &QueueHandle<Self>) {
+        let Some(seat) = self.seats.get_mut(&seat_name) else {
+            return;
+        };
+        if self.keyboard_enabled && seat.has_keyboard && seat.keyboard.is_none() {
+            seat.keyboard = Some(seat.seat.get_keyboard(qh, seat_name));
+        } else if !seat.has_keyboard {
+            seat.release_keyboard();
+            // A keyboard can go without a `Leave`, so its keys go up here.
+            self.keyboard_left(seat_name);
+        }
+    }
+
+    /// The keyboard of a seat left its surface, or went away. On Hyprland,
+    /// the surface that it left stops asking for the keyboard, so that it
+    /// needs a new click.
+    fn keyboard_left(&mut self, seat_name: u32) {
+        let Some(output) = self.keyboards.leave(seat_name) else {
+            return;
+        };
+        log::info!("the wallpaper gave back the keyboard");
+        if self.ask_keyboard_on_click
+            && !self.keyboards.focuses(output)
+            && let Some(o) = self.outputs.get_mut(&output)
+        {
+            o.ask_for_keyboard(false);
         }
     }
 
@@ -1378,6 +1519,7 @@ impl State {
             if self.pointer_focus == Some(name) {
                 self.pointer_focus = None;
             }
+            self.keyboards.remove_output(name);
             let label = if removed.name.is_empty() {
                 format!("wl_output#{name}")
             } else {
@@ -1464,6 +1606,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                             has_pointer: false,
                             pointer: None,
                             cursor: None,
+                            has_keyboard: false,
+                            keyboard: None,
                         },
                     );
                 }
@@ -1475,6 +1619,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             wl_registry::Event::GlobalRemove { name } => {
                 if let Some(mut seat) = state.seats.remove(&name) {
                     seat.release_pointer();
+                    seat.release_keyboard();
+                    state.keyboard_left(name);
                     return;
                 }
                 state.remove_output(name, "output removed");
@@ -1606,6 +1752,14 @@ impl SeatState {
             pointer.release();
         }
     }
+
+    fn release_keyboard(&mut self) {
+        if let Some(keyboard) = self.keyboard.take()
+            && keyboard.version() >= 3
+        {
+            keyboard.release();
+        }
+    }
 }
 
 impl Dispatch<wl_seat::WlSeat, u32> for State {
@@ -1623,8 +1777,10 @@ impl Dispatch<wl_seat::WlSeat, u32> for State {
         {
             if let Some(seat) = state.seats.get_mut(seat_name) {
                 seat.has_pointer = caps.contains(wl_seat::Capability::Pointer);
+                seat.has_keyboard = caps.contains(wl_seat::Capability::Keyboard);
             }
             state.sync_pointer(*seat_name, qh);
+            state.sync_keyboard(*seat_name, qh);
         }
     }
 }
@@ -1673,8 +1829,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 state.desktop_pointer.enter(surface_x + x, surface_y + y);
             }
             wl_pointer::Event::Leave { .. } => {
+                // If a click made the surface ask for the keyboard, but the
+                // surface did not get it, the surface stops asking when the
+                // pointer leaves it.
+                let stop_asking = state.ask_keyboard_on_click
+                    && state
+                        .pointer_focus
+                        .is_some_and(|o| !state.keyboards.focuses(o));
                 if let Some(o) = state.focused_output() {
                     o.pointer.leave();
+                    if stop_asking {
+                        o.ask_for_keyboard(false);
+                    }
                 }
                 state.desktop_pointer.leave();
                 state.pointer_focus = None;
@@ -1704,11 +1870,67 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                 if pressed && state.paused {
                     return;
                 }
+                let on_click = state.ask_keyboard_on_click;
                 if let Some(o) = state.focused_output() {
                     o.pointer.button(button, pressed);
+                    // On Hyprland, the keyboard comes with the next motion of
+                    // the pointer.
+                    if pressed && on_click {
+                        o.ask_for_keyboard(true);
+                    }
                 }
                 state.desktop_pointer.button(button, pressed);
             }
+            _ => {}
+        }
+    }
+}
+
+/// The user data of a keyboard is the registry name of its seat.
+impl Dispatch<wl_keyboard::WlKeyboard, u32> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        seat_name: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_keyboard::Event::Enter { surface, keys, .. } => {
+                let Some((&output, o)) = state
+                    .outputs
+                    .iter()
+                    .find(|(_, o)| o.wl_surface.as_ref() == Some(&surface))
+                else {
+                    return;
+                };
+                // `keys` holds the evdev codes of the keys that are down, as
+                // 32-bit values in the byte order of this machine.
+                let held = keys
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| u32::from_ne_bytes(*b));
+                if state
+                    .keyboards
+                    .enter(*seat_name, output, o.source_idx, held)
+                {
+                    log::info!("the wallpaper has the keyboard");
+                }
+            }
+            wl_keyboard::Event::Leave { .. } => state.keyboard_left(*seat_name),
+            wl_keyboard::Event::Key {
+                key,
+                state: key_state,
+                ..
+            } => {
+                let down = matches!(key_state, WEnum::Value(wl_keyboard::KeyState::Pressed));
+                state.keyboards.key(*seat_name, key, down);
+            }
+            // phonto does not read the keymap, because the key codes follow
+            // the place of each key. The file of the keymap closes when the
+            // event drops. The modifier keys also come as `Key` events.
             _ => {}
         }
     }
