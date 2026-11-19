@@ -696,7 +696,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 When you press the left button, phonto reads the actions buffer under the
 pointer, in the last frame that you saw. Then it runs the command of that
 action. The other passes get the same click in `iMouse`, so the image pass
-can show it. On Wayland, the cursor is a hand while the pointer is over an
+can show it. A click during a battery pause runs no action, and `iMouse` does
+not get it. On Wayland, the cursor is a hand while the pointer is over an
 action.
 
 On macOS, only a click on the desktop runs an action, as only such a click
