@@ -21,6 +21,12 @@ toml = "0.8"
 rand = "0.9"
 image = { version = "0.25.10", features = ["png"] }
 libc = "0.2"
+# Wallpapers from a gallery such as Pinakothiki: the HTTPS downloads, the
+# JSON index, and the checksums of its files. macOS also writes JSON for the
+# live lock screen, and needs the order of its keys.
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = { version = "0.11", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 glow = "0.17.0"
@@ -38,7 +44,6 @@ glutin = "0.32.3"
 raw-window-handle = "0.6.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v5"] }
 objc2 = "0.6"
