@@ -418,7 +418,10 @@ impl ScreenObserver {
             // The screen stops changing until a frame draws. Say so once.
             Err(e) => {
                 if !p.failing {
-                    log::error!("procedural frame on {}: {e:#}", surface.name);
+                    log::error!(
+                        "frame of the interactive wallpaper on {}: {e:#}",
+                        surface.name
+                    );
                     p.failing = true;
                 }
                 return;

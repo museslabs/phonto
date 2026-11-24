@@ -124,7 +124,7 @@ impl ProceduralSource {
     ) -> anyhow::Result<Self> {
         let pack = Pack::load(Path::new(path))?;
         log::info!(
-            "procedural wallpaper `{}`: {} buffer pass(es), {} fps cap, render scale {}",
+            "interactive wallpaper `{}`: {} buffer pass(es), {} fps cap, render scale {}",
             pack.name,
             pack.buffers.len(),
             pack.fps.map_or_else(|| "no".to_string(), |f| f.to_string()),

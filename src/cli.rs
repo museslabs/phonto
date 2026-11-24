@@ -292,7 +292,7 @@ pub struct PlayArgs {
 #[derive(Args, Debug)]
 pub struct SourceArgs {
     /// Path to the video file, streaming URL (http, https, rtsp, rtmp),
-    /// YouTube URL (resolved via yt-dlp), procedural wallpaper (a `.glsl`
+    /// YouTube URL (resolved via yt-dlp), interactive wallpaper (a `.glsl`
     /// file, or a directory with a manifest.toml), or a wallpaper from the
     /// Pinakothiki gallery (`pinakothiki:<id>`, or the URL of its page).
     #[arg(conflicts_with_all = ["rand", "display", "display_rand"])]
@@ -348,7 +348,7 @@ impl From<SourceArgs> for Request {
 // How and where frames are drawn.
 #[derive(Args, Debug)]
 pub struct RenderArgs {
-    /// How to fit the video to the screen. Procedural wallpapers always fill it.
+    /// How to fit the video to the screen. Interactive wallpapers always fill it.
     #[arg(long, value_enum, default_value_t = ScaleMode::Fill)]
     pub scale: ScaleMode,
 
@@ -357,7 +357,7 @@ pub struct RenderArgs {
     #[arg(long, value_enum, default_value_t = crate::backend::wayland::LayerMode::Background)]
     pub layer: crate::backend::wayland::LayerMode,
 
-    /// Draw a procedural wallpaper across all displays as one scene, instead
+    /// Draw an interactive wallpaper across all displays as one scene, instead
     /// of one copy on each display.
     #[arg(long, conflicts_with_all = ["display", "display_rand"])]
     pub span: bool,
@@ -435,7 +435,7 @@ impl From<YtDlpArgs> for YtDlpOpts {
 
 #[derive(Args, Debug)]
 pub struct DumpArgs {
-    /// Video, URL, procedural wallpaper, or `pinakothiki:<id>` to take the
+    /// Video, URL, interactive wallpaper, or `pinakothiki:<id>` to take the
     /// frame from.
     #[arg()]
     pub path: String,
@@ -450,7 +450,7 @@ pub struct DumpArgs {
     #[arg(long, value_name = "SECONDS", default_value = "0.0", value_parser = parse_seek_seconds)]
     pub at: f64,
 
-    /// Image size for procedural wallpapers (default 1920x1080). Videos keep
+    /// Image size for interactive wallpapers (default 1920x1080). Videos keep
     /// their own size.
     #[arg(long, value_name = "WIDTHxHEIGHT", value_parser = parse_size)]
     pub size: Option<(u32, u32)>,

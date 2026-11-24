@@ -216,7 +216,9 @@ impl Backend for WaylandBackend {
             return self.dump_procedural(request);
         }
         if request.size.is_some() {
-            log::warn!("--size only applies to procedural wallpapers. Videos keep their own size.");
+            log::warn!(
+                "--size only applies to interactive wallpapers. Videos keep their own size."
+            );
         }
         let DumpRequest { path, at, out, .. } = request;
 
@@ -425,7 +427,7 @@ impl Backend for WaylandBackend {
             .then(color_scheme::watch);
         if options.span && sources.iter().any(|s| matches!(s, Source::Video(_))) {
             log::warn!(
-                "--span only applies to procedural wallpapers. A video plays on each display."
+                "--span only applies to interactive wallpapers. A video plays on each display."
             );
         }
 
@@ -773,7 +775,7 @@ impl SourceSpec {
         }
         let pack = Pack::load(Path::new(&path))?;
         log::info!(
-            "procedural wallpaper `{}`: {} buffer pass(es), {} fps cap, render scale {}",
+            "interactive wallpaper `{}`: {} buffer pass(es), {} fps cap, render scale {}",
             pack.name,
             pack.buffers.len(),
             pack.fps.map_or_else(|| "no".to_string(), |f| f.to_string()),
