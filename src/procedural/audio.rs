@@ -92,7 +92,7 @@ impl Analyzer {
         let edge = |band: usize| {
             LOWEST_HZ * (HIGHEST_HZ / LOWEST_HZ).powf(band as f32 / SPECTRUM_BANDS as f32)
         };
-        for i in 0..SPECTRUM_BANDS {
+        for (i, band) in self.frame.spectrum.iter_mut().enumerate() {
             let (low, high) = (edge(i), edge(i + 1));
             let start = ((low * WINDOW as f32 / SAMPLE_RATE).floor() as usize).max(1);
             let end =
@@ -106,7 +106,7 @@ impl Analyzer {
             } else {
                 ((20.0 * amplitude.max(1e-8).log10() + 72.0) / 66.0).clamp(0.0, 1.0)
             };
-            smooth(&mut self.frame.spectrum[i], target);
+            smooth(band, target);
             let group = if low < 220.0 {
                 0
             } else if low < 3500.0 {
