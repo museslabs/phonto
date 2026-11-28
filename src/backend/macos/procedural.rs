@@ -1325,6 +1325,72 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dump_draws_variables_and_inputs_with_metal_names() {
+        let packs = [
+            (
+                "new",
+                "void mainImage(out vec4 c, in vec2 p) {
+                    vec4 old = vec4(0.25);
+                    vec4 new = old * 2.0;
+                    c = new;
+                }",
+                "",
+                [128, 128, 128, 255],
+            ),
+            (
+                "select",
+                "void mainImage(out vec4 c, in vec2 p) {
+                    float select = 0.5;
+                    bvec3 b = bvec3(p.x > 1.0, false, true);
+                    c = vec4(mix(vec3(0.0), vec3(select), b), 1.0);
+                }",
+                "",
+                [0, 0, 128, 255],
+            ),
+            (
+                "input-new",
+                "void mainImage(out vec4 c, in vec2 p) { c = vec4(iInput.new, 0.0, 0.0, 1.0); }",
+                "[inputs]\nnew = 0.5\n",
+                [128, 0, 0, 255],
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (name, image, inputs, expected) in packs {
+            let dir =
+                std::env::temp_dir().join(format!("phonto-metal-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("image.glsl"), image).unwrap();
+            std::fs::write(
+                dir.join(procedural::MANIFEST),
+                format!("[image]\nshader = \"image.glsl\"\n{inputs}"),
+            )
+            .unwrap();
+            let out = dir.join("frame.png");
+            let drawn = dump(
+                DumpRequest {
+                    path: dir.to_string_lossy().into_owned(),
+                    at: 0.0,
+                    out: out.clone(),
+                    size: Some((4, 2)),
+                    location: None,
+                    inputs: Vec::new(),
+                    actions: Vec::new(),
+                },
+                0.0,
+            )
+            .map(|()| image::open(&out).unwrap().to_rgba8().get_pixel(0, 0).0);
+            std::fs::remove_dir_all(&dir).unwrap();
+            match drawn {
+                Ok(pixel) if pixel.iter().zip(expected).all(|(&p, e)| p.abs_diff(e) <= 1) => {}
+                Ok(pixel) => failures.push(format!("{name}: {pixel:?}")),
+                Err(e) => failures.push(format!("{name}: {e:#}")),
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     /// A pack with actions in its own temporary directory.
     fn actions_pack(name: &str, image: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("phonto-metal-{name}-{}", std::process::id()));
