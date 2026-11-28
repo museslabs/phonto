@@ -1,0 +1,17 @@
+# A macOS pack. Only macOS has keyboard channels so far, and Wayland refuses
+# to load the pack.
+
+name = "Keyboard demo"
+fps = 60
+
+# One texel of state: where the dot is.
+[[buffer]]
+name = "pos"
+shader = "pos.glsl"
+size = [1, 1]
+format = "rgba32f"
+channels = ["pos", { keyboard = true }]
+
+[image]
+shader = "image.glsl"
+channels = ["pos", { keyboard = true }]

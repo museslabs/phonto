@@ -5,7 +5,7 @@
 
 > phonto (/'fon.to/) — from Greek φόντο: background
 
-GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust. Also supports live lockscreen wallpapers on macOS, and interactive procedural (shader) wallpapers on Wayland.
+GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust. Also supports live lockscreen wallpapers on macOS, and interactive procedural (shader) wallpapers.
 
 
 ![example](./mac-example.gif)
@@ -40,6 +40,10 @@ Using cargo:
 cargo install phonto
 ```
 
+On macOS, run `MACOSX_DEPLOYMENT_TARGET=14.2 cargo install phonto` instead. A
+macOS older than 14.2 then stops phonto at launch, instead of when an audio
+pack starts.
+
 From source:
 
 ```bash
@@ -73,7 +77,7 @@ sudo dnf install gstreamer1-vaapi gstreamer1-plugins-base gstreamer1-plugins-goo
 
 ### macOS
 
-No external dependencies. phonto links against system frameworks (`AVFoundation`, `CoreMedia`, `AppKit`, `QuartzCore`). Decoding goes through VideoToolbox automatically for codecs the OS supports (H.264, HEVC, ProRes, etc.).
+No external dependencies. phonto needs macOS 14.2 or later, and links against system frameworks (`AVFoundation`, `CoreMedia`, `AppKit`, `QuartzCore`, `CoreAudio`). Decoding goes through VideoToolbox automatically for codecs the OS supports (H.264, HEVC, ProRes, etc.).
 
 ## Usage
 
@@ -94,8 +98,8 @@ phonto https://example.com/stream.m3u8
 phonto rtsp://camera.local/stream
 ```
 
-Play a procedural wallpaper, a GLSL shader that phonto draws live (Wayland
-only, see [Procedural wallpapers](#procedural-wallpapers-wayland)):
+Play a procedural wallpaper, a GLSL shader that phonto draws live (see
+[Procedural wallpapers](#procedural-wallpapers)):
 ```bash
 phonto examples/procedural/plasma.glsl
 phonto examples/procedural/life        # a pack directory with a manifest.toml
@@ -258,7 +262,8 @@ random = true
 ```
 
 Each `[[display]]` needs exactly one of `path` or `random = true`. Phonto errors
-at startup if both or neither are set.
+at startup if both or neither are set. An entry that only sets `pause_behind`
+plays nothing (see [Pausing behind windows](#pausing-behind-windows-macos)).
 
 A `[[display]]` whose display is not currently connected is not an error.
 Phonto waits and attaches the wallpaper when that display appears.
@@ -294,7 +299,7 @@ Run `phonto displays` on each OS once to copy the right native ID into the
 alias. The same dotfile then works on both. Either field is optional, so a
 laptop-only alias can leave the other one out.
 
-## Procedural wallpapers (Wayland)
+## Procedural wallpapers
 
 phonto can also draw a GLSL shader as your wallpaper, live, instead of a
 video. The shaders use the conventions of [Shadertoy](https://www.shadertoy.com),
@@ -378,10 +383,13 @@ cat examples/procedural/system/inputs.toml >> ~/.config/phonto/config.toml
 ```
 
 The album example shows the cover of the music that plays, on a background of
-its own colors. A line under the cover shows how far the track is. It needs
-`playerctl`, which reads every player that supports MPRIS, such as Spotify,
-Firefox, mpv, and VLC. Its input command is a script. It prints whether music
-plays and how far the track is, and it keeps the cover in
+its own colors. A line under the cover shows how far the track is. On Linux,
+it needs `playerctl`, which reads every player that supports MPRIS, such as
+Spotify, Firefox, mpv, and VLC. On macOS, it needs `media-control`
+(`brew install media-control`), which reads what macOS shows as Now Playing,
+such as Spotify, Music, or a video in a browser. A browser may send no cover,
+or no position, for a video. Its input command is a script. It prints whether
+music plays and how far the track is, and it keeps the cover in
 `~/.cache/phonto/cover`, which the pack watches. Set it up first:
 
 ```bash
@@ -406,25 +414,33 @@ A tape without a label shows its own name. To preview a tape that is out or
 clicked, for example with `dump`, set `DEMO_TAPE` and `DEMO_CLICK` at the top
 of `examples/procedural/zero-tv/common.glsl`.
 
-A pack that sets `audio = true` reads the monitor of your default output. A
-monitor is a copy of the sound that goes to your speakers. phonto reads it
-through the GStreamer PulseAudio plugin, which also works with PipeWire
-through `pipewire-pulse`. On Debian or Ubuntu, install
+On Linux, a pack that sets `audio = true` reads the monitor of your default
+output. A monitor is a copy of the sound that goes to your speakers. phonto
+reads it through the GStreamer PulseAudio plugin, which also works with
+PipeWire through `pipewire-pulse`. On Debian or Ubuntu, install
 `gstreamer1.0-pulseaudio`. Arch and Fedora include the plugin in their
 GStreamer good plugins package.
-
 phonto selects the default output when it starts. If you change outputs,
 restart phonto. If the monitor is not available, phonto logs a warning and
 draws the scene without audio. `dump` always draws without audio. While
 phonto reads the monitor, the sound server keeps your output device awake. A
 battery pause stops the reading.
 
+On macOS, phonto reads the sound of all apps through a Core Audio process tap.
+The first time, macOS asks you to allow System Audio Recording for the app
+that started phonto, such as your terminal. If you do not allow it, the tap
+gives silence, and the scene draws without audio. You can allow it later in
+System Settings > Privacy & Security > Screen & System Audio Recording, under
+System Audio Recording Only. The tap keeps reading when you change outputs.
+`dump` draws without audio, and a battery pause stops the reading.
+
 You can use a procedural wallpaper everywhere that you can use a video path:
-`--display ID PATH`, `[[display]].path`, the hyprlock recipe, `--shader`
-post-processing, and `dump`. `--rand` also picks pack directories, and `.glsl`
-files that have a `mainImage` function. A procedural wallpaper always fills the
-screen, so `--scale` has no effect. macOS support is planned, with the same
-format.
+`--display ID PATH`, `[[display]].path`, and `dump`, and on Wayland also the
+hyprlock recipe and `--shader` post-processing. `--rand` also picks pack
+directories, and `.glsl` files that have a `mainImage` function. A procedural
+wallpaper always fills the screen, so `--scale` has no effect. The same
+wallpapers run on Wayland and macOS. Only a pack with a keyboard channel needs
+macOS.
 
 ### One scene across all displays
 
@@ -435,11 +451,12 @@ then shows its own part of the scene:
 phonto --span examples/procedural/koi
 ```
 
-phonto gets the place of each display from the compositor, through the
-xdg-output protocol. `iResolution`, `fragCoord`, `iMouse`, and `iPointer` then
-use the pixels of the whole desktop, so most shaders span without changes. The
-buffers also cover the whole desktop, so a simulation such as the Game of Life
-continues from one display to the next. The cost is the same as one copy on
+On Wayland, phonto gets the place of each display from the compositor,
+through the xdg-output protocol. On macOS, it takes them from the arrangement
+in System Settings > Displays. `iResolution`, `fragCoord`, `iMouse`, and
+`iPointer` then use the pixels of the whole desktop, so most shaders span
+without changes. The buffers also cover the whole desktop, so a simulation
+such as the Game of Life continues from one display to the next. The cost is the same as one copy on
 each display, plus any gaps between the displays.
 
 A centered scene falls on the edge between two displays. `iDisplays` gives
@@ -504,6 +521,9 @@ phonto reads the dark mode setting through the XDG desktop portal. GNOME,
 KDE, and the GTK portal that other desktops use all give it. If no portal
 gives it, `iColorScheme` is 0.
 
+On macOS, `iColorScheme` follows System Settings > Appearance, including
+Auto.
+
 With `iLocation` and `iDate`, a shader can compute the sun. The function
 `sun()` in `examples/procedural/museslabs/common.glsl` gives the height and
 the direction of the sun, and the times of sunrise and sunset. Copy it into
@@ -511,10 +531,21 @@ your pack. Without a `[location]`, `iLocation` is the equator at the middle
 of your time zone, so the sun rises near 06:00 and sets near 18:00. `dump`
 uses the system inputs of the moment that it runs, as it does for `iDate`.
 
-The wallpaper gets the pointer only where no window covers it, because
-Wayland does not tell other clients where the pointer is. A click on the
-wallpaper can also run a command (see [Actions](#actions)). phonto does not
-use keyboard input. `iChannelTime` and `iSampleRate` exist only so that shaders
+On Wayland, the wallpaper gets the pointer only where no window covers it,
+because Wayland does not tell other clients where the pointer is.
+
+On macOS, `iPointer.xy` follows the pointer everywhere on the screen, also
+under windows, because a translucent window shows the wallpaper. `iPointer.z`
+is 1 only where the pointer is over the desktop. A click there presses the
+button of `iMouse`. A click on a window does not. phonto needs no permission
+for this. Finder still gets the click too, so it deselects your desktop icons,
+and with the default setting macOS moves all windows away to show the desktop.
+For wallpapers that you click, such as the koi pond, set System Settings >
+Desktop & Dock > Click wallpaper to reveal desktop to "Only in Stage Manager".
+
+A click on the wallpaper can also run a command (see [Actions](#actions)).
+phonto reads the keyboard only on macOS, through a keyboard channel (see
+[Packs](#packs)). `iChannelTime` and `iSampleRate` exist only so that shaders
 that declare sound inputs compile.
 
 ### Packs
@@ -558,14 +589,25 @@ keys:
 `channels[n]` is the input of `iChannelN`, up to eight channels. A channel is
 a string or a table. A string is a buffer name, or else the path of an image
 in the pack. A table has exactly one of `buffer = "name"`,
-`texture = "file.png"`, or `video = "file.mp4"` (see [Videos](#videos)), and
-optional sampling keys:
+`texture = "file.png"`, `video = "file.mp4"` (see [Videos](#videos)), or
+`keyboard = true`, and optional sampling keys:
 
 | Key | Values | Default |
 |---|---|---|
-| `filter` | `nearest`, `linear`, `mipmap` (only for textures) | `linear` for buffers and videos, `mipmap` for textures |
-| `wrap` | `clamp`, `repeat`, `mirror` | `clamp` for buffers and videos, `repeat` for textures |
+| `filter` | `nearest`, `linear`, `mipmap` (only for textures) | `linear` for buffers and videos, `mipmap` for textures, `nearest` for the keyboard |
+| `wrap` | `clamp`, `repeat`, `mirror` | `clamp` for buffers, videos, and the keyboard, `repeat` for textures |
 | `watch` | `true` loads the image again when its file changes (see [Live images](#live-images)) | `false` |
+
+The keyboard channel works only on macOS so far. It is the keyboard texture
+of Shadertoy: 256 texels wide, one for each JavaScript key code, and 3 rows
+high. Row 0 is 1 while a key is down, row 1 is 1 on the frame after a press,
+and row 2 flips on each press. Read it with
+`texelFetch(iChannelN, ivec2(code, row), 0).x`. A wallpaper only gets the
+keyboard after you click the desktop, as a Shadertoy canvas gets it after a
+click. A click on a window, or a switch to another app, gives the keyboard
+back. While the wallpaper has it, Finder's desktop shortcuts, such as
+<kbd>⇧⌘N</kbd> for a new folder, do not work. phonto needs no permission for
+this.
 
 If a buffer already drew in this frame, a pass that reads it gets the output
 of this frame. If a pass reads itself, or a buffer that draws later, it gets
@@ -653,8 +695,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
 When you press the left button, phonto reads the actions buffer under the
 pointer, in the last frame that you saw. Then it runs the command of that
-action. While the pointer is over an action, the cursor is a hand. The other
-passes get the same click in `iMouse`, so the image pass can show it.
+action. The other passes get the same click in `iMouse`, so the image pass
+can show it. On Wayland, the cursor is a hand while the pointer is over an
+action.
+
+On macOS, only a click on the desktop runs an action, as only such a click
+presses the button of `iMouse`. The cursor stays an arrow over an action,
+because macOS lets only the app in front change the cursor, and phonto runs
+in the background.
 
 Give each action a command in your configuration. The optional `label` is
 the text that the pack shows for the action, for example in a menu:
@@ -671,6 +719,9 @@ name = "terminal"
 label = "Terminal"
 command = "ghostty"
 ```
+
+On macOS, `open -a` starts an app by its name, for example
+`command = "open -a Safari"`.
 
 phonto runs the command with `sh`, in your home directory, in a new session.
 The program continues when phonto stops. A click on an action without a
@@ -738,6 +789,17 @@ image shows the frame at `--at` seconds. If `--at` is longer than the video,
 the video loops. A long `--at` takes more time, because `dump` decodes the
 video up to it.
 
+On macOS, AVFoundation reads the video. It opens MP4 and QuickTime (`.mov`)
+files, but not Matroska (`.mkv`) or WebM. If it cannot open a video, the
+wallpaper and `dump` stop with its reason. A Matroska file with H.264 video
+works after a copy of the stream into MP4, which does not encode it again.
+For HEVC, add `-tag:v hvc1`, because AVFoundation does not decode HEVC that
+is tagged `hev1`:
+
+```bash
+ffmpeg -i rain.mkv -map 0:v -c copy -movflags +faststart rain.mp4
+```
+
 ### Performance
 
 A video costs almost nothing, because the hardware decodes it. A shader costs
@@ -751,6 +813,12 @@ keep the GPU busy. To make a wallpaper cheaper:
   a `once = true` buffer.
 - Use `--pause-on-battery` or `--pause-below`. Time stops during the pause and
   continues after it.
+- On macOS, a wallpaper also pauses while windows cover it (see
+  [Pausing behind windows](#pausing-behind-windows-macos)).
+
+On macOS, the output size is the size of the screen in points, not in pixels.
+On a Retina display that looks like 2560x1440, a pass draws 2560x1440 pixels,
+the same as Wayland at that size, and macOS scales them up to the screen.
 
 ## Lock screen backgrounds with hyprlock (Wayland)
 
@@ -918,3 +986,56 @@ Stop playback when the laptop is unplugged or charge drops below a threshold. Th
 phonto /path/to/video --pause-on-battery
 phonto /path/to/video --pause-below 30
 ```
+
+### Pausing behind windows (macOS)
+
+On macOS, a wallpaper pauses while windows cover its screen, and resumes as
+soon as the desktop shows again. This is on by default, also behind
+translucent windows, so a wallpaper that played behind your windows before now
+holds a still frame there. `[pause_behind]` sets which windows pause it, on
+battery and on power:
+
+```toml
+[pause_behind]
+on_battery = "any"
+on_power = "opaque"
+```
+
+- `any`, the default, pauses when windows of apps cover 95% of the screen,
+  translucent or not. The menu bar and the gaps between tiled windows don't
+  count against it. A window over half the screen never pauses it.
+- `opaque` pauses when opaque windows cover the middle of the screen, all of
+  it but a 64-point border. It keeps running behind translucent windows. Two
+  windows side by side never pause it, because the gap between them runs
+  through the middle.
+- `none` never pauses for windows.
+
+A hidden wallpaper pauses in every mode, `none` included: on the lock screen,
+behind an app in native full screen, under the screen saver, while the
+displays sleep, and while another user's session is in front. A screen pauses
+once it has been covered for a second, so a window that passes over it
+doesn't pause it. It resumes at once.
+
+A display can override the table in its `[[display]]` entry. The entry holds
+everything about one display, so it needs no `path` or `random`. A key that it
+leaves out comes from `[pause_behind]`:
+
+```toml
+[[display]]
+id = "LG HDR 4K"   # a display ID or an [[alias]] name
+pause_behind = { on_power = "none" }
+```
+
+`pause_behind` applies to whatever phonto plays, `phonto /path/to/video`
+included. A display that isn't connected takes its entry when it connects.
+Two entries that set `pause_behind` for one display are an error.
+
+A video mirrored across screens pauses only when every screen is covered,
+because one player feeds them all. A procedural wallpaper with `--span` keeps
+running while any of its screens is uncovered, and its time stops only when
+all of them pause.
+
+`--pause-on-battery` and `--pause-below` still pause everything, whatever
+`pause_behind` says.
+
+Linux reads `[pause_behind]` and ignores it, so one config works on both.

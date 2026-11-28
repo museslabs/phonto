@@ -1,4 +1,4 @@
-# Builds back.png, the back of the shelf of zerotv.mkv without the tapes, for
+# Builds back.png, the back of the shelf of zerotv.mp4 without the tapes, for
 # the Zero TV pack. The pack draws the tapes as graphics in front of it.
 # Usage: rebuild.py ASSETS PACK. ASSETS holds mean.png and std.npy from
 # average.py.

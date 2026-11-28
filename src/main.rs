@@ -17,9 +17,10 @@ use crate::backend::Backend;
 fn play(args: cli::PlayArgs, yt_dlp: cli::YtDlpArgs) -> anyhow::Result<()> {
     let config = config::load()?;
     let plan = plan::build(args.source.into(), &config)?;
+    #[cfg(target_os = "macos")]
+    let pause_behind = plan::pause_behind(&config)?;
     // [[display]] entries give each display its own wallpaper, so they
     // cannot share one scene. The CLI already rejects --span with --display.
-    #[cfg(target_os = "linux")]
     if args.render.span && matches!(plan, plan::Plan::PerDisplay(_)) {
         anyhow::bail!(
             "--span draws one wallpaper across all displays, so it does not work with the \
@@ -38,8 +39,9 @@ fn play(args: cli::PlayArgs, yt_dlp: cli::YtDlpArgs) -> anyhow::Result<()> {
         scale: args.render.scale,
         #[cfg(target_os = "linux")]
         layer: args.render.layer,
-        #[cfg(target_os = "linux")]
         span: args.render.span,
+        #[cfg(target_os = "macos")]
+        pause_behind,
         location: config.location,
         inputs: config.inputs,
         actions: config.actions,

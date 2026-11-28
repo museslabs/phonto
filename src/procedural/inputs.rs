@@ -309,6 +309,7 @@ impl Pointer {
 
     /// The place of the pointer while it is over the wallpaper, as a
     /// fraction of `area` from the bottom left.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn hover(&self, area: [f64; 4]) -> Option<[f64; 2]> {
         if !self.inside {
             return None;

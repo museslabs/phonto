@@ -131,8 +131,7 @@ pub struct RenderArgs {
     pub layer: crate::backend::wayland::LayerMode,
 
     /// Draw a procedural wallpaper across all displays as one scene, instead
-    /// of one copy on each display (Linux/Wayland only).
-    #[cfg(target_os = "linux")]
+    /// of one copy on each display.
     #[arg(long, conflicts_with_all = ["display", "display_rand"])]
     pub span: bool,
 

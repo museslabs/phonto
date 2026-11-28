@@ -1,32 +1,50 @@
+mod audio;
 mod battery_observer;
+mod color_scheme;
+mod cover;
 mod displays;
+mod key_window;
+mod keyboard;
 pub mod live_lockscreen;
 mod loop_observer;
+mod msl;
+mod pointer;
+mod procedural;
+mod procedural_surface;
 mod screen_observer;
+mod span;
+mod video_channel;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
 
 use anyhow::Context;
 use objc2::rc::Retained;
 use objc2::sel;
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy,
-    NSApplicationDidChangeScreenParametersNotification, NSBackingStoreType, NSColor, NSScreen,
-    NSView, NSWindow, NSWindowCollectionBehavior, NSWindowSharingType, NSWindowStyleMask,
+    NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification,
+    NSBackingStoreType, NSColor, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowSharingType, NSWindowStyleMask,
 };
 use objc2_av_foundation::{
     AVLayerVideoGravity, AVLayerVideoGravityResize, AVLayerVideoGravityResizeAspect,
-    AVLayerVideoGravityResizeAspectFill, AVPlayer, AVPlayerItem,
+    AVLayerVideoGravityResizeAspectFill, AVPlayer, AVPlayerActionAtItemEnd, AVPlayerItem,
     AVPlayerItemDidPlayToEndTimeNotification, AVPlayerLayer,
 };
 use objc2_foundation::{MainThreadMarker, NSNotificationCenter, NSString, NSURL};
 use objc2_quartz_core::CAAutoresizingMask;
 
+use self::audio::AudioCapture;
 use self::battery_observer::BatteryObserver;
+use self::cover::Cover;
+use self::key_window::{Application, KeyWindow};
 use self::loop_observer::LoopObserver;
-use self::screen_observer::{AttachPolicy, MirrorSurface, ScreenObserver};
+use self::procedural::Gpu;
+use self::procedural_surface::{ProceduralSource, ProceduralSurface};
+use self::screen_observer::{AttachPolicy, Content, MirrorSurface, ScreenObserver, SurfaceLayer};
 use super::{Backend, DumpRequest, PauseMode, RunOptions};
+use crate::config::PauseBehind;
 use crate::displays::DisplayInfo;
 use crate::plan::Playback;
 use crate::scale::ScaleMode;
@@ -53,25 +71,17 @@ impl Backend for MacosBackend {
 
     fn dump(self, request: DumpRequest) -> anyhow::Result<()> {
         use anyhow::anyhow;
-        use objc2::runtime::AnyObject;
-        use objc2_av_foundation::{
-            AVAssetReader, AVAssetReaderTrackOutput, AVMediaTypeVideo, AVURLAsset,
-        };
-        use objc2_core_foundation::CFString;
+        use objc2_av_foundation::{AVAssetReader, AVURLAsset};
         use objc2_core_media::{CMTime, CMTimeRange, kCMTimePositiveInfinity};
         use objc2_core_video::{
             CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
             CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
-            CVPixelBufferUnlockBaseAddress, kCVPixelBufferPixelFormatTypeKey,
-            kCVPixelFormatType_32BGRA, kCVReturnSuccess,
+            CVPixelBufferUnlockBaseAddress, kCVReturnSuccess,
         };
-        use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
+        use objc2_foundation::{NSString, NSURL};
 
         if crate::procedural::is_procedural(&request.path) {
-            anyhow::bail!(
-                "procedural wallpapers are not supported on macOS yet: {}",
-                request.path
-            );
+            return procedural::dump(request, color_scheme::uniform(self.mtm));
         }
         if request.size.is_some() {
             log::warn!("--size only applies to procedural wallpapers. Videos keep their own size.");
@@ -92,14 +102,7 @@ impl Backend for MacosBackend {
 
         let asset = unsafe { AVURLAsset::URLAssetWithURL_options(&url, None) };
 
-        let video_type = unsafe { AVMediaTypeVideo }
-            .context("AVMediaTypeVideo constant unavailable")?
-            .to_string();
-        let all_tracks = unsafe { asset.tracks() };
-        let track = all_tracks
-            .iter()
-            .find(|t| unsafe { t.mediaType() }.to_string() == video_type)
-            .context("no video track in asset")?;
+        let track = video_channel::video_track(&asset)?;
 
         let reader = unsafe { AVAssetReader::assetReaderWithAsset_error(&asset) }
             .map_err(|e| anyhow!("AVAssetReader init: {e:?}"))?;
@@ -113,18 +116,7 @@ impl Backend for MacosBackend {
         let range = unsafe { CMTimeRange::new(start, inf) };
         unsafe { reader.setTimeRange(range) };
 
-        let key_cf: &'static CFString = unsafe { kCVPixelBufferPixelFormatTypeKey };
-        let key_ns: &NSString = unsafe { &*(key_cf as *const CFString as *const NSString) };
-        let val = NSNumber::new_u32(kCVPixelFormatType_32BGRA);
-        let val_obj: &AnyObject = &val;
-        let settings = NSDictionary::<NSString, AnyObject>::from_slices(&[key_ns], &[val_obj]);
-
-        let output = unsafe {
-            AVAssetReaderTrackOutput::assetReaderTrackOutputWithTrack_outputSettings(
-                &track,
-                Some(&settings),
-            )
-        };
+        let output = video_channel::bgra_output(&track);
         unsafe { reader.addOutput(&output) };
 
         if !unsafe { reader.startReading() } {
@@ -172,60 +164,59 @@ impl Backend for MacosBackend {
     }
 
     fn run(self, playback: Playback, options: RunOptions) -> anyhow::Result<()> {
-        let paths: Vec<&str> = match &playback {
-            Playback::Mirror(path) => vec![path.as_str()],
-            Playback::PerDisplay(assignments) => {
-                assignments.iter().map(|a| a.path.as_str()).collect()
-            }
-        };
-        if let Some(path) = paths
-            .into_iter()
-            .find(|p| crate::procedural::is_procedural(p))
-        {
-            anyhow::bail!("procedural wallpapers are not supported on macOS yet: {path}");
-        }
-
         let mtm = self.mtm;
         let scale = options.scale;
 
-        let app = NSApplication::sharedApplication(mtm);
+        let app = Application::shared(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         app.finishLaunching();
 
         let screens = NSScreen::screens(mtm);
 
         let mut surfaces: Vec<MirrorSurface> = Vec::new();
-        let mut players: Vec<Retained<AVPlayer>> = Vec::new();
-        let mut loop_observers: Vec<Retained<LoopObserver>> = Vec::new();
+        let mut sources = Sources::default();
 
         let policy = match playback {
             Playback::Mirror(path) => {
-                let (item, player) = make_player(mtm, &path)?;
-                loop_observers.push(install_loop_observer(player.clone(), &item));
-                players.push(player.clone());
-
+                let content = sources.open(mtm, &path, &options)?;
+                if options.span && matches!(content, Content::Video(_)) {
+                    log::warn!(
+                        "--span only applies to procedural wallpapers. A video plays on each display."
+                    );
+                }
                 for screen in screens.iter() {
-                    surfaces.push(build_surface(mtm, &screen, &player, scale)?);
+                    surfaces.push(build_surface(
+                        mtm,
+                        &screen,
+                        &content,
+                        scale,
+                        sources.gpu.as_ref(),
+                        cover::pause_behind(&screen, &options.pause_behind),
+                    )?);
                 }
                 if surfaces.is_empty() {
                     anyhow::bail!("no screens detected");
                 }
 
-                AttachPolicy::Mirror(player)
+                AttachPolicy::Mirror(content)
             }
             Playback::PerDisplay(assignments) => {
-                let mut by_id: HashMap<String, Retained<AVPlayer>> = HashMap::new();
+                let mut by_id: HashMap<String, Content> = HashMap::new();
                 for a in &assignments {
-                    let (item, player) = make_player(mtm, &a.path)?;
-                    loop_observers.push(install_loop_observer(player.clone(), &item));
-                    players.push(player.clone());
-                    by_id.insert(a.native_id.clone(), player);
+                    by_id.insert(a.native_id.clone(), sources.open(mtm, &a.path, &options)?);
                 }
 
                 for screen in screens.iter() {
                     let name = screen.localizedName().to_string();
-                    if let Some(player) = displays::assigned(&screen, &by_id) {
-                        surfaces.push(build_surface(mtm, &screen, player, scale)?);
+                    if let Some(content) = displays::assigned(&screen, &by_id) {
+                        surfaces.push(build_surface(
+                            mtm,
+                            &screen,
+                            content,
+                            scale,
+                            sources.gpu.as_ref(),
+                            cover::pause_behind(&screen, &options.pause_behind),
+                        )?);
                     } else {
                         log::info!("display {name:?} not in assignments; leaving alone");
                     }
@@ -237,9 +228,44 @@ impl Backend for MacosBackend {
             }
         };
 
+        let Sources {
+            loop_observers,
+            gpu,
+            mut procedural,
+        } = sources;
+
+        // One tap gives the audio to all the wallpapers that read it, on all
+        // screens.
+        if procedural.iter().any(ProceduralSource::reads_audio) {
+            match AudioCapture::start() {
+                Ok(capture) => {
+                    let capture = Rc::new(capture);
+                    for source in &mut procedural {
+                        source.set_audio(&capture);
+                    }
+                }
+                Err(err) => {
+                    log::warn!("no system audio, so the wallpaper draws without it: {err:#}");
+                }
+            }
+        }
+
+        cover::warn_unmatched(mtm, &options.pause_behind);
+        let follows_power = options.pause_behind.follows_power();
+
         // Re-apply geometry on display reconfiguration, and attach new
         // surfaces when a fresh display appears (respecting the policy).
-        let screen_observer = ScreenObserver::new(surfaces, policy, scale);
+        // It also draws the procedural wallpapers, and pauses what power
+        // and the windows over the screens don't let run.
+        let screen_observer = ScreenObserver::new(
+            mtm,
+            surfaces,
+            policy,
+            scale,
+            gpu,
+            procedural,
+            options.pause_behind,
+        );
         unsafe {
             NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
                 &screen_observer,
@@ -249,16 +275,12 @@ impl Backend for MacosBackend {
             );
         }
 
-        let battery_observer = if matches!(options.pause, PauseMode::Never) {
+        let battery_observer = if matches!(options.pause, PauseMode::Never) && !follows_power {
             None
         } else {
-            BatteryObserver::install(players.clone(), options.pause)
+            BatteryObserver::install(screen_observer.clone(), options.pause)
         };
-        if battery_observer.is_none() {
-            for player in &players {
-                unsafe { player.play() };
-            }
-        }
+        screen_observer.update_cover();
 
         log::info!("macOS backend ready at level {}", WALLPAPER_LEVEL);
 
@@ -268,6 +290,51 @@ impl Backend for MacosBackend {
         drop(battery_observer);
 
         Ok(())
+    }
+}
+
+/// The videos and procedural wallpapers that the screens show.
+#[derive(Default)]
+struct Sources {
+    loop_observers: Vec<Retained<LoopObserver>>,
+    /// Made with the first procedural wallpaper.
+    gpu: Option<Gpu>,
+    procedural: Vec<ProceduralSource>,
+}
+
+impl Sources {
+    /// Opens `path` as a video, or compiles it as a procedural wallpaper. A
+    /// broken shader then fails before any window appears.
+    fn open(
+        &mut self,
+        mtm: MainThreadMarker,
+        path: &str,
+        options: &RunOptions,
+    ) -> anyhow::Result<Content> {
+        if crate::procedural::is_procedural(path) {
+            let gpu = match &mut self.gpu {
+                Some(gpu) => gpu,
+                gpu => gpu.insert(Gpu::new()?),
+            };
+            let source = ProceduralSource::load(
+                gpu,
+                path,
+                options.location,
+                &options.inputs,
+                &options.actions,
+                options.span,
+            )?;
+            let keyboard = source.keyboard.clone();
+            self.procedural.push(source);
+            return Ok(Content::Procedural {
+                source: self.procedural.len() - 1,
+                keyboard,
+            });
+        }
+        let (item, player) = make_player(mtm, path)?;
+        self.loop_observers
+            .push(install_loop_observer(player.clone(), &item));
+        Ok(Content::Video(player))
     }
 }
 
@@ -294,6 +361,9 @@ fn make_player(
     let player = unsafe { AVPlayer::playerWithPlayerItem(Some(&item), mtm) };
     unsafe {
         player.setMuted(true);
+        // The player keeps its rate at the end. The loop observer's seek to
+        // the start then loops the video.
+        player.setActionAtItemEnd(AVPlayerActionAtItemEnd::None);
     }
     Ok((item, player))
 }
@@ -319,56 +389,71 @@ fn install_loop_observer(
 pub(super) fn build_surface(
     mtm: MainThreadMarker,
     screen: &NSScreen,
-    player: &AVPlayer,
+    content: &Content,
     scale: ScaleMode,
+    gpu: Option<&Gpu>,
+    pause_behind: PauseBehind,
 ) -> anyhow::Result<MirrorSurface> {
     let name = screen.localizedName().to_string();
     let frame = screen.frame();
     let backing_scale = screen.backingScaleFactor();
 
-    let window = unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            mtm.alloc::<NSWindow>(),
-            frame,
-            NSWindowStyleMask::Borderless,
-            NSBackingStoreType::Buffered,
-            false,
-        )
+    let window = match content {
+        // A wallpaper that reads the keyboard needs a window that can take it.
+        Content::Procedural {
+            keyboard: Some(keyboard),
+            ..
+        } => KeyWindow::create(mtm, frame, keyboard.clone()),
+        _ => unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                mtm.alloc::<NSWindow>(),
+                frame,
+                NSWindowStyleMask::Borderless,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        },
     };
-    window.setLevel(WALLPAPER_LEVEL);
-    window.setCollectionBehavior(
-        NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::FullScreenAuxiliary
-            | NSWindowCollectionBehavior::Stationary
-            | NSWindowCollectionBehavior::IgnoresCycle,
-    );
-    window.setOpaque(false);
-    window.setBackgroundColor(Some(&NSColor::clearColor()));
-    window.setHasShadow(false);
+    place_on_desktop(&window, WALLPAPER_LEVEL);
     // `ReadOnly` so screen-capture / screen-sharing can read us. `None` blocks them.
     window.setSharingType(NSWindowSharingType::ReadOnly);
-    window.setIgnoresMouseEvents(true);
 
     let content_view = NSView::initWithFrame(mtm.alloc::<NSView>(), frame);
     content_view.setWantsLayer(true);
     window.setContentView(Some(&content_view));
 
-    let player_layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(player)) };
-    if let Some(gravity) = video_gravity_for(scale) {
-        unsafe { player_layer.setVideoGravity(gravity) };
-    }
-    player_layer.setFrame(content_view.bounds());
-    player_layer.setAutoresizingMask(
-        CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
-    );
-    player_layer.setContentsScale(backing_scale);
+    let layer = match content {
+        Content::Video(player) => {
+            let player_layer = unsafe { AVPlayerLayer::playerLayerWithPlayer(Some(player)) };
+            if let Some(gravity) = video_gravity_for(scale) {
+                unsafe { player_layer.setVideoGravity(gravity) };
+            }
+            player_layer.setFrame(content_view.bounds());
+            player_layer.setAutoresizingMask(
+                CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
+            );
+            player_layer.setContentsScale(backing_scale);
 
-    let root_layer = content_view
-        .layer()
-        .context("content view has no root layer")?;
-    root_layer.addSublayer(&player_layer);
+            let root_layer = content_view
+                .layer()
+                .context("content view has no root layer")?;
+            root_layer.addSublayer(&player_layer);
+            SurfaceLayer::Video(player_layer)
+        }
+        // A procedural wallpaper always fills the screen. `--scale` is only
+        // for videos.
+        Content::Procedural { source, .. } => {
+            let gpu = gpu.context("a procedural wallpaper needs the GPU")?;
+            SurfaceLayer::Procedural(Box::new(ProceduralSurface::new(
+                gpu,
+                &content_view,
+                *source,
+            )?))
+        }
+    };
 
-    window.makeKeyAndOrderFront(None);
+    // A wallpaper takes the keyboard only on a click.
+    window.orderFront(None);
 
     log::info!(
         "surface ready on {}: {}x{} @ {}x",
@@ -382,8 +467,24 @@ pub(super) fn build_surface(
         name,
         display_id: displays::display_id(screen),
         window,
-        layer: player_layer,
+        layer,
+        cover: Cover::new(mtm, screen, pause_behind),
     })
+}
+
+/// Makes `window` a clear, click-through window at `level`, on every Space.
+fn place_on_desktop(window: &NSWindow, level: isize) {
+    window.setLevel(level);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::Stationary
+            | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
+    window.setHasShadow(false);
+    window.setIgnoresMouseEvents(true);
 }
 
 fn video_gravity_for(scale: ScaleMode) -> Option<&'static AVLayerVideoGravity> {

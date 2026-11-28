@@ -3,7 +3,8 @@
 # with the bass. The pack shows how to use a live image and an input
 # command together.
 #
-# Set it up first. It needs playerctl, so it works on Linux:
+# Set it up first. It needs playerctl on Linux, or media-control on macOS
+# (brew install media-control):
 #
 #   cp examples/procedural/album/now-playing.sh ~/.config/phonto/
 #   cat examples/procedural/album/inputs.toml >> ~/.config/phonto/config.toml

@@ -1,0 +1,9 @@
+# phonto links the Core Audio process tap, which macOS has from 14.2. With
+# this target, dyld binds the tap's symbols at launch, and an older macOS
+# stops phonto at once. With the default target, phonto starts there, and
+# fails only when an audio pack opens the tap. This file covers builds from
+# a source checkout. `cargo install phonto` ignores it, and the README gives
+# that command the target. `force` overrides the lower target that Nix
+# sets. Builds for Linux ignore the variable.
+[env]
+MACOSX_DEPLOYMENT_TARGET = { value = "14.2", force = true }
