@@ -26,7 +26,7 @@ use objc2_quartz_core::CAAutoresizingMask;
 use self::battery_observer::BatteryObserver;
 use self::loop_observer::LoopObserver;
 use self::screen_observer::{AttachPolicy, MirrorSurface, ScreenObserver};
-use super::{Backend, PauseMode, RunOptions};
+use super::{Backend, DumpRequest, PauseMode, RunOptions};
 use crate::displays::DisplayInfo;
 use crate::plan::Playback;
 use crate::scale::ScaleMode;
@@ -51,7 +51,7 @@ impl Backend for MacosBackend {
         displays::list_displays()
     }
 
-    fn dump(self, path: String, at: f64, out: std::path::PathBuf) -> anyhow::Result<()> {
+    fn dump(self, request: DumpRequest) -> anyhow::Result<()> {
         use anyhow::anyhow;
         use objc2::runtime::AnyObject;
         use objc2_av_foundation::{
@@ -66,6 +66,17 @@ impl Backend for MacosBackend {
             kCVPixelFormatType_32BGRA, kCVReturnSuccess,
         };
         use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
+
+        if crate::procedural::is_procedural(&request.path) {
+            anyhow::bail!(
+                "procedural wallpapers are not supported on macOS yet: {}",
+                request.path
+            );
+        }
+        if request.size.is_some() {
+            log::warn!("--size only applies to procedural wallpapers. Videos keep their own size.");
+        }
+        let DumpRequest { path, at, out, .. } = request;
 
         let is_url = crate::config::is_url(&path);
         let url = if is_url {
@@ -161,6 +172,19 @@ impl Backend for MacosBackend {
     }
 
     fn run(self, playback: Playback, options: RunOptions) -> anyhow::Result<()> {
+        let paths: Vec<&str> = match &playback {
+            Playback::Mirror(path) => vec![path.as_str()],
+            Playback::PerDisplay(assignments) => {
+                assignments.iter().map(|a| a.path.as_str()).collect()
+            }
+        };
+        if let Some(path) = paths
+            .into_iter()
+            .find(|p| crate::procedural::is_procedural(p))
+        {
+            anyhow::bail!("procedural wallpapers are not supported on macOS yet: {path}");
+        }
+
         let mtm = self.mtm;
         let scale = options.scale;
 

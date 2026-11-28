@@ -1,0 +1,24 @@
+# The commands of examples/procedural/system. Add them to your phonto
+# configuration:
+#
+#   cat examples/procedural/system/inputs.toml >> ~/.config/phonto/config.toml
+#
+# They work on Linux and on macOS.
+
+# The load averages of the last 1, 5, and 15 minutes.
+[[input]]
+name = "load"
+command = "LC_ALL=C uptime | sed 's/.*load average[s]*: //' | tr -d ','"
+every = 5
+
+# The number of processor cores.
+[[input]]
+name = "cores"
+command = "getconf _NPROCESSORS_ONLN"
+every = 3600
+
+# How full the disk of / is, in percent.
+[[input]]
+name = "disk"
+command = "df -P / | awk 'NR == 2 { print $5 + 0 }'"
+every = 60

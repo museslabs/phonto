@@ -1,0 +1,59 @@
+# Zero TV: the tape menu of zerotv.mkv, as a launcher. The tape under the
+# pointer comes out of its stack. A click on tape N sends it into the VCR and
+# runs the action `tapeN`. Give each tape a command and a label with an
+# [[action]] entry in ~/.config/phonto/config.toml:
+#
+#   [[action]]
+#   name = "tape1"
+#   label = "Firefox"
+#   command = "firefox"
+#
+# A tape without a label shows its name from the video. The video gives the
+# room, the TV, and the shelf. The tapes are drawn as graphics.
+# tools/build.sh makes back.png and font.png again.
+name = "Zero TV"
+fps = 60
+common = "common.glsl"
+
+# The front faces of the tapes, flat, with their labels. The labels change only
+# when phonto starts, so this buffer draws once.
+[[buffer]]
+name = "tapes"
+shader = "tapes.glsl"
+size = [454, 744]
+format = "rgba8"
+once = true
+channels = [{ texture = "font.png", filter = "nearest" }]
+
+# The selected tape, the last click, and how far each tape is out.
+[[buffer]]
+name = "state"
+shader = "state.glsl"
+size = [13, 1]
+format = "rgba32f"
+channels = [{ buffer = "state", filter = "nearest" }]
+
+# The number of the tape at each pixel, for the clicks. The art has
+# 640x360 pixels, so this size is enough.
+[[buffer]]
+name = "pick"
+shader = "pick.glsl"
+format = "rgba8"
+height = 360
+channels = [{ buffer = "state", filter = "nearest" }]
+
+[image]
+shader = "image.glsl"
+channels = [
+    { video = "zerotv.mkv" },
+    { buffer = "tapes", filter = "linear" },
+    { buffer = "state", filter = "nearest" },
+    { texture = "back.png", filter = "nearest" },
+]
+
+[actions]
+buffer = "pick"
+names = [
+    "tape1", "tape2", "tape3", "tape4", "tape5", "tape6",
+    "tape7", "tape8", "tape9", "tape10", "tape11", "tape12",
+]

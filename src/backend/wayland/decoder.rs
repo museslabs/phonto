@@ -1,5 +1,6 @@
 use gst::MessageView::*;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
 
 use anyhow::{Context, anyhow};
@@ -10,6 +11,8 @@ use gstreamer_gl as gst_gl;
 use gstreamer_gl::prelude::*;
 use gstreamer_gl_egl as gst_gl_egl;
 use gstreamer_video as gst_video;
+
+use crate::procedural::{Decoded, VideoQueue};
 
 pub struct Frame {
     pub texture_id: u32,
@@ -86,6 +89,116 @@ pub fn run(
             return Ok(());
         }
     }
+}
+
+/// Starts to decode `source` for a video channel of a procedural wallpaper,
+/// and returns the pipeline. The decoder does not follow the clock. It gives
+/// each frame to `queue`, which makes it wait while it is ahead of the
+/// playback of the wallpaper. So the wallpaper sets the speed, and the video
+/// stops while the wallpaper does not draw. At the end of the video, it
+/// starts again.
+pub fn start_channel(
+    source: &str,
+    gl_display: &gst_gl::GLDisplay,
+    gl_context: &gst_gl::GLContext,
+    queue: Arc<VideoQueue<gst::Sample>>,
+) -> anyhow::Result<gst::Pipeline> {
+    let pipeline = build_pipeline(source).context("build decoder pipeline")?;
+    set_pipeline_gl_context(&pipeline, gl_display, gl_context);
+    let appsink = pipeline
+        .by_name("sink")
+        .context("appsink not found in pipeline")?
+        .downcast::<gst_app::AppSink>()
+        .map_err(|_| anyhow!("`sink` is not an AppSink"))?;
+    appsink.set_property("sync", false);
+    let decoded = Arc::clone(&queue);
+    appsink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                let frame = Decoded {
+                    time: stream_time(&sample).unwrap_or(0.0),
+                    length: frame_length(&sample),
+                    frame: sample,
+                };
+                if decoded.push(frame) {
+                    Ok(gst::FlowSuccess::Ok)
+                } else {
+                    Err(gst::FlowError::Eos)
+                }
+            })
+            .build(),
+    );
+    pipeline
+        .set_state(gst::State::Playing)
+        .context("set pipeline state to Playing")?;
+
+    // A thread starts the video again at its end. It holds only a weak
+    // reference, so it stops after the pipeline goes.
+    let bus = pipeline.bus().context("pipeline has no bus")?;
+    let weak = pipeline.downgrade();
+    let source = source.to_string();
+    std::thread::Builder::new()
+        .name("video-channel".to_string())
+        .spawn(move || {
+            loop {
+                let Some(msg) = bus.timed_pop(gst::ClockTime::from_seconds(1)) else {
+                    if weak.upgrade().is_none() {
+                        return;
+                    }
+                    continue;
+                };
+                match msg.view() {
+                    Eos(_) => {
+                        let Some(pipeline) = weak.upgrade() else {
+                            return;
+                        };
+                        // The queue must know of the new loop before its
+                        // first frame comes after the seek.
+                        queue.start_loop();
+                        let seek = pipeline.seek_simple(
+                            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                            gst::ClockTime::ZERO,
+                        );
+                        if seek.is_err() {
+                            log::warn!(
+                                "video {source} cannot go back to its start, so it stops at its last frame"
+                            );
+                            queue.end();
+                            return;
+                        }
+                    }
+                    Error(err) => {
+                        log::warn!(
+                            "video {source} stopped: {} ({:?})",
+                            err.error(),
+                            err.debug()
+                        );
+                        queue.end();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .context("start the thread of a video channel")?;
+    Ok(pipeline)
+}
+
+/// The length of `sample` in seconds, if the decoder knows it.
+pub fn frame_length(sample: &gst::Sample) -> Option<f64> {
+    sample.buffer()?.duration().map(gst::ClockTime::seconds_f64)
+}
+
+/// The time of `sample` in its video, in seconds.
+pub fn stream_time(sample: &gst::Sample) -> Option<f64> {
+    let pts = sample.buffer()?.pts()?;
+    let time = sample
+        .segment()
+        .and_then(|s| s.downcast_ref::<gst::ClockTime>())
+        .and_then(|s| s.to_stream_time(pts))
+        .unwrap_or(pts);
+    Some(time.seconds_f64())
 }
 
 // Build the GStreamer pipeline programmatically so the source is set via the
@@ -239,6 +352,33 @@ pub fn pull_sample_at(pipeline: &gst::Pipeline, at: f64) -> anyhow::Result<gst::
         .pull_preroll()
         .or_else(|_| appsink.pull_sample())
         .context("pull decoded sample")
+}
+
+/// Calls `f` with the GL texture of `sample`. The texture stays valid until
+/// `f` returns.
+pub fn with_frame<R>(
+    sample: &gst::Sample,
+    gl_context: &gst_gl::GLContext,
+    f: impl FnOnce(&Frame) -> R,
+) -> anyhow::Result<R> {
+    let buffer = sample.buffer_owned().context("sample has no buffer")?;
+    let caps = sample.caps().context("sample has no caps")?;
+    let info = gst_video::VideoInfo::from_caps(caps).context("VideoInfo from caps")?;
+    if let Some(sync_meta) = buffer.meta::<gst_gl::GLSyncMeta>() {
+        sync_meta.wait(gl_context);
+    }
+    let gl_frame = gst_gl::GLVideoFrame::from_buffer_readable(buffer, &info)
+        .map_err(|_| anyhow!("GLVideoFrame::from_buffer_readable failed"))?;
+    let frame = Frame {
+        texture_id: gl_frame
+            .texture_id(0)
+            .context("GLVideoFrame texture id missing")?,
+        width: info.width(),
+        height: info.height(),
+    };
+    let result = f(&frame);
+    drop(gl_frame);
+    Ok(result)
 }
 
 pub fn sample_to_frame(

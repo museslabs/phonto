@@ -5,7 +5,7 @@
 
 > phonto (/'fon.to/) — from Greek φόντο: background
 
-GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust. Also supports live lockscreen wallpapers on macOS.
+GPU-accelerated video wallpaper program for Wayland compositors and macOS, written in Rust. Also supports live lockscreen wallpapers on macOS, and interactive procedural (shader) wallpapers on Wayland.
 
 
 ![example](./mac-example.gif)
@@ -94,6 +94,13 @@ phonto https://example.com/stream.m3u8
 phonto rtsp://camera.local/stream
 ```
 
+Play a procedural wallpaper, a GLSL shader that phonto draws live (Wayland
+only, see [Procedural wallpapers](#procedural-wallpapers-wayland)):
+```bash
+phonto examples/procedural/plasma.glsl
+phonto examples/procedural/life        # a pack directory with a manifest.toml
+```
+
 Play a random wallpaper from your configured search paths:
 ```bash
 phonto --rand
@@ -108,12 +115,14 @@ Available layers are `background` (default), `bottom`, `top`, and `overlay`.
 
 Dump a still frame to an image file:
 ```bash
-phonto dump PATH --out OUT.png [--at SECONDS] [--shader PATH]
+phonto dump PATH --out OUT.png [--at SECONDS] [--shader PATH] [--size WIDTHxHEIGHT]
 ```
 
-`dump` supports local files and resolved URLs. `--out`/`-o` is required,
-`--at` selects the timestamp in seconds (default `0.0`), and `--shader` applies
-a GLSL fragment shader before saving (only available on Wayland/Linux).
+`dump` supports local files, resolved URLs and procedural wallpapers. `--out`/`-o`
+is required, `--at` selects the timestamp in seconds (default `0.0`), and `--shader`
+applies a GLSL fragment shader before saving (only available on Wayland/Linux).
+`--size` sets the image size for procedural wallpapers (default `1920x1080`).
+Videos keep their own size.
 
 Phonto also writes the currently selected video path to `~/.cache/phonto/current`.
 This is useful when `--rand` chooses a wallpaper and another tool needs to reuse
@@ -175,7 +184,9 @@ When phonto detects a YouTube URL it calls `yt-dlp -f <format> -g [--cookies-fro
 
 By default phonto mirrors a single video across every connected display. New
 monitors plugged in mid-session attach automatically, and unplugging then
-re-plugging a monitor brings the wallpaper back without restart.
+re-plugging a monitor brings the wallpaper back without restart. A procedural
+wallpaper can also cover all displays as one scene (see
+[One scene across all displays](#one-scene-across-all-displays)).
 
 ### Listing displays
 
@@ -283,6 +294,464 @@ Run `phonto displays` on each OS once to copy the right native ID into the
 alias. The same dotfile then works on both. Either field is optional, so a
 laptop-only alias can leave the other one out.
 
+## Procedural wallpapers (Wayland)
+
+phonto can also draw a GLSL shader as your wallpaper, live, instead of a
+video. The shaders use the conventions of [Shadertoy](https://www.shadertoy.com),
+so most Shadertoy shaders work after a copy and paste. A shader can react to
+the pointer. It can also keep state from one frame to the next, for
+simulations such as the Game of Life.
+
+Examples are in [`examples/procedural`](examples/procedural):
+
+```bash
+phonto examples/procedural/plasma.glsl   # one file
+phonto examples/procedural/life          # a pack: a buffer pass and an image pass
+phonto examples/procedural/koi           # a koi pond in the light of the real sun
+phonto examples/procedural/museslabs     # the Muses Labs lyre plays your system audio
+phonto examples/procedural/battery       # your battery as the tide in a glass
+phonto examples/procedural/system        # the load of your computer, from input commands
+phonto examples/procedural/album         # the cover of the music that plays, as a live image
+phonto examples/procedural/zero-tv       # a menu of tapes: a click on a tape opens a program
+phonto --span examples/procedural/koi    # one pond across all your displays
+```
+
+Each example shows some of the features:
+
+| Example | Features |
+|---|---|
+| plasma | a single file, the pointer |
+| life | buffers, a buffer that reads itself |
+| koi | buffers, the pointer, `iLocation` and the sun, `--span` |
+| museslabs | audio and chroma, textures, the dark mode setting, `--span` |
+| battery | `iBattery`, the dark mode setting, a text atlas |
+| system | input commands, buffers, the dark mode setting |
+| album | a live image, an input command, audio |
+| zero-tv | a video, actions with labels, the pointer, buffers |
+
+The koi pond shows the most features. If you click the water, food drops, and
+the koi swim to it and feed. If you hold the button and drag, a wake follows
+the pointer. Moving the pointer without a click does nothing. The light
+follows the sun, from dawn to a night with a moon and fireflies. Dawn comes at
+the sunrise of your `[location]`, and dusk at its sunset, so the light changes
+with the seasons. To preview a different hour, set `HOUR_OVERRIDE` at the top
+of `examples/procedural/koi/common.glsl`. With `--span`, the koi swim from one
+display to the next, and the moon shows on the display at the right.
+
+The Muses Labs lyre uses the colors and the type of museslabs.org. Its three
+strings play the audio that your system plays. The left string follows the
+bass, the middle string the midrange, and the right string the treble. A
+pluck (a fast rise in the sound) makes a string vibrate and glow. It also
+writes the chord that plays on the staff, from the two or three strongest
+note names in `iChroma`.
+
+A note that comes soon after the last one is an eighth note, and a slower
+note is a quarter note. In a full mix, some chords are wrong, because the
+strongest note names do not always come from the melody. When the audio
+stops, the strings stop and the notes fade.
+
+The lyre follows your clock. It uses the paper colors of the site from
+06:00 and the dark colors of the site from 12:00.
+
+To change the hours, set `LIGHT_FROM` and `DARK_FROM` at the top of
+`examples/procedural/museslabs/common.glsl`. `THEME` in the same file changes
+the rule. 1 is always paper, 2 is always dark, 3 follows the dark mode of your
+desktop, and 4 follows the sun. To preview the lyre without audio, for example
+with `dump`, set `DEMO` to 1 in the same file. With `--span`, the lyre stands
+on the display nearest the middle of the desktop, and the staff crosses all
+the displays. `LYRE_DISPLAY` chooses another display.
+
+The battery is the tide in a glass. The water level is the charge, bubbles
+rise while the battery charges, and the water turns terracotta below 20%. A
+system without a battery shows a full glass. The colors follow the dark mode
+of your desktop. `DEMO` at the top of `examples/procedural/battery/image.glsl`
+shows each state in turn.
+
+The system example shows the load of your computer as an orrery. Three
+planets go around faster when the load of the last 1, 5, and 15 minutes is
+higher for each core, and the outer ring shows how full the disk is. The
+values come from input commands that work on Linux and on macOS. Add them to
+your configuration first:
+
+```bash
+cat examples/procedural/system/inputs.toml >> ~/.config/phonto/config.toml
+```
+
+The album example shows the cover of the music that plays, on a background of
+its own colors. A line under the cover shows how far the track is. It needs
+`playerctl`, which reads every player that supports MPRIS, such as Spotify,
+Firefox, mpv, and VLC. Its input command is a script. It prints whether music
+plays and how far the track is, and it keeps the cover in
+`~/.cache/phonto/cover`, which the pack watches. Set it up first:
+
+```bash
+cp examples/procedural/album/now-playing.sh ~/.config/phonto/
+cat examples/procedural/album/inputs.toml >> ~/.config/phonto/config.toml
+```
+
+The zero-tv example is a shelf of VHS tapes under a TV, as a menu. The room
+and the TV are a video. The tapes are graphics: when the pointer is on a
+tape, the tape slides out of its stack. A click on tape N sends it into the
+VCR and runs the action `tapeN`. Give a tape a label and a command in your
+configuration:
+
+```toml
+[[action]]
+name = "tape1"
+label = "Firefox"
+command = "firefox"
+```
+
+A tape without a label shows its own name. To preview a tape that is out or
+clicked, for example with `dump`, set `DEMO_TAPE` and `DEMO_CLICK` at the top
+of `examples/procedural/zero-tv/common.glsl`.
+
+A pack that sets `audio = true` reads the monitor of your default output. A
+monitor is a copy of the sound that goes to your speakers. phonto reads it
+through the GStreamer PulseAudio plugin, which also works with PipeWire
+through `pipewire-pulse`. On Debian or Ubuntu, install
+`gstreamer1.0-pulseaudio`. Arch and Fedora include the plugin in their
+GStreamer good plugins package.
+
+phonto selects the default output when it starts. If you change outputs,
+restart phonto. If the monitor is not available, phonto logs a warning and
+draws the scene without audio. `dump` always draws without audio. While
+phonto reads the monitor, the sound server keeps your output device awake. A
+battery pause stops the reading.
+
+You can use a procedural wallpaper everywhere that you can use a video path:
+`--display ID PATH`, `[[display]].path`, the hyprlock recipe, `--shader`
+post-processing, and `dump`. `--rand` also picks pack directories, and `.glsl`
+files that have a `mainImage` function. A procedural wallpaper always fills the
+screen, so `--scale` has no effect. macOS support is planned, with the same
+format.
+
+### One scene across all displays
+
+`--span` draws a procedural wallpaper once for the whole desktop. Each display
+then shows its own part of the scene:
+
+```bash
+phonto --span examples/procedural/koi
+```
+
+phonto gets the place of each display from the compositor, through the
+xdg-output protocol. `iResolution`, `fragCoord`, `iMouse`, and `iPointer` then
+use the pixels of the whole desktop, so most shaders span without changes. The
+buffers also cover the whole desktop, so a simulation such as the Game of Life
+continues from one display to the next. The cost is the same as one copy on
+each display, plus any gaps between the displays.
+
+A centered scene falls on the edge between two displays. `iDisplays` gives
+the place of each display in the scene, so a pack can put its main subject
+inside one display, as the lyre and the battery do. It can also give each
+display its own vignette, as the koi pond does.
+
+`--span` does not work with `--display`, or with the `[[display]]` entries of
+the configuration, because they give each display its own wallpaper. A video
+still plays on each display.
+
+### Single-file wallpapers
+
+A single-file wallpaper is a `.glsl` file with the `mainImage` function of
+Shadertoy:
+
+```glsl
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    vec2 uv = fragCoord / iResolution.xy;
+    fragColor = vec4(0.5 + 0.5 * cos(iTime + uv.xyx + vec3(0, 2, 4)), 1.0);
+}
+```
+
+Do not declare the `#version` line, the default precisions, or the uniforms in
+the table below. phonto adds them. If the file has a `#version` line, phonto
+ignores it. The code is GLSL ES 3.00, the language of WebGL 2. A single file
+draws at the full output resolution, at a maximum of 60 fps.
+
+### Inputs
+
+Uniforms are the inputs that phonto sets before each frame:
+
+| Uniform | Type | Meaning |
+|---|---|---|
+| `iResolution` | `vec3` | The size of this pass in pixels. `z` is 1. |
+| `iImageResolution` | `vec3` | Only in phonto. The size of the image pass. It is different from `iResolution` in a buffer with its own `size` or `height`. |
+| `iTime` | `float` | Seconds of playback. It stops during a pause. It goes back to 0 after 24 hours, to keep float precision. |
+| `iTimeDelta` | `float` | Seconds since the last frame. The maximum is 0.25, or two frame periods below 8 fps. |
+| `iFrameRate` | `float` | Frames per second, smoothed. |
+| `iFrame` | `int` | The number of frames drawn on this display. It starts at 0 again when the display changes size. |
+| `iDate` | `vec4` | Year, month (0 to 11), day (1 to 31), and seconds since local midnight. |
+| `iMouse` | `vec4` | The same as on Shadertoy. `xy` is the drag position and `zw` is the click position. `z` is positive while the left button is pressed. `w` is positive only on the frame of the click. A short click can end before that frame, so use `abs(iMouse.zw)` for the place of the click. |
+| `iPointer` | `vec4` | Only in phonto. `xy` is the pointer position. `z` is 1 while the pointer is over the wallpaper. `w` is 1 while the left button is pressed. Use it for hover effects. |
+| `iAudio` | `vec4` | Only in phonto. The smoothed bass, midrange, treble, and overall volume, each from 0 to 1. If the pack does not set `audio = true`, the values are zero. |
+| `iSpectrum[32]` | `float[32]` | Only in phonto. 32 smoothed frequency bands from 40 Hz to 11 kHz, with a logarithmic spacing. Each value is from 0 to 1. If the pack does not set `audio = true`, the values are zero. |
+| `iChroma[12]` | `float[12]` | Only in phonto. The strength of each note name, from C to B, over all octaves from 130 Hz to 5 kHz. Each value is from 0 to 1, and the strongest note name is near 1 while sound plays. If the pack does not set `audio = true`, the values are zero. |
+| `iColorScheme` | `float` | Only in phonto. 1 if your desktop prefers dark colors. 0 if it prefers light colors or has no preference. A change shows at once. |
+| `iBattery` | `vec4` | Only in phonto. `x` is the charge from 0 to 1. `y` is 1 while the battery charges. `z` is 1 on AC power. `w` is 1 if the system has a battery. Without a battery, `x` is 1. phonto reads the battery every 10 seconds. |
+| `iLocation` | `vec4` | Only in phonto. `x` is the latitude and `y` is the longitude, in degrees. `z` is the offset of your local time from UTC, in hours. `w` is 1 if you set a `[location]` in the configuration. |
+| `iDisplays[8]` | `vec4` | Only in phonto. The place of each display in the image: `x`, `y`, `width`, and `height`, in the pixels of the image pass, from the bottom left. Without `--span`, there is one display, the whole image. |
+| `iDisplayCount` | `int` | Only in phonto. The number of displays in `iDisplays`. |
+| `iInput` | struct | Only in phonto. The inputs that the pack names in `[inputs]`, as `iInput.<name>` (see [Your own inputs](#your-own-inputs)). |
+| `iChannel0` to `iChannel7` | `sampler2D` | The channels of the pass (see Packs). A channel without an input is black. Shadertoy has four channels. Channels 4 to 7 are only in phonto. |
+| `iChannelResolution[8]` | `vec3` | The size of each channel in pixels. |
+
+`fragCoord` is in the pixels of the pass, with the origin at the bottom left,
+as on Shadertoy. `iMouse` and `iPointer` are always in the pixels of the image
+pass. In a buffer with its own size, multiply them by
+`iResolution.xy / iImageResolution.xy`.
+
+phonto reads the dark mode setting through the XDG desktop portal. GNOME,
+KDE, and the GTK portal that other desktops use all give it. If no portal
+gives it, `iColorScheme` is 0.
+
+With `iLocation` and `iDate`, a shader can compute the sun. The function
+`sun()` in `examples/procedural/museslabs/common.glsl` gives the height and
+the direction of the sun, and the times of sunrise and sunset. Copy it into
+your pack. Without a `[location]`, `iLocation` is the equator at the middle
+of your time zone, so the sun rises near 06:00 and sets near 18:00. `dump`
+uses the system inputs of the moment that it runs, as it does for `iDate`.
+
+The wallpaper gets the pointer only where no window covers it, because
+Wayland does not tell other clients where the pointer is. A click on the
+wallpaper can also run a command (see [Actions](#actions)). phonto does not
+use keyboard input. `iChannelTime` and `iSampleRate` exist only so that shaders
+that declare sound inputs compile.
+
+### Packs
+
+A pack is a directory with a `manifest.toml`, shaders, and optional images. It
+adds up to eight buffer passes. A buffer pass (a buffer) draws offscreen, and
+other passes can read its output. A buffer can read its own last frame, so it
+can keep state. The image pass draws the result on screen.
+
+```toml
+name = "Life"              # optional, the default is the directory name
+fps = 30                   # frame-rate cap, 0 = refresh rate of the display (default 60)
+render_scale = 0.25        # draw at a fraction of the output size, 0 < scale <= 1 (default 1)
+common = "common.glsl"     # optional, added before the code of every pass
+audio = false              # true = read the audio that the system plays (default false)
+
+[inputs]                   # optional, values from your [[input]] commands, with defaults
+workspace = 1.0            # a float
+wind = [0.0, 0.0]          # a vec2. Lists of 2 to 4 numbers are vec2 to vec4
+
+[[buffer]]                 # 0 to 8, drawn in this order every frame
+name = "cells"
+shader = "cells.glsl"
+channels = [{ buffer = "cells", filter = "nearest", wrap = "repeat" }]
+
+[image]                    # the pass on screen
+shader = "image.glsl"
+channels = ["cells", "noise.png"]
+```
+
+A buffer draws at the size of the image pass, unless it sets one of these
+keys:
+
+| Key | Meaning |
+|---|---|
+| `size = [16, 2]` | A fixed size in pixels, for state such as one texel for each creature. |
+| `height = 300` | A fixed height. The width follows the aspect ratio of the screen, so a simulation behaves the same at all resolutions. |
+| `format` | `rgba16f` (default), `rgba32f` for precise state such as positions, or `rgba8` to use less memory. If the GPU cannot draw to the format, phonto uses a smaller format and writes a warning. |
+| `once = true` | The buffer draws only when the wallpaper starts or the display changes size. Then it keeps the result. Use it for content that does not change, such as a background. |
+
+`channels[n]` is the input of `iChannelN`, up to eight channels. A channel is
+a string or a table. A string is a buffer name, or else the path of an image
+in the pack. A table has exactly one of `buffer = "name"`,
+`texture = "file.png"`, or `video = "file.mp4"` (see [Videos](#videos)), and
+optional sampling keys:
+
+| Key | Values | Default |
+|---|---|---|
+| `filter` | `nearest`, `linear`, `mipmap` (only for textures) | `linear` for buffers and videos, `mipmap` for textures |
+| `wrap` | `clamp`, `repeat`, `mirror` | `clamp` for buffers and videos, `repeat` for textures |
+| `watch` | `true` loads the image again when its file changes (see [Live images](#live-images)) | `false` |
+
+If a buffer already drew in this frame, a pass that reads it gets the output
+of this frame. If a pass reads itself, or a buffer that draws later, it gets
+the output of the last frame. Shadertoy works the same way. By default, a
+buffer stores 16-bit floats, so it can hold values outside 0 to 1. Images
+(PNG, JPEG, and the other formats of the `image` crate) load with
+`uv = (0, 0)` at their bottom-left corner.
+
+Each display gets its own buffers at its own size, so the state of a wallpaper
+is different on each display. With `--span`, all displays share one set of
+buffers. A shader compile error gives the file and the
+line. For example, `0:12` is line 12 of the shader of the pass, and `1:12` is
+line 12 of the common file.
+
+### Your own inputs
+
+A pack can read values that your own commands give. Examples are the
+weather, the CPU load, the count of unread mail, and the workspace. You write
+the commands in your configuration. phonto runs each one with `sh` at its
+interval, and reads the one to four numbers that it prints. Commands come
+only from your configuration, never from a pack, because packs can come from
+the internet.
+
+```toml
+# ~/.config/phonto/config.toml
+[[input]]
+name = "workspace"
+command = "hyprctl activeworkspace -j | jq .id"
+every = 1                  # seconds between two runs
+
+[[input]]
+name = "wind"
+command = "curl -s 'https://api.open-meteo.com/v1/forecast?latitude=37.98&longitude=23.73&current=wind_speed_10m,wind_direction_10m' | jq '.current.wind_speed_10m, .current.wind_direction_10m'"
+every = 900
+```
+
+The pack names the inputs that it reads in `[inputs]`, with a default for
+each. The shader then reads `iInput.workspace` and `iInput.wind`:
+
+```glsl
+float calm = 1.0 - clamp(iInput.wind.x / 40.0, 0.0, 1.0);
+```
+
+Spaces, commas, and brackets separate the numbers, so a JSON list also works.
+`true` and `false` count as 1 and 0. phonto runs only the commands for the
+inputs of the wallpaper that plays. A battery pause also pauses the commands.
+If a command fails or prints no number, the input keeps its last value, and
+phonto writes one warning. A command that runs longer than its interval
+stops, with all the programs that it started. This limit is at least 1 second
+and at most 10 seconds. An input without a command keeps its default. `dump` runs each command once.
+
+### Actions
+
+A click on a pack can run a command, for example to open a program. The pack
+names its actions and draws where each action is. Your configuration gives
+the command of each action. As for inputs, commands come only from your
+configuration, never from a pack.
+
+The pack names its actions in `[actions]`, with the buffer that tells where
+they are:
+
+```toml
+[[buffer]]
+name = "pick"
+shader = "pick.glsl"
+format = "rgba8"           # an actions buffer must use rgba8
+once = true                # the actions do not move, so draw them once
+
+[actions]
+buffer = "pick"
+names = ["browser", "terminal"]
+```
+
+The actions buffer holds the number of the action at each pixel, in its red
+channel. The first name is 1, the second name is 2, and 0 is no action. Write
+the number divided by 255:
+
+```glsl
+// pick.glsl: the left half of the screen is the browser, the right half the terminal.
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+    int action = fragCoord.x < iResolution.x * 0.5 ? 1 : 2;
+    fragColor = vec4(float(action) / 255.0, 0.0, 0.0, 1.0);
+}
+```
+
+When you press the left button, phonto reads the actions buffer under the
+pointer, in the last frame that you saw. Then it runs the command of that
+action. While the pointer is over an action, the cursor is a hand. The other
+passes get the same click in `iMouse`, so the image pass can show it.
+
+Give each action a command in your configuration. The optional `label` is
+the text that the pack shows for the action, for example in a menu:
+
+```toml
+# ~/.config/phonto/config.toml
+[[action]]
+name = "browser"
+label = "Firefox"
+command = "firefox"
+
+[[action]]
+name = "terminal"
+label = "Terminal"
+command = "ghostty"
+```
+
+phonto runs the command with `sh`, in your home directory, in a new session.
+The program continues when phonto stops. A click on an action without a
+command does nothing. phonto writes the names of these actions in the log
+when the wallpaper starts. A pack can name 255 actions at most. An action
+name has letters, digits, `_`, and `-`.
+
+phonto does not draw text. It gives the labels to the shaders of a pack with
+actions, and the pack draws the characters, for example from a font image.
+These functions read the labels. Action 1 is the first name in `names`:
+
+| Function | Result |
+|---|---|
+| `int iActionLabel(int action, int index)` | The Unicode code point at `index` of the label, from 0. It is 0 after the end of the label. |
+| `int iActionLabelLength(int action)` | The number of characters of the label. It is 0 if the action has no label. |
+| `bool iActionHasCommand(int action)` | True if the configuration gives the action a command. |
+
+A label has 32 characters at most, and phonto cuts a longer label. A
+character after U+FFFF shows as `?`. phonto reads the labels when it starts,
+so a buffer with `once = true` can draw them. The functions read the uniforms
+`iActionLabels` and `iActionCount`, so do not declare these names.
+
+### Live images
+
+A texture channel with `watch = true` loads its image again when the file
+changes. A script can then put album art, a weather icon, or text into the
+scene. The path can be absolute, or it can start with `~/`:
+
+```toml
+[image]
+shader = "image.glsl"
+channels = [{ texture = "~/.cache/phonto/cover.jpg", watch = true }]
+```
+
+phonto checks the file each second. Write a new file and rename it into
+place, so that phonto never reads half of an image. If the file does not
+exist yet, the channel is empty until it appears. If the new image does not
+load, the channel keeps the last image, and phonto writes a warning. To show
+text, render it to an image, for example with ImageMagick:
+
+```bash
+magick -background none -fill white -pointsize 64 label:"3 unread" /tmp/mail.png &&
+  mv /tmp/mail.png ~/.cache/phonto/mail.png
+```
+
+### Videos
+
+A channel can show a video file. The GPU decodes it, as for a video
+wallpaper, and the video starts again at its end. The path can be absolute,
+or it can start with `~/`:
+
+```toml
+[image]
+shader = "image.glsl"
+channels = [{ video = "~/Videos/rain.mp4" }]
+```
+
+The video plays at the speed of `iTime`. It stops when time stops, for
+example during a battery pause. As for images, `uv = (0, 0)` is the
+bottom-left corner of the video, and `iChannelResolution` gives its size. The
+channel is black until the first frame comes. The audio of the file does not
+play. `dump` plays the video during the frames before `--at`, as on screen.
+So a buffer that keeps its last frame sees each frame of the video, and the
+image shows the frame at `--at` seconds. If `--at` is longer than the video,
+the video loops. A long `--at` takes more time, because `dump` decodes the
+video up to it.
+
+### Performance
+
+A video costs almost nothing, because the hardware decodes it. A shader costs
+the work that it does for each pixel in each frame, so a complex shader can
+keep the GPU busy. To make a wallpaper cheaper:
+
+- Lower `fps`. 30 fps is enough for slow motion.
+- Lower `render_scale`. At 0.5, phonto draws a quarter of the pixels and
+  scales them up with linear filtering.
+- Give smooth buffers a smaller `height`. Draw content that does not change in
+  a `once = true` buffer.
+- Use `--pause-on-battery` or `--pause-below`. Time stops during the pause and
+  continues after it.
+
 ## Lock screen backgrounds with hyprlock (Wayland)
 
 Hyprlock owns the lock-screen UI, but phonto can render the animated background
@@ -345,6 +814,32 @@ depth = 2
 ```
 
 `depth = 0` scans only the top-level directory. `depth = 1` includes one level of subdirectories, and so on.
+
+### `location`
+
+Your place on Earth, in degrees, with north and east positive. Procedural
+wallpapers get it in `iLocation`, so that they can compute the sun. phonto
+does not send your location anywhere.
+
+```toml
+[location]
+latitude = 37.98
+longitude = 23.73
+```
+
+### `input`
+
+Commands that give procedural wallpapers values, as `iInput.<name>`. Each
+entry has a `name`, a shell `command` that prints one to four numbers, and
+`every`, the seconds between two runs. See
+[Your own inputs](#your-own-inputs).
+
+### `action`
+
+Commands that a click on a procedural wallpaper runs. Each entry has a
+`name`, the name of an action of the wallpaper. It can have a shell
+`command`, and a `label` that the wallpaper shows. Two entries cannot have
+the same name. See [Actions](#actions).
 
 ### Path expansion
 

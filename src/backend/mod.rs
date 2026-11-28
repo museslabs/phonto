@@ -3,16 +3,30 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 use anyhow::Context;
 
+use crate::config::{ActionCommand, InputCommand, Location};
 use crate::displays::DisplayInfo;
 use crate::plan::Playback;
 use crate::scale::ScaleMode;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RunOptions {
     pub pause: PauseMode,
     pub scale: ScaleMode,
     #[cfg(target_os = "linux")]
     pub layer: wayland::LayerMode,
+    /// Draw one procedural wallpaper across all outputs, as one desktop.
+    #[cfg(target_os = "linux")]
+    pub span: bool,
+    /// Where the user is, for the sun of procedural wallpapers. Only the
+    /// Wayland backend draws procedural wallpapers at this time.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub location: Option<Location>,
+    /// The `[[input]]` commands of the configuration.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub inputs: Vec<InputCommand>,
+    /// The `[[action]]` commands of the configuration.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub actions: Vec<ActionCommand>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -23,6 +37,26 @@ pub enum PauseMode {
     BelowPercent(u8),
 }
 
+/// What `phonto dump` writes.
+#[derive(Debug)]
+pub struct DumpRequest {
+    pub path: String,
+    /// Seconds into the video, or seconds of procedural playback.
+    pub at: f64,
+    pub out: PathBuf,
+    /// The image size for procedural wallpapers. Videos keep their own size.
+    pub size: Option<(u32, u32)>,
+    /// Where the user is, for the sun of procedural wallpapers.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub location: Option<Location>,
+    /// The `[[input]]` commands of the configuration.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub inputs: Vec<InputCommand>,
+    /// The `[[action]]` entries of the configuration, for their labels.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub actions: Vec<ActionCommand>,
+}
+
 pub trait Backend {
     /// Enumerate displays this backend can target. Cheap, does not start the runtime.
     fn list_displays() -> anyhow::Result<Vec<DisplayInfo>>;
@@ -31,7 +65,7 @@ pub trait Backend {
     /// returns only on error or graceful shutdown.
     fn run(self, playback: Playback, options: RunOptions) -> anyhow::Result<()>;
 
-    fn dump(self, path: String, at: f64, out: PathBuf) -> anyhow::Result<()>;
+    fn dump(self, request: DumpRequest) -> anyhow::Result<()>;
 }
 
 #[cfg(target_os = "linux")]
