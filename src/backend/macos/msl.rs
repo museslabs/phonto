@@ -2,8 +2,7 @@
 //!
 //! glslang compiles the GLSL to SPIR-V, and SPIRV-Cross writes MSL. The GLSL
 //! is the source that `procedural::fragment_shader` builds for every backend.
-//! Nothing here changes the code of the user. Only some of its names change:
-//! those of its functions and structs, and those that GLSL ES 3.10 reserves.
+//! Nothing here changes the code of the user. Only its names change.
 
 use std::collections::HashSet;
 
@@ -24,7 +23,6 @@ const UNIFORM_BLOCK: &str = "PhontoUniforms";
 /// The texture of the action labels, for a pack with actions.
 const ACTION_LABELS: &str = "iActionLabels";
 
-/// Goes before the name of every function and struct of a shader in MSL.
 /// Metal declares names that GLSL does not have, such as the functions
 /// `atan2`, `log10` and `select`, and the reserved types `quad` and `complex`.
 /// A shader function or struct with such a name does not compile, or its
@@ -108,9 +106,8 @@ const RESERVED_IN_310: &str = "
 
 // SPIR-V opcodes.
 const OP_NAME: u32 = 5;
+const OP_MEMBER_NAME: u32 = 6;
 const OP_ENTRY_POINT: u32 = 15;
-const OP_TYPE_STRUCT: u32 = 30;
-const OP_FUNCTION: u32 = 54;
 
 /// The words of the SPIR-V header, before the first instruction.
 const SPIRV_HEADER: usize = 5;
@@ -213,6 +210,10 @@ fn original_name(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+fn unprefixed(name: &str) -> &str {
+    name.strip_prefix(NAME_PREFIX).unwrap_or(name)
+}
+
 /// The compiler log, without the empty debug log that glslang adds.
 fn glslang_error(e: GlslangError) -> anyhow::Error {
     match e {
@@ -239,8 +240,7 @@ fn to_msl(spirv: &[u32]) -> anyhow::Result<Translated> {
         let read = compiler
             .active_buffer_ranges(r.id)
             .map_err(spirv_cross_error)?;
-        // `prefix_names` renamed the structs of the blocks too.
-        let name = r.name.strip_prefix(NAME_PREFIX).unwrap_or(&r.name);
+        let name = unprefixed(&r.name);
         if name != UNIFORM_BLOCK {
             // glslang binds a block of the shader where phonto's block is.
             // Metal would then read both from the same bytes.
@@ -261,7 +261,7 @@ fn to_msl(spirv: &[u32]) -> anyhow::Result<Translated> {
                 if !read.iter().any(|range| range.index as usize == m.index) {
                     continue;
                 }
-                let name = m.name.map(|n| n.to_string()).unwrap_or_default();
+                let name = unprefixed(m.name.as_deref().unwrap_or_default()).to_string();
                 let offset = m.offset as usize;
                 let member_type = compiler.type_description(m.id).map_err(spirv_cross_error)?;
                 // The inputs of a pack are the fields of the struct `iInput`.
@@ -270,7 +270,7 @@ fn to_msl(spirv: &[u32]) -> anyhow::Result<Translated> {
                     uniforms.extend(fields.members.into_iter().map(|f| Member {
                         name: format!(
                             "{name}.{}",
-                            original_name(f.name.as_deref().unwrap_or_default())
+                            original_name(unprefixed(f.name.as_deref().unwrap_or_default()))
                         ),
                         offset: offset + f.offset as usize,
                         stride: f.array_stride.unwrap_or(0) as usize,
@@ -293,9 +293,10 @@ fn to_msl(spirv: &[u32]) -> anyhow::Result<Translated> {
         .resources_for_type(ResourceType::SampledImage)
         .map_err(spirv_cross_error)?
     {
-        if r.name == ACTION_LABELS {
+        let name = unprefixed(&r.name);
+        if name == ACTION_LABELS {
             labels = Some(r.id);
-        } else if let Some(n) = channel_index(&r.name) {
+        } else if let Some(n) = channel_index(name) {
             channels.push((n, r.id));
         }
     }
@@ -341,42 +342,33 @@ fn to_msl(spirv: &[u32]) -> anyhow::Result<Translated> {
     })
 }
 
-/// Adds [`NAME_PREFIX`] to the debug name of every function and struct,
-/// except the entry point. SPIRV-Cross writes MSL with these names.
+/// SPIRV-Cross writes MSL with these names.
 fn prefix_names(spirv: &[u32]) -> Vec<u32> {
     let Some(instructions) = instructions(spirv) else {
         // glslang writes valid SPIR-V. If it did not, SPIRV-Cross reports it.
         return spirv.to_vec();
     };
-    let mut renamed = HashSet::new();
-    let mut entry_points = HashSet::new();
-    for inst in &instructions {
-        match (inst[0] & 0xffff, inst.get(1), inst.get(2)) {
-            (OP_TYPE_STRUCT, Some(&id), _) | (OP_FUNCTION, _, Some(&id)) => {
-                renamed.insert(id);
-            }
-            (OP_ENTRY_POINT, _, Some(&id)) => {
-                entry_points.insert(id);
-            }
-            _ => {}
-        }
-    }
+    let entry_points: HashSet<u32> = instructions
+        .iter()
+        .filter(|inst| inst[0] & 0xffff == OP_ENTRY_POINT)
+        .filter_map(|inst| inst.get(2).copied())
+        .collect();
 
     let mut out = spirv[..SPIRV_HEADER].to_vec();
     for inst in instructions {
-        match inst.get(1) {
-            Some(id)
-                if inst[0] & 0xffff == OP_NAME
-                    && renamed.contains(id)
-                    && !entry_points.contains(id) =>
-            {
-                let name = encode_string(&format!("{NAME_PREFIX}{}", decode_string(&inst[2..])));
-                out.push(((2 + name.len() as u32) << 16) | OP_NAME);
-                out.push(*id);
-                out.extend(name);
+        let name_at = match *inst {
+            [op, id, ..] if op & 0xffff == OP_NAME && !entry_points.contains(&id) => 2,
+            [op, _, _, ..] if op & 0xffff == OP_MEMBER_NAME => 3,
+            _ => {
+                out.extend_from_slice(inst);
+                continue;
             }
-            _ => out.extend_from_slice(inst),
-        }
+        };
+        let (head, name) = inst.split_at(name_at);
+        let name = encode_string(&format!("{NAME_PREFIX}{}", decode_string(name)));
+        out.push((((head.len() + name.len()) as u32) << 16) | (head[0] & 0xffff));
+        out.extend_from_slice(&head[1..]);
+        out.extend(name);
     }
     out
 }
