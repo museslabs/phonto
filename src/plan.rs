@@ -357,4 +357,28 @@ mod tests {
         let err = pause_behind(&config).unwrap_err();
         assert!(format!("{err:#}").contains("display `LG`"), "{err:#}");
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_wayland_only_alias_pauses_no_display() {
+        let config = config(&format!(
+            "[[alias]]\nname = \"desk\"\nwayland = \"DP-1\"\n\n\
+             [[display]]\nid = \"desk\"\npause_behind = {{ on_power = \"none\" }}\n\n\
+             {ONLY_PAUSE_BEHIND}"
+        ));
+        let plan = pause_behind(&config).unwrap();
+        assert_eq!(plan.displays.keys().collect::<Vec<_>>(), ["b"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_first_alias_of_a_name_decides_its_display() {
+        let config = config(
+            "[[alias]]\nname = \"desk\"\nmacos = \"LG\"\n\n\
+             [[alias]]\nname = \"desk\"\nwayland = \"DP-1\"\n\n\
+             [[display]]\nid = \"desk\"\npause_behind = { on_power = \"none\" }\n",
+        );
+        let plan = pause_behind(&config).unwrap();
+        assert_eq!(plan.displays.keys().collect::<Vec<_>>(), ["LG"]);
+    }
 }
