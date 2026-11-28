@@ -239,6 +239,18 @@ pub fn pause_behind(config: &Config) -> anyhow::Result<PauseBehindPlan> {
         let Some(own) = d.pause_behind else {
             continue;
         };
+        if config
+            .alias
+            .iter()
+            .find(|a| a.name == d.id)
+            .is_some_and(|a| a.macos.is_none())
+        {
+            log::warn!(
+                "alias `{}` has no `macos = \"...\"` entry, so its `pause_behind` applies to no display",
+                d.id
+            );
+            continue;
+        }
         let native_id = resolve_id(&d.id, &config.alias)?;
         if displays.contains_key(&native_id) {
             bail!("display `{native_id}` has `pause_behind` in two [[display]] entries");
