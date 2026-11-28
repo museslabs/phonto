@@ -318,6 +318,7 @@ phonto examples/procedural/battery       # your battery as the tide in a glass
 phonto examples/procedural/system        # the load of your computer, from input commands
 phonto examples/procedural/album         # the cover of the music that plays, as a live image
 phonto examples/procedural/zero-tv       # a menu of tapes: a click on a tape opens a program
+phonto examples/procedural/keyboard      # a dot that the arrow keys or WASD move
 phonto --span examples/procedural/koi    # one pond across all your displays
 ```
 
@@ -332,6 +333,7 @@ Each example shows some of the features:
 | battery | `iBattery`, the dark mode setting, a text atlas |
 | system | input commands, buffers, the dark mode setting |
 | album | a live image, an input command, audio |
+| keyboard | a keyboard channel, a buffer that reads itself |
 | zero-tv | a video, actions with labels, the pointer, buffers |
 
 The koi pond shows the most features. If you click the water, food drops, and
@@ -420,8 +422,9 @@ reads it through the GStreamer PulseAudio plugin, which also works with
 PipeWire through `pipewire-pulse`. On Debian or Ubuntu, install
 `gstreamer1.0-pulseaudio`. Arch and Fedora include the plugin in their
 GStreamer good plugins package.
-phonto selects the default output when it starts. If you change outputs,
-restart phonto. If the monitor is not available, phonto logs a warning and
+phonto asks the sound server for the default output every 2 seconds. When
+you change the default output, phonto reads the monitor of the new output.
+If the monitor is not available, phonto logs a warning and
 draws the scene without audio. `dump` always draws without audio. While
 phonto reads the monitor, the sound server keeps your output device awake. A
 battery pause stops the reading.
@@ -439,8 +442,7 @@ You can use a procedural wallpaper everywhere that you can use a video path:
 hyprlock recipe and `--shader` post-processing. `--rand` also picks pack
 directories, and `.glsl` files that have a `mainImage` function. A procedural
 wallpaper always fills the screen, so `--scale` has no effect. The same
-wallpapers run on Wayland and macOS. Only a pack with a keyboard channel needs
-macOS.
+wallpapers run on Wayland and macOS.
 
 ### One scene across all displays
 
@@ -544,7 +546,7 @@ For wallpapers that you click, such as the koi pond, set System Settings >
 Desktop & Dock > Click wallpaper to reveal desktop to "Only in Stage Manager".
 
 A click on the wallpaper can also run a command (see [Actions](#actions)).
-phonto reads the keyboard only on macOS, through a keyboard channel (see
+A pack can also read the keyboard, through a keyboard channel (see
 [Packs](#packs)). `iChannelTime` and `iSampleRate` exist only so that shaders
 that declare sound inputs compile.
 
@@ -598,16 +600,31 @@ in the pack. A table has exactly one of `buffer = "name"`,
 | `wrap` | `clamp`, `repeat`, `mirror` | `clamp` for buffers, videos, and the keyboard, `repeat` for textures |
 | `watch` | `true` loads the image again when its file changes (see [Live images](#live-images)) | `false` |
 
-The keyboard channel works only on macOS so far. It is the keyboard texture
-of Shadertoy: 256 texels wide, one for each JavaScript key code, and 3 rows
-high. Row 0 is 1 while a key is down, row 1 is 1 on the frame after a press,
-and row 2 flips on each press. Read it with
-`texelFetch(iChannelN, ivec2(code, row), 0).x`. A wallpaper only gets the
-keyboard after you click the desktop, as a Shadertoy canvas gets it after a
-click. A click on a window, or a switch to another app, gives the keyboard
-back. While the wallpaper has it, Finder's desktop shortcuts, such as
-<kbd>⇧⌘N</kbd> for a new folder, do not work. phonto needs no permission for
-this.
+The keyboard channel is the keyboard texture of Shadertoy: 256 texels wide,
+one for each JavaScript key code, and 3 rows high. Row 0 is 1 while a key is
+down, row 1 is 1 on the frame after a press, and row 2 flips on each press.
+Read it with `texelFetch(iChannelN, ivec2(code, row), 0).x`. The code of a
+key follows the place of the key on a US keyboard, whatever your layout. For
+example, the key to the right of <kbd>Tab</kbd> is always 81, the code of Q.
+
+A wallpaper gets the keyboard only after you click it, as a Shadertoy canvas
+gets it after a click. phonto needs no permission for this.
+
+On Wayland, the keyboard goes back to a window when the compositor focuses
+that window, for example after a click on it. On Hyprland, the wallpaper gets
+the keyboard when the pointer moves after the click. A switch to another
+workspace gives the keyboard back. With the default `input:follow_mouse = 1`,
+a move of the pointer onto a window also gives it back. With
+`input:follow_mouse = 3`, Hyprland never gives the keyboard to the wallpaper.
+The shortcuts of your compositor still work while the wallpaper has the
+keyboard. The compositor must support version 4 of the layer shell protocol.
+If it does not, phonto writes a warning, and the keyboard channel shows no
+keys.
+
+On macOS, you click the desktop to give the wallpaper the keyboard. A click
+on a window, or a switch to another app, gives the keyboard back. While the
+wallpaper has it, Finder's desktop shortcuts, such as <kbd>⇧⌘N</kbd> for a new
+folder, do not work.
 
 If a buffer already drew in this frame, a pass that reads it gets the output
 of this frame. If a pass reads itself, or a buffer that draws later, it gets
@@ -696,7 +713,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 When you press the left button, phonto reads the actions buffer under the
 pointer, in the last frame that you saw. Then it runs the command of that
 action. The other passes get the same click in `iMouse`, so the image pass
-can show it. On Wayland, the cursor is a hand while the pointer is over an
+can show it. A click during a battery pause runs no action, and `iMouse` does
+not get it. On Wayland, the cursor is a hand while the pointer is over an
 action.
 
 On macOS, only a click on the desktop runs an action, as only such a click

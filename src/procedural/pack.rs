@@ -154,7 +154,6 @@ pub enum Input {
     Video(usize),
     /// The keyboard, as on Shadertoy: a texture 256 key codes wide and 3
     /// rows high.
-    #[cfg(target_os = "macos")]
     Keyboard,
 }
 
@@ -259,7 +258,6 @@ struct ChannelTable {
     buffer: Option<String>,
     texture: Option<String>,
     video: Option<String>,
-    #[cfg(target_os = "macos")]
     #[serde(default)]
     keyboard: bool,
     filter: Option<String>,
@@ -484,10 +482,7 @@ fn resolve_channel(
             t.buffer.as_deref(),
             t.texture.as_deref(),
             t.video.as_deref(),
-            #[cfg(target_os = "macos")]
             t.keyboard,
-            #[cfg(not(target_os = "macos"))]
-            false,
             t.filter.as_deref(),
             t.wrap.as_deref(),
             t.watch,
@@ -516,12 +511,8 @@ fn resolve_channel(
             let i = sources.video(&dir.join(crate::config::expand_tilde(path)))?;
             (Input::Video(i), Filter::Linear, Wrap::Clamp)
         }
-        #[cfg(target_os = "macos")]
         (None, None, None, true) => (Input::Keyboard, Filter::Nearest, Wrap::Clamp),
-        #[cfg(target_os = "macos")]
         _ => bail!("set exactly one of `buffer`, `texture`, `video`, or `keyboard`"),
-        #[cfg(not(target_os = "macos"))]
-        _ => bail!("set exactly one of `buffer`, `texture`, or `video`"),
     };
 
     let filter = filter
@@ -924,7 +915,6 @@ mod tests {
         assert_eq!(&pack.textures[0].rgba[..4], &[0, 0, 255, 255]);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn keyboard_channel() {
         let dir = TempDir::new("keyboard");

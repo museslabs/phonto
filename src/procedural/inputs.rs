@@ -307,6 +307,15 @@ impl Pointer {
             .collect()
     }
 
+    /// Forgets the presses that no frame and no action took yet, when a
+    /// pause ends. Otherwise a press from the pause lands on the first frame,
+    /// minutes late, and runs its action then.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn forget_clicks(&mut self) {
+        self.presses.clear();
+        self.clicked = false;
+    }
+
     /// The place of the pointer while it is over the wallpaper, as a
     /// fraction of `area` from the bottom left.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -499,6 +508,23 @@ mod tests {
             p.button(BTN_LEFT, false);
         }
         assert_eq!(p.take_presses(area).len(), MAX_PRESSES);
+    }
+
+    #[test]
+    fn forgotten_clicks_reach_no_frame_and_no_action() {
+        let area = [0.0, 0.0, 200.0, 100.0];
+        let mut p = Pointer::default();
+        p.enter(50.0, 25.0);
+        p.button(BTN_LEFT, true);
+        p.button(BTN_LEFT, false);
+        p.forget_clicks();
+        assert!(p.take_presses(area).is_empty());
+        let (mouse, _) = p.uniforms(area, (200, 100), true);
+        assert!(mouse[3] < 0.0, "the click is not new: {mouse:?}");
+        // A press after the pause counts again.
+        p.button(BTN_LEFT, true);
+        assert_eq!(p.take_presses(area), [[0.25, 0.75]]);
+        assert!(p.uniforms(area, (200, 100), true).0[3] > 0.0);
     }
 
     #[test]

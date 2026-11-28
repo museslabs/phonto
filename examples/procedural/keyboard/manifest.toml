@@ -1,5 +1,6 @@
-# A macOS pack. Only macOS has keyboard channels so far, and Wayland refuses
-# to load the pack.
+# The arrow keys or WASD move a dot, and Space changes its color. The strip
+# at the bottom shows the keys that are down. Click the wallpaper first, so
+# that it gets the keyboard.
 
 name = "Keyboard demo"
 fps = 60
