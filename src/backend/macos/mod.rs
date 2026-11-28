@@ -84,7 +84,9 @@ impl Backend for MacosBackend {
             return procedural::dump(request, color_scheme::uniform(self.mtm));
         }
         if request.size.is_some() {
-            log::warn!("--size only applies to procedural wallpapers. Videos keep their own size.");
+            log::warn!(
+                "--size only applies to interactive wallpapers. Videos keep their own size."
+            );
         }
         let DumpRequest { path, at, out, .. } = request;
 
@@ -181,7 +183,7 @@ impl Backend for MacosBackend {
                 let content = sources.open(mtm, &path, &options)?;
                 if options.span && matches!(content, Content::Video(_)) {
                     log::warn!(
-                        "--span only applies to procedural wallpapers. A video plays on each display."
+                        "--span only applies to interactive wallpapers. A video plays on each display."
                     );
                 }
                 for screen in screens.iter() {
@@ -443,7 +445,7 @@ pub(super) fn build_surface(
         // A procedural wallpaper always fills the screen. `--scale` is only
         // for videos.
         Content::Procedural { source, .. } => {
-            let gpu = gpu.context("a procedural wallpaper needs the GPU")?;
+            let gpu = gpu.context("an interactive wallpaper needs the GPU")?;
             SurfaceLayer::Procedural(Box::new(ProceduralSurface::new(
                 gpu,
                 &content_view,

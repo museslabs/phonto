@@ -44,22 +44,36 @@ pub enum Playback {
     PerDisplay(Vec<ResolvedAssignment>),
 }
 
+impl Playback {
+    /// The path or URL of each wallpaper that plays.
+    pub fn paths(&self) -> Vec<&str> {
+        match self {
+            Playback::Mirror(path) => vec![path.as_str()],
+            Playback::PerDisplay(assignments) => {
+                assignments.iter().map(|a| a.path.as_str()).collect()
+            }
+        }
+    }
+}
+
 pub fn resolve(
     plan: Plan,
     search_paths: &[SearchPath],
     yt_dlp: &YtDlpOpts,
+    gallery: Option<&str>,
 ) -> anyhow::Result<Playback> {
     match plan {
         Plan::Mirror(source) => Ok(Playback::Mirror(resolve_source(
             source,
             search_paths,
             yt_dlp,
+            gallery,
         )?)),
         Plan::PerDisplay(assignments) => {
             let resolved: Vec<ResolvedAssignment> = assignments
                 .into_iter()
                 .map(|a| {
-                    let path = resolve_source(a.source, search_paths, yt_dlp)?;
+                    let path = resolve_source(a.source, search_paths, yt_dlp, gallery)?;
                     Ok(ResolvedAssignment {
                         native_id: a.native_id,
                         path,
@@ -71,13 +85,21 @@ pub fn resolve(
     }
 }
 
+/// The path or URL that the backend plays for `source`. `gallery` is the
+/// `gallery` key of the configuration.
 pub fn resolve_source(
     source: Source,
     search_paths: &[SearchPath],
     yt_dlp: &YtDlpOpts,
+    gallery: Option<&str>,
 ) -> anyhow::Result<String> {
     match source {
         Source::Path(p) => {
+            // A wallpaper of the gallery plays from its installed copy, or
+            // else from a download in a temporary folder.
+            if let Some(path) = crate::gallery::resolve(&p, gallery)? {
+                return Ok(path);
+            }
             if let Some(yt_url) = crate::config::maybe_youtube_url(&p) {
                 return resolve_with_ytdlp(&yt_url, yt_dlp);
             }

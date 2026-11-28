@@ -29,7 +29,8 @@ pub use glsl::{PassKind, fragment_shader, source_ids_help};
 pub use inputs::BTN_LEFT;
 pub use inputs::{Clock, FrameInputs, FrameLimiter, MAX_DISPLAYS, Pointer, local_date, location};
 pub use pack::{
-    BufferFormat, BufferSize, Filter, Input, MANIFEST, MAX_CHANNELS, Pack, Pass, Texture, Wrap,
+    BufferFormat, BufferSize, Filter, Input, MANIFEST, MAX_CHANNELS, NamedInput, Pack, Pass,
+    Texture, Wrap, declared,
 };
 pub use video::{Decoded, VideoQueue};
 pub use watch::TextureWatcher;

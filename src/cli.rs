@@ -31,6 +31,51 @@ pub enum Command {
     /// Dump image from video input
     Dump(DumpArgs),
 
+    /// Browse the wallpapers of the Pinakothiki gallery.
+    #[command(subcommand)]
+    Gallery(GalleryCommand),
+
+    /// List the wallpapers that `phonto install` downloaded.
+    List {
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Download a wallpaper from the Pinakothiki gallery and keep it.
+    Install {
+        /// The wallpaper: its id, such as `koi`, `pinakothiki:koi`, or the
+        /// URL of its page in the gallery.
+        #[arg(value_name = "WALLPAPER")]
+        wallpaper: String,
+
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove a wallpaper that `phonto install` downloaded. Its settings
+    /// stay, unless --remove-settings.
+    Uninstall {
+        /// The wallpaper: its id, such as `koi`, `pinakothiki:koi`, or the
+        /// URL of its page in the gallery.
+        #[arg(value_name = "WALLPAPER")]
+        wallpaper: String,
+
+        /// Remove the settings of the wallpaper too.
+        #[arg(long)]
+        remove_settings: bool,
+
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show or change the settings of a wallpaper from the gallery: the
+    /// commands of its inputs and its actions. Without a command, it shows
+    /// them.
+    Settings(SettingsArgs),
+
     /// Transcode a video and register it as the macOS lock-screen
     /// wallpaper (HEVC Main10 + temporal sub-layers; survives multiple
     /// lock cycles).
@@ -47,6 +92,187 @@ pub enum Command {
         #[arg(long)]
         remove: bool,
     },
+}
+
+impl Command {
+    /// True if the command prints JSON, so its errors are JSON too.
+    pub fn json(&self) -> bool {
+        match self {
+            Command::Gallery(command) => command.json(),
+            Command::List { json } | Command::Install { json, .. } => *json,
+            Command::Uninstall { json, .. } => *json,
+            Command::Settings(args) => {
+                args.json || args.command.as_ref().is_some_and(SettingsCommand::json)
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GalleryCommand {
+    /// List the wallpapers of the gallery.
+    List {
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Find the wallpapers that have all the words in their id, title,
+    /// author, summary, or tags. Case does not matter.
+    Search {
+        #[arg(required = true, value_name = "WORDS")]
+        words: Vec<String>,
+
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show a wallpaper of the gallery, with its inputs and its actions.
+    Show {
+        /// The wallpaper: its id, such as `koi`, `pinakothiki:koi`, or the
+        /// URL of its page in the gallery.
+        #[arg(value_name = "WALLPAPER")]
+        wallpaper: String,
+
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+impl GalleryCommand {
+    fn json(&self) -> bool {
+        match self {
+            GalleryCommand::List { json }
+            | GalleryCommand::Search { json, .. }
+            | GalleryCommand::Show { json, .. } => *json,
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+pub struct SettingsArgs {
+    /// The wallpaper: its id, such as `koi`, `pinakothiki:koi`, or the URL of
+    /// its page in the gallery.
+    #[arg(value_name = "WALLPAPER")]
+    pub wallpaper: String,
+
+    #[command(subcommand)]
+    pub command: Option<SettingsCommand>,
+
+    /// Print one JSON document.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SettingsCommand {
+    /// Open the settings in your editor: $VISUAL, else $EDITOR, else vi.
+    Edit,
+
+    /// Print the path of the settings file.
+    Path {
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Set the command of an input.
+    SetInput {
+        /// The name of the input.
+        name: String,
+
+        /// The shell command that gives the value.
+        #[arg(
+            long,
+            required_unless_present = "suggested",
+            conflicts_with = "suggested"
+        )]
+        command: Option<String>,
+
+        /// Seconds between two runs. By default, the `every` of the suggested
+        /// command, or 1.
+        #[arg(long, requires = "command", conflicts_with = "suggested")]
+        every: Option<f64>,
+
+        /// Copy the command that the wallpaper suggests.
+        #[arg(long)]
+        suggested: bool,
+
+        /// Which suggested command to copy, from 1, when there are several.
+        #[arg(
+            long,
+            requires = "suggested",
+            conflicts_with = "command",
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        pick: Option<u32>,
+
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove the command of an input from the settings.
+    UnsetInput {
+        /// The name of the input.
+        name: String,
+
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Set the label or the command of an action. What you leave out stays.
+    SetAction {
+        /// The name of the action.
+        name: String,
+
+        /// The text that the wallpaper shows for the action.
+        #[arg(long)]
+        label: Option<String>,
+
+        /// The shell command that a click runs.
+        #[arg(long)]
+        command: Option<String>,
+
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove an action from the settings.
+    UnsetAction {
+        /// The name of the action.
+        name: String,
+
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Delete the settings file.
+    Reset {
+        /// Print one JSON document.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+impl SettingsCommand {
+    pub fn json(&self) -> bool {
+        match self {
+            SettingsCommand::Edit => false,
+            SettingsCommand::Path { json }
+            | SettingsCommand::SetInput { json, .. }
+            | SettingsCommand::UnsetInput { json, .. }
+            | SettingsCommand::SetAction { json, .. }
+            | SettingsCommand::UnsetAction { json, .. }
+            | SettingsCommand::Reset { json } => *json,
+        }
+    }
 }
 
 // Flags for the default mode (no subcommand): playing a wallpaper.
@@ -66,8 +292,9 @@ pub struct PlayArgs {
 #[derive(Args, Debug)]
 pub struct SourceArgs {
     /// Path to the video file, streaming URL (http, https, rtsp, rtmp),
-    /// YouTube URL (resolved via yt-dlp), or procedural wallpaper (a `.glsl`
-    /// file, or a directory with a manifest.toml).
+    /// YouTube URL (resolved via yt-dlp), interactive wallpaper (a `.glsl`
+    /// file, or a directory with a manifest.toml), or a wallpaper from the
+    /// Pinakothiki gallery (`pinakothiki:<id>`, or the URL of its page).
     #[arg(conflicts_with_all = ["rand", "display", "display_rand"])]
     path: Option<String>,
 
@@ -121,7 +348,7 @@ impl From<SourceArgs> for Request {
 // How and where frames are drawn.
 #[derive(Args, Debug)]
 pub struct RenderArgs {
-    /// How to fit the video to the screen. Procedural wallpapers always fill it.
+    /// How to fit the video to the screen. Interactive wallpapers always fill it.
     #[arg(long, value_enum, default_value_t = ScaleMode::Fill)]
     pub scale: ScaleMode,
 
@@ -130,7 +357,7 @@ pub struct RenderArgs {
     #[arg(long, value_enum, default_value_t = crate::backend::wayland::LayerMode::Background)]
     pub layer: crate::backend::wayland::LayerMode,
 
-    /// Draw a procedural wallpaper across all displays as one scene, instead
+    /// Draw an interactive wallpaper across all displays as one scene, instead
     /// of one copy on each display.
     #[arg(long, conflicts_with_all = ["display", "display_rand"])]
     pub span: bool,
@@ -208,7 +435,8 @@ impl From<YtDlpArgs> for YtDlpOpts {
 
 #[derive(Args, Debug)]
 pub struct DumpArgs {
-    /// Video, URL, or procedural wallpaper to take the frame from.
+    /// Video, URL, interactive wallpaper, or `pinakothiki:<id>` to take the
+    /// frame from.
     #[arg()]
     pub path: String,
 
@@ -222,7 +450,7 @@ pub struct DumpArgs {
     #[arg(long, value_name = "SECONDS", default_value = "0.0", value_parser = parse_seek_seconds)]
     pub at: f64,
 
-    /// Image size for procedural wallpapers (default 1920x1080). Videos keep
+    /// Image size for interactive wallpapers (default 1920x1080). Videos keep
     /// their own size.
     #[arg(long, value_name = "WIDTHxHEIGHT", value_parser = parse_size)]
     pub size: Option<(u32, u32)>,

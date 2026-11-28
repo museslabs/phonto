@@ -333,7 +333,7 @@ impl Program {
     /// Compiles `pack`. `actions` gives the labels of its actions.
     pub fn compile(gpu: &Gpu, pack: &Pack, actions: &[ActionCommand]) -> anyhow::Result<Self> {
         Self::build(gpu, pack, actions)
-            .with_context(|| format!("procedural wallpaper `{}`", pack.name))
+            .with_context(|| format!("interactive wallpaper `{}`", pack.name))
     }
 
     fn build(gpu: &Gpu, pack: &Pack, actions: &[ActionCommand]) -> anyhow::Result<Self> {

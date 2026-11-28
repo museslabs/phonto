@@ -159,7 +159,7 @@ impl Program {
         };
         if let Err(e) = program.build(gl, pack) {
             program.destroy(gl);
-            return Err(e).with_context(|| format!("procedural wallpaper `{}`", pack.name));
+            return Err(e).with_context(|| format!("interactive wallpaper `{}`", pack.name));
         }
         Ok(program)
     }

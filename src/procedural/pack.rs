@@ -1,5 +1,5 @@
-//! Loads procedural wallpapers from disk. The README describes the format
-//! of `manifest.toml`.
+//! Loads procedural wallpapers from disk. The docs describe the format of
+//! `manifest.toml`: https://museslabs.org/docs/phonto/packs/
 
 use std::collections::HashMap;
 use std::fmt;
@@ -554,13 +554,7 @@ fn parse_actions(
         );
     }
     for (i, name) in m.names.iter().enumerate() {
-        let valid = !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-        if !valid {
-            bail!("`{name}` is not a valid action name. Use letters, digits, _, and -");
-        }
+        check_action_name(name)?;
         if m.names[..i].contains(name) {
             bail!("two actions are named `{name}`");
         }
@@ -569,6 +563,41 @@ fn parse_actions(
         buffer,
         names: m.names,
     })
+}
+
+/// The inputs and the names of the actions in the text of a manifest. It
+/// reads no other file, so `phonto settings` can show what a pack reads
+/// before it downloads the pack.
+pub fn declared(manifest: &str) -> anyhow::Result<(Vec<NamedInput>, Vec<String>)> {
+    #[derive(Deserialize)]
+    struct Declared {
+        #[serde(default)]
+        inputs: toml::Table,
+        actions: Option<DeclaredActions>,
+    }
+    #[derive(Deserialize)]
+    struct DeclaredActions {
+        #[serde(default)]
+        names: Vec<String>,
+    }
+    let declared: Declared = toml::from_str(manifest)?;
+    let inputs = parse_inputs(&declared.inputs).context("[inputs]")?;
+    let actions = declared.actions.map(|a| a.names).unwrap_or_default();
+    for name in &actions {
+        check_action_name(name).context("[actions]")?;
+    }
+    Ok((inputs, actions))
+}
+
+fn check_action_name(name: &str) -> anyhow::Result<()> {
+    let valid = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !valid {
+        bail!("`{name}` is not a valid action name. Use letters, digits, _, and -");
+    }
+    Ok(())
 }
 
 fn parse_inputs(table: &toml::Table) -> anyhow::Result<Vec<NamedInput>> {

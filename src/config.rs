@@ -1,10 +1,16 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_CONFIG: &str = "\
 # phonto configuration
+#
+# gallery: where `phonto install` and `pinakothiki:<id>` get wallpapers. The
+# default is Pinakothiki. The PHONTO_GALLERY environment variable overrides
+# it. It is a top-level key, so keep it above the first [table].
+#
+# gallery = \"https://pinakothiki.museslabs.org\"
 #
 # search_paths: directories scanned by --rand and by per-display `random = true`.
 # Each entry has a path and a depth (0 = top-level only).
@@ -65,6 +71,8 @@ const DEFAULT_CONFIG: &str = "\
 # input: a command that gives procedural wallpapers a value. phonto runs it
 # with sh every `every` seconds, while a wallpaper that reads the input plays.
 # The command prints one to four numbers. The wallpaper reads iInput.<name>.
+# A wallpaper from the gallery can also have its own commands, which win over
+# these: see `phonto settings <id>`.
 #
 # [[input]]
 # name = \"workspace\"
@@ -172,7 +180,7 @@ pub struct Location {
 }
 
 /// A command that gives procedural wallpapers the value of an input.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct InputCommand {
     pub name: String,
@@ -184,17 +192,17 @@ pub struct InputCommand {
 
 /// A command that a click on a procedural wallpaper runs, and the label that
 /// the wallpaper can show for it.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionCommand {
     /// The name of an action of the wallpaper.
     pub name: String,
-    /// A shell command. Without it, a click does nothing.
-    #[serde(default)]
-    pub command: Option<String>,
     /// The text that the wallpaper shows for the action.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// A shell command. Without it, a click does nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,9 +222,13 @@ pub struct Config {
     #[serde(default)]
     #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub pause_behind: PauseBehind,
+    /// The base URL of the wallpaper gallery. `PHONTO_GALLERY` overrides it.
+    #[serde(default)]
+    pub gallery: Option<String>,
 }
 
-fn config_path() -> PathBuf {
+/// `$XDG_CONFIG_HOME/phonto`, or `~/.config/phonto`.
+pub fn config_dir() -> PathBuf {
     std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -225,7 +237,10 @@ fn config_path() -> PathBuf {
                 .unwrap_or_else(|_| PathBuf::from(".config"))
         })
         .join("phonto")
-        .join("config.toml")
+}
+
+pub fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
 }
 
 pub fn is_url(s: &str) -> bool {
@@ -297,7 +312,14 @@ pub fn load() -> anyhow::Result<Config> {
 
 fn parse(contents: &str) -> anyhow::Result<Config> {
     let config: Config = toml::from_str(contents).with_context(|| "failed to parse config")?;
-    for input in &config.inputs {
+    check_commands(&config.inputs, &config.actions)?;
+    Ok(config)
+}
+
+/// Checks `[[input]]` and `[[action]]` entries, of the configuration or of
+/// the settings of a wallpaper.
+pub fn check_commands(inputs: &[InputCommand], actions: &[ActionCommand]) -> anyhow::Result<()> {
+    for input in inputs {
         if !(input.every.is_finite() && input.every > 0.0) {
             bail!(
                 "[[input]] `{}`: `every` must be a number of seconds above 0 (got {})",
@@ -306,12 +328,12 @@ fn parse(contents: &str) -> anyhow::Result<Config> {
             );
         }
     }
-    for (i, action) in config.actions.iter().enumerate() {
-        if config.actions[..i].iter().any(|a| a.name == action.name) {
+    for (i, action) in actions.iter().enumerate() {
+        if actions[..i].iter().any(|a| a.name == action.name) {
             bail!("two [[action]] entries are named `{}`", action.name);
         }
     }
-    Ok(config)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -362,6 +384,16 @@ mod tests {
             parse("[pause_behind]\non_ac = \"any\"\n").unwrap_err()
         );
         assert!(err.contains("expected `on_battery` or `on_power`"), "{err}");
+    }
+
+    #[test]
+    fn gallery_is_a_top_level_key() {
+        assert_eq!(parse("").unwrap().gallery, None);
+        let config = parse("gallery = \"http://localhost:8000\"\n[[display]]\nid = \"a\"\n");
+        assert_eq!(
+            config.unwrap().gallery.as_deref(),
+            Some("http://localhost:8000")
+        );
     }
 
     #[test]
